@@ -1,73 +1,58 @@
-# Per-target merge policy (M1). This file is the TEMPLATE a new target seeds
-# from; copy it to <target>/.laddy/policy.toml and replace the myapp values with
-# your project's. The engine (orchestrator.target_policy) loads it; there is NO
-# built-in fallback, so a missing or malformed file fails the merge closed.
+# laddy's OWN target-side merge policy (M1) - this is laddy dogfooding itself,
+# so the "target" here is the engine. It is NOT a generic template: it doubles
+# as a worked example an adopter can read, but copy-and-edit for your own
+# project (coverage package, security surface) rather than shipping it verbatim.
+# The engine (orchestrator.target_policy) loads it; there is NO built-in
+# fallback, so a missing or malformed file fails the merge closed.
 #
-# Generic globs (secrets, .claude/.mcp agent config, engine surfaces, the gate
-# infra, and THIS file) are engine constants and always apply - you only declare
-# the PRODUCT-specific surface below. Editing this file is itself L3 (human-gated)
-# and the off-VPS merge check reads it from trusted main, so a task branch cannot
+# Generic globs (secrets, .claude/.mcp agent config, the whole engine surface -
+# orchestrator/, scripts/, roles/, prompts/, oracle/, monitoring/, docker/,
+# security/, skills/ - the gate infra, and THIS file) are ENGINE constants
+# (target_policy.ENGINE_SENSITIVE_GLOBS) and always apply. You only declare the
+# extra PRODUCT surface below. Editing this file is itself L3 (human-gated) and
+# the off-VPS merge check reads it from trusted main, so a task branch cannot
 # weaken its own classification.
 
 # Coverage package for the binding gate's `pytest --cov=<pkg>`.
-coverage_package = "myapp"
+coverage_package = "orchestrator"
 
-# Product paths that must never ride an L2 auto-merge (models, migrations,
-# deploy/release config). Merged on top of the engine-generic sensitive set.
-sensitive_globs = [
-  "myapp/models.py",
-  "myapp/infrastructure/runtime_db.py",
-  "alembic/*",
-  "alembic/**/*",
-  "cloudbuild.yaml",
-  "scripts/release*.ps1",
-  "docker-entrypoint.sh",
-  "Dockerfile",
-  "firebase.json",
-  ".firebaserc",
-]
+# laddy has no product code beyond the engine, and every engine path is already
+# an ENGINE_SENSITIVE_GLOB (see above) applied to every target - so there is no
+# extra product-specific sensitive surface to add here.
+sensitive_globs = []
 
-# Security / auth / payments surface (a stop-before-merge condition).
+# laddy's security surface = the trust-boundary code. A change to any of these
+# is a stop-before-merge (human-gated) condition: they ARE the merge / gate /
+# policy / terminal authority, so laddy must never auto-merge a change to its
+# own trust boundary while dogfooding itself. Weakening the SAST ruleset counts.
 security_globs = [
-  "myapp/api/routers/auth*.py",
-  "myapp/api/services/auth*.py",
-  "myapp/infrastructure/auth_repo.py",
-  "myapp/application/access.py",
-  "myapp/api/routers/sessions.py",
-  "myapp/api/routers/payments.py",
-  "myapp/api/routers/*webhook*.py",
-  "myapp/application/payments/*",
-  "myapp/application/payments/**/*",
-  "myapp/infrastructure/payments/*",
-  "myapp/infrastructure/payments/**/*",
+  "orchestrator/local_merge.py",
+  "orchestrator/merge_check.py",
+  "orchestrator/policy.py",
+  "orchestrator/target_policy.py",
+  "orchestrator/testgate.py",
+  "orchestrator/verdict.py",
+  "orchestrator/gitops.py",
+  "orchestrator/terminals.py",
+  ".laddy/security/semgrep.yml",
 ]
 
-# Architecture-contract / append-only invariant tests: touching one is a senior
-# review trigger and a stop-before-merge condition (test weakening).
+# Architecture-contract / drift-pin tests: weakening one to make a change pass
+# is a senior-review trigger and a stop-before-merge condition.
 invariant_tests = [
-  "tests/test_architecture_contracts.py",
-  "tests/test_append_only_session_history.py",
-  "tests/test_inbox_audit_append_only.py",
-  "tests/test_admin_user_notes_append_only.py",
-  "tests/test_player_challenge_answer_append_only.py",
-  "tests/test_invariants_append_only_game_edit_event.py",
-  "tests/test_purchase_payment_received_at_immutable.py",
+  "tests/test_target_policy.py",
+  "tests/test_terminals.py",
+  "tests/test_trust_blockers.py",
 ]
 
-# Migration files scanned for destructive drop_table/drop_column.
-migration_globs = ["alembic/*", "alembic/**/*"]
+# laddy has no DB migrations.
+migration_globs = []
 
-# Frontend build: which path prefixes trigger it, and the gate command itself.
-frontend_prefixes = ["frontend/", "apps/", "packages/"]
-frontend_gate = "pnpm install --frozen-lockfile && pnpm -r --if-present build && pnpm -r --if-present test && cd frontend && npx tsc --noEmit"
+# laddy has no frontend build.
+frontend_prefixes = []
+frontend_gate = ""
+user_visible_prefixes = []
 
-# "user-visible" heuristic for the auto-merge+notify decision.
-user_visible_prefixes = ["frontend/", "apps/"]
-
-# Product data catalogues that are safe-by-construction (strings, not logic).
-# Merged on top of the engine default (*.md). Added files here can ride L1.
-safe_globs = [
-  "frontend/src/i18n/locales/**/*.json",
-  "frontend/**/locales/**/*.json",
-  "apps/**/locales/**/*.json",
-]
+# Markdown is already engine-safe (ENGINE_SAFE_GLOBS); laddy ships no product
+# data catalogues (i18n JSON, etc.) that would ride L1.
+safe_globs = []

@@ -13,6 +13,7 @@ from orchestrator.target_policy import (
     POLICY_REL,
     TargetPolicy,
     TargetPolicyError,
+    dump_target_policy,
     load_target_policy,
     parse_target_policy,
 )
@@ -111,9 +112,25 @@ def test_load_from_trusted_ref_uses_git_show(tmp_path: Path) -> None:
     assert seen["spec"] == f"trustedsha:{POLICY_REL}"
 
 
-def test_shipped_template_matches_myapp_defaults() -> None:
-    # the engine template <root>/.laddy/policy.toml must stay in lockstep with
-    # TargetPolicy.myapp() so the code and the seed can never drift.
+def test_shipped_laddy_policy_is_dogfood_specific() -> None:
+    # <root>/.laddy/policy.toml is laddy's OWN target-side policy (dogfooding),
+    # not a generic template. Pin the load-bearing dogfood invariants so a
+    # careless edit (e.g. reverting to the myapp template) is caught.
     root = Path(__file__).resolve().parent.parent
-    shipped = parse_target_policy((root / POLICY_REL).read_text(encoding="utf-8"))
-    assert shipped == TargetPolicy.myapp()
+    pol = parse_target_policy((root / POLICY_REL).read_text(encoding="utf-8"))
+    assert pol.coverage_package == "orchestrator"  # laddy's python package
+    # the trust-boundary code is stop-before-merge (security), never auto-merged
+    assert "orchestrator/local_merge.py" in pol.security_globs
+    assert "orchestrator/testgate.py" in pol.security_globs
+    assert "orchestrator/target_policy.py" in pol.security_globs
+    # laddy has no product surface beyond the engine, no frontend, no migrations
+    assert pol.sensitive_globs == ()
+    assert pol.frontend_prefixes == ()
+    assert pol.migration_globs == ()
+
+
+def test_dump_target_policy_round_trips() -> None:
+    # the serializer (used by fakes.write_policy_toml) must round-trip through
+    # the parser for every policy - a rich sample and the minimal fixture.
+    for pol in (TargetPolicy.myapp(), parse_target_policy(_MINIMAL)):
+        assert parse_target_policy(dump_target_policy(pol)) == pol

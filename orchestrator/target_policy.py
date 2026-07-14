@@ -136,8 +136,12 @@ class TargetPolicy:
 
     @classmethod
     def myapp(cls) -> TargetPolicy:
-        """The myapp target's policy - the values that used to be hardcoded in
-        policy.py / testgate.py. Also the content of the shipped template."""
+        """A representative sample target policy (auth / payments / frontend /
+        migration surface) used as the test fixture for the classification logic.
+        Originally the values hardcoded in policy.py / testgate.py before M1. It
+        is NO LONGER the shipped ``.laddy/policy.toml`` (that is now laddy's own
+        dogfood policy); ``fakes.write_policy_toml`` serializes THIS into test
+        repos so the oracle/merge tests keep a rich sample to classify."""
         return cls(
             coverage_package="myapp",
             sensitive_globs=(
@@ -226,6 +230,36 @@ def parse_target_policy(text: str) -> TargetPolicy:
             data["user_visible_prefixes"], "user_visible_prefixes"
         ),
         safe_globs=_as_str_tuple(data["safe_globs"], "safe_globs"),
+    )
+
+
+def dump_target_policy(policy: TargetPolicy) -> str:
+    """Serialize a :class:`TargetPolicy` back to ``policy.toml`` text.
+
+    Round-trips with :func:`parse_target_policy`. Used by tests to seed a repo
+    from an in-code sample policy (``fakes.write_policy_toml``) without coupling
+    to whatever the shipped ``.laddy/policy.toml`` happens to be.
+    """
+
+    def _s(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def _arr(items: tuple[str, ...]) -> str:
+        return "[" + ", ".join(_s(item) for item in items) + "]"
+
+    return "\n".join(
+        (
+            f"coverage_package = {_s(policy.coverage_package)}",
+            f"sensitive_globs = {_arr(policy.sensitive_globs)}",
+            f"security_globs = {_arr(policy.security_globs)}",
+            f"invariant_tests = {_arr(policy.invariant_tests)}",
+            f"migration_globs = {_arr(policy.migration_globs)}",
+            f"frontend_prefixes = {_arr(policy.frontend_prefixes)}",
+            f"frontend_gate = {_s(policy.frontend_gate)}",
+            f"user_visible_prefixes = {_arr(policy.user_visible_prefixes)}",
+            f"safe_globs = {_arr(policy.safe_globs)}",
+            "",
+        )
     )
 
 

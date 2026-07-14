@@ -10,19 +10,20 @@ from pathlib import Path
 
 from orchestrator.agents import AgentResult
 from orchestrator.local_merge import merge_subject
-from orchestrator.target_policy import POLICY_REL
-
-_ENGINE_ROOT = Path(__file__).resolve().parent.parent
+from orchestrator.target_policy import POLICY_REL, TargetPolicy, dump_target_policy
 
 
 def write_policy_toml(repo_root: Path) -> None:
-    """Seed a test repo with the engine's myapp policy template (M1), so code
-    paths that load_target_policy find a valid <target>/.laddy/policy.toml. Uses
-    the shipped template (drift-pinned to TargetPolicy.myapp())."""
+    """Seed a test repo with a rich sample policy so code paths that
+    load_target_policy find a valid <target>/.laddy/policy.toml. Uses
+    TargetPolicy.myapp() (auth/payments/frontend/migration surface) - the
+    oracle/merge tests key off its sample paths (myapp/models.py sensitive,
+    etc.), so this stays the rich fixture and is deliberately DECOUPLED from the
+    shipped .laddy/policy.toml (which is now laddy's own sparse dogfood policy)."""
     dst = repo_root / POLICY_REL
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(
-        (_ENGINE_ROOT / POLICY_REL).read_text(encoding="utf-8"),
+        dump_target_policy(TargetPolicy.myapp()),
         encoding="utf-8",
         newline="\n",
     )
