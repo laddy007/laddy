@@ -36,9 +36,13 @@ fi
 UPGRADABLE=() BUSY=()
 for u in "${USERS[@]}"; do
   IFS=: read -r alias path _project <<<"${ENTRY[$u]}"
+  # --untracked-files=no: updateInstead only refuses on tracked-file changes;
+  # a fresh checkout keeps its (gitignored, but not-yet-committed) env.vps as
+  # an untracked file, which must NOT count as dirty or the very first upgrade
+  # of every onboarded user would be blocked forever.
   status=$(ssh "$alias" "
     if pgrep -u \"\$(id -un)\" -f '[o]rchestrator.run' >/dev/null 2>&1; then echo busy-loop;
-    elif [ -n \"\$(git -C '$path' status --porcelain 2>/dev/null)\" ]; then echo dirty-tree;
+    elif [ -n \"\$(git -C '$path' status --porcelain --untracked-files=no 2>/dev/null)\" ]; then echo dirty-tree;
     else echo clear; fi" 2>/dev/null) || status=unreachable
   if [ "$status" = clear ]; then UPGRADABLE+=("$u"); else BUSY+=("$u($status)"); fi
 done
