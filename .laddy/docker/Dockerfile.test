@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # Binding-gate scanners (orchestrator/testgate.py _binding_gate). Pinned so the
 # gate is reproducible: pytest-cov drives `--cov`, diff-cover scores
-# changed-line coverage, semgrep is the SAST step. Bump deliberately.
+# changed-line coverage, semgrep is the SAST step. Bump deliberately, never on
+# autopilot - see the "Gate image & pinned scanners" note in CONTRIBUTING.md.
 RUN pip install --no-cache-dir \
       pytest-cov==7.1.0 \
       diff-cover==10.3.0 \

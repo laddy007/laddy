@@ -32,6 +32,10 @@ Thanks for your interest in improving this project — contributions are welcome
 - New third-party dependencies — prefer the standard library where reasonable.
 - Anything that could be read as implying official affiliation with Anthropic or OpenAI (see the trademark note in `README.md`).
 
+## Gate image & pinned scanners
+
+The containerized gate (`.laddy/docker/Dockerfile.test`) pins its scanner versions — `pytest-cov`, `diff-cover`, `semgrep` (pip) and `gitleaks` (release binary, sha256-verified). Bump them **deliberately, never on autopilot**: a new `semgrep`/`gitleaks` changes which findings the gate reports, so a silent update can move or break the gate under you. If you automate dependency updates (e.g. Renovate), have it open PRs for review — do not automerge scanner bumps. After any bump, rebuild the image and confirm the gate still runs green. The same image is built both on the VPS (loop pre-filter) and locally (authoritative re-run), so a change here affects both.
+
 ## Legal / license
 
 By submitting a contribution, you agree it is licensed under this project's [MIT License](LICENSE) (`LICENSE`), same as the rest of the codebase — no separate CLA is required.
