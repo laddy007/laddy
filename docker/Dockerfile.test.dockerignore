@@ -1,0 +1,44 @@
+# Ignore-file for the TEST / binding-gate image.
+#
+# BuildKit uses a Dockerfile-specific ignore-file (named <dockerfile>.dockerignore,
+# next to the Dockerfile) IN PLACE OF the context-root .dockerignore. The prod
+# root .dockerignore slims the runtime image by stripping tests/, .git, docs/,
+# scripts/ and .github/ - but the binding gate MUST have them: pytest needs
+# tests/, and diff-cover (--compare-branch=origin/main) and gitleaks (history
+# scan) need .git. This file re-includes those and drops only genuinely
+# irrelevant weight + secrets. Patterns are relative to the build context root.
+#
+# Kept on purpose (NOT ignored): .git, tests/, docs/, scripts/, .github/,
+# alembic/, .laddy/, gps42/, pytest.ini, pyproject.toml.
+
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+node_modules
+.pnpm-store
+runtime_db_tmp
+*.log
+dist-deploy
+.sandbox
+.claude
+
+# Secrets: never bake real secrets into image layers (CLAUDE.md 11). The
+# repo-root .env holds real prod secrets; non-secret templates stay allowed.
+.env
+.env.*
+!.env.example
+!.env.local.example
+!.env.config
+
+# Machine-local BUNDLE config (git-ignored): env.local/env.vps hold the VPS
+# host/IP and per-node knobs - never bake them into image layers. `**/` keeps
+# it rename-safe (the bundle dir is derived, not always ".laddy"). The
+# non-secret *.example templates are unaffected (they don't match these).
+**/env.local
+**/env.vps
+**/vps.conf

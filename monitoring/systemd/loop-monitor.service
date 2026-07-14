@@ -1,0 +1,35 @@
+[Unit]
+Description=myapp lightweight host and Docker monitor
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/default/loop-monitor
+ExecStart=/opt/loop-monitor/bin/loop-monitor collect
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=loop-monitor
+RuntimeDirectoryMode=0750
+StateDirectory=loop-monitor
+StateDirectoryMode=0750
+UMask=0027
+
+# Harden only the observer. These settings do not constrain monitored jobs.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/loop-monitor /run/loop-monitor
+
+[Install]
+WantedBy=multi-user.target

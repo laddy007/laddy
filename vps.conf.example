@@ -1,0 +1,32 @@
+# Reference only - .laddy/scripts/vps-onboard.sh writes .laddy/vps.conf for
+# you interactively on first run (and re-reads it silently on later runs).
+# This file documents the knobs; it is not sourced by anything itself.
+# .laddy/vps.conf is git-ignored (see .laddy/.gitignore) - machine-local.
+#
+# Onboarder + promotion config (single source of truth for both scripts).
+
+# LADDY_USERS: space-separated entries  user:ssh_alias:engine_path:project
+#   - user: the unprivileged system user on the VPS (never root).
+#   - ssh_alias: an ~/.ssh/config Host entry for that VPS user (key alias
+#     lives in ssh config - NEVER key material here).
+#   - engine_path: absolute path to that user's engine checkout on the VPS
+#     (charset [a-zA-Z0-9._/-]).
+#   - project: target project name (charset [a-zA-Z0-9._-]); the user's bare
+#     hub lives at ~/repo_<project>/hub.git on the VPS. vps-onboard.sh uses
+#     this field to create the hub and materialize env.vps; upgrade_laddy.sh
+#     ignores it (engine-checkout promotion only). Parsing for both scripts
+#     lives in one place: scripts/lib/laddy_users.sh.
+LADDY_USERS="laddy:vps-laddy:/home/laddy/laddy:myapp"
+
+# Onboarder-only (root bootstrap):
+
+# SSH target with root access, used ONLY for the one-time bootstrap
+# (useradd, docker install, cgroup slice). user@host or an ssh-config alias.
+VPS_ROOT_SSH=
+
+# cgroup limits for the agent user's systemd slice (root bootstrap only).
+CPU_QUOTA=300%
+MEMORY_MAX=8G
+
+# ntfy topic for terminal-state phone pushes. Blank = no notifications yet.
+NTFY_TOPIC=

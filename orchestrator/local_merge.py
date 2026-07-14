@@ -1,0 +1,826 @@
+"""Local merge authority (trust-model doc S5/S6) - the real binding gate.
+
+Runs on the Director's TRUSTED machine, not the VPS. For each pushed
+bare ``<task>`` branch it re-derives everything from scratch on trusted
+infra - it never trusts the VPS gate log - and either MERGES into local
+main or HOLDS for a human risk decision. It NEVER edits code or fixes a
+failing test: a needed fix is a new VPS task, not this tool's job.
+
+Decision by blast radius (policy.classify_blast_radius, trust-model S8):
+  L1 safe-by-construction : merge after the mechanical gates, no review
+  L2 ordinary logic       : the agents ARE the gate (rw2 + security panel)
+  L3 sensitive surface    : never auto-merge; digest -> human Y/N
+
+Deterministic gates (block on red): local full test re-run, diff-coverage,
+semgrep, gitleaks, and the recomputed merge_check policy. Judgment gates
+(escalate, never silently block): rw2 re-run, the security panel.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from orchestrator import TARGET_DIR_NAME, default_work_root
+from orchestrator.agents import AgentRunner
+
+# Re-exported for backward-compat call sites (tests/fakes.py, historical
+# imports) - the implementation lives in orchestrator.merge_subject, a leaf
+# module with no orchestrator imports of its own, so oracle/scope.py can
+# depend on the wire format without cycling back through local_merge.py.
+from orchestrator.merge_subject import (
+    _MERGE_SUBJECT,
+    merge_subject,
+    parse_merge_subject,
+)
+from orchestrator.policy import L2, L3, classify_blast_radius
+from orchestrator.target_policy import load_target_policy
+from orchestrator.testgate import BindingGate, BindingResult
+from orchestrator.verdict import Verdict, VerdictError, request_verdict
+
+__all__ = [
+    "GateResults",
+    "LocalMergeEngine",
+    "MergeVerdict",
+    "_MERGE_SUBJECT",
+    "decide",
+    "merge_subject",
+    "parse_merge_subject",
+    "run_security_panel",
+]
+
+# (repo, base, task_id) -> (exit_code, message) - wraps merge_check.check
+MergeCheckFn = Callable[[Path, str, str], tuple[int, str]]
+
+# --- results & verdict -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GateResults:
+    """Everything the local gate gathered for one branch."""
+
+    blast: str  # L1 | L2 | L3
+    policy_ok: bool
+    policy_reason: str
+    tests_passed: bool
+    tests_tail: str
+    coverage_ok: bool
+    coverage_detail: str
+    scan_findings: tuple[str, ...]  # semgrep/gitleaks hits; empty = clean
+    rw2: Verdict | None
+    security_verdicts: tuple[Verdict, ...]
+    sensitive_files: tuple[str, ...] = ()  # the paths that made it L3
+    head_sha: str = ""  # the exact commit these gates verified (TOCTOU pin)
+
+
+# Hold kinds (trust-model S8) - the CLI treats them differently:
+#   risk_decision : gates all GREEN, only sensitive (L3) -> offer merge Y/N
+#   broken        : a gate actually FAILED -> diagnostic, no merge offer
+AUTO_MERGE = "auto_merge"
+RISK_DECISION = "risk_decision"
+BROKEN = "broken"
+#   dry_run       : --no-input dry run -> would auto-merge, but nothing is
+#                   touched (no local-main mutation, no push)
+DRY_RUN = "dry_run"
+
+
+@dataclass(frozen=True)
+class MergeVerdict:
+    task_id: str
+    decision: str  # "merge" | "hold"
+    kind: str = AUTO_MERGE  # AUTO_MERGE | RISK_DECISION | BROKEN
+    reasons: tuple[str, ...] = ()
+    digest: str = ""
+
+    @property
+    def merged(self) -> bool:
+        return self.decision == "merge"
+
+
+def _security_blockers(gates: GateResults) -> list[str]:
+    out: list[str] = []
+    for v in gates.security_verdicts:
+        out.extend(f.summary for f in v.blockers)
+    return out
+
+
+_L3_REASON = "sensitive surface (L3) - human risk decision required"
+
+
+def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[str]) -> str:
+    """One-screen summary. For a RISK_DECISION it names what is sensitive and
+    asks Y/N; for a BROKEN hold it diagnoses what failed, why, and what is
+    needed - and does NOT offer a merge (you fix broken code, not merge it)."""
+    lines = [f"# Merge hold: {task_id}  (blast {gates.blast}, {kind})", ""]
+
+    if kind == RISK_DECISION:
+        lines += ["## Sensitive surface touched", ""]
+        lines += [f"- `{p}`" for p in gates.sensitive_files] or ["- (sensitive path)"]
+        lines += [
+            "",
+            "All correctness/security gates passed; this only needs your risk",
+            "call because it touches a policy-sensitive surface.",
+            "",
+            "## Your decision",
+            "",
+            f"Merge `{task_id}` into main? (y/N) - you decide on this",
+            "summary, not by reading the diff.",
+            "",
+        ]
+        return "\n".join(lines)
+
+    # BROKEN: diagnostic, no merge offer
+    lines += ["## What failed", ""]
+    lines += [f"- {r}" for r in reasons if r != _L3_REASON]
+    sec = _security_blockers(gates)
+    if sec:
+        lines += ["", "## Security panel findings", ""] + [f"- {s}" for s in sec]
+    if gates.rw2 is not None and gates.rw2.blockers:
+        lines += ["", "## rw2 findings", ""] + [f"- {f.summary}" for f in gates.rw2.blockers]
+    if not gates.tests_passed:
+        lines += ["", "## Local test failure (tail)", "", "```", gates.tests_tail[-1500:], "```"]
+    lines += [
+        "",
+        "## What is needed",
+        "",
+        "This change is not mergeable as-is. Re-run the task on the VPS to fix",
+        "the failing gate(s), or address them and push a new revision of the",
+        f"branch. `{task_id}` is NOT merged and NOT deleted.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def decide(task_id: str, gates: GateResults) -> MergeVerdict:
+    """Pure decision (trust-model S8). merge | hold(risk_decision|broken)."""
+    broken: list[str] = []
+
+    # deterministic hard gates - any red is BROKEN
+    if not gates.policy_ok:
+        broken.append(f"policy recompute failed/mismatch: {gates.policy_reason}")
+    if not gates.tests_passed:
+        broken.append("local full test suite is red")
+    if not gates.coverage_ok:
+        broken.append(f"diff-coverage below threshold: {gates.coverage_detail}")
+    if gates.scan_findings:
+        broken.append(
+            f"security scan flagged {len(gates.scan_findings)} item(s): "
+            + "; ".join(gates.scan_findings[:5])
+        )
+    # judgment gates - a blocker is BROKEN (needs a fix, not a risk call)
+    if sec := _security_blockers(gates):
+        broken.append(f"security panel blocker(s): {'; '.join(sec[:5])}")
+    if gates.rw2 is not None and gates.rw2.blockers:
+        broken.append(
+            "rw2 blocker(s): " + "; ".join(f.summary for f in gates.rw2.blockers[:5])
+        )
+
+    if broken:
+        reasons = tuple(broken + ([_L3_REASON] if gates.blast == L3 else []))
+        return MergeVerdict(
+            task_id, "hold", BROKEN, reasons,
+            build_digest(task_id, gates, BROKEN, reasons),
+        )
+    if gates.blast == L3:
+        reasons = (_L3_REASON,)
+        return MergeVerdict(
+            task_id, "hold", RISK_DECISION, reasons,
+            build_digest(task_id, gates, RISK_DECISION, reasons),
+        )
+    return MergeVerdict(task_id, "merge", AUTO_MERGE)
+
+
+# --- security panel ----------------------------------------------------------
+
+
+def run_security_panel(
+    runners: Sequence[AgentRunner], prompt: str, cwd: Path
+) -> list[Verdict]:
+    """Run every panel member; a malformed member is treated as a blocking
+    abstention (its absence must not silently pass a security review)."""
+    verdicts: list[Verdict] = []
+    for runner in runners:
+        try:
+            verdict, _ = request_verdict(runner, prompt, cwd, validate=None)
+        except VerdictError:
+            # a panel member that cannot produce a valid verdict is a flag,
+            # not a pass: synthesize a blocker so decide() holds for a human
+            verdict = _abstention_blocker(runner.name)
+        verdicts.append(verdict)
+    return verdicts
+
+
+def _abstention_blocker(member: str) -> Verdict:
+    from orchestrator.verdict import Finding
+
+    return Verdict(
+        verdict="CHANGES_REQUESTED",
+        risk_level="high",
+        files_reviewed=(),
+        claims_verified=(),
+        findings=(
+            Finding(
+                severity="blocker",
+                category="security",
+                file="",
+                line=0,
+                summary=f"security panel member {member!r} did not return a "
+                "valid verdict; holding for human review",
+                failure_scenario="unreviewed change on a security-relevant path",
+            ),
+        ),
+        test_assessment="",
+        residual_risks=(),
+    )
+
+
+# --- engine ------------------------------------------------------------------
+
+# Injected collaborators (real impls in the CLI; fakes in tests):
+#   list_ready() -> task ids with a complete pushed branch ready to merge
+#   verify_one(task_id) -> GateResults   (gathers all gates on trusted infra)
+#   merge_one(task_id)  -> bool          (integrate into local main; False if
+#                                         the branch no longer applies cleanly)
+ListReady = Callable[[], Sequence[str]]
+VerifyOne = Callable[[str], GateResults]
+# (task_id, verified_sha) -> merged? The sha is the exact commit the gates
+# saw; merging by sha (not by branch ref) closes the verify->merge TOCTOU.
+MergeOne = Callable[[str, str], bool]
+
+
+@dataclass
+class LocalMergeEngine:
+    list_ready: ListReady
+    verify_one: VerifyOne
+    merge_one: MergeOne
+    on_verdict: Callable[[MergeVerdict], None] = field(default=lambda v: None)
+    # consulted for a RISK_DECISION hold (L3, gates green): return True to
+    # approve the merge. Default declines (non-interactive: L3 stays held).
+    confirm: Callable[[MergeVerdict], bool] = field(default=lambda v: False)
+    # dry run (--no-input): report what WOULD auto-merge but never mutate local
+    # main or push. Without this, --no-input still auto-merged every L1/L2 green
+    # change into local main - contradicting its "dry run" contract (and the
+    # "merge into local main only on request" rule).
+    dry_run: bool = field(default=False)
+
+    def run(self) -> list[MergeVerdict]:
+        """Process every ready branch sequentially.
+
+        Sequential-with-re-verify is real: verify_one() runs the deterministic
+        gate on the branch trial-merged into the CURRENT local main (#11), so a
+        branch is re-verified against whatever prior merges this batch already
+        landed - a pair that passes in isolation but conflicts once combined is
+        caught here, not left in a red main. A hold never blocks the others.
+        Never fixes anything - there is no fix path. A BROKEN hold is never
+        offered for merge; only a RISK_DECISION (all gates green, just
+        sensitive) is put to the confirm() callback.
+        """
+        results: list[MergeVerdict] = []
+        for task_id in self.list_ready():
+            gates = self.verify_one(task_id)
+            verdict = decide(task_id, gates)
+            if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
+                if self.confirm(verdict):
+                    verdict = MergeVerdict(task_id, "merge", RISK_DECISION)
+            if verdict.merged and self.dry_run:
+                # dry run: record what WOULD auto-merge, but touch nothing.
+                verdict = MergeVerdict(
+                    task_id,
+                    "hold",
+                    DRY_RUN,
+                    ("would auto-merge (dry run: --no-input, nothing changed)",),
+                    f"# Dry run: {task_id}\n\nWould auto-merge into local main; "
+                    "re-run without --no-input to apply.\n",
+                )
+            if verdict.merged:
+                if not self.merge_one(task_id, gates.head_sha):
+                    verdict = MergeVerdict(
+                        task_id,
+                        "hold",
+                        BROKEN,
+                        ("branch no longer applies cleanly to main after a "
+                         "prior merge; re-run the task",),
+                        f"# Merge hold: {task_id}\n\nBranch no longer applies "
+                        "cleanly to main. Re-run the task on the VPS.\n",
+                    )
+            self.on_verdict(verdict)
+            results.append(verdict)
+        return results
+
+
+# --- real gatherers (trusted local infra; the CLI wires these) ---------------
+
+SECURITY_PANEL_PROMPT = """\
+{role}
+
+Task ID: {task}
+
+Adversarially review the current branch (diff against origin/{base}) for a
+SECURITY defect only. Output ONLY the verdict JSON object.
+"""
+
+RW2_LOCAL_PROMPT = """\
+{role}
+
+Task ID: {task}
+
+Re-review the current branch (diff against origin/{base}) as an independent
+cross-vendor guard on TRUSTED infrastructure. Output ONLY the verdict JSON.
+"""
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+    )
+    if check and proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr}")
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def discover_ready(
+    repo: Path, base_branch: str = "main", branch_remote: str = "origin"
+) -> list[str]:
+    """Task ids whose branch is pushed AND carries a committed
+    merge-decision.json (the VPS loop reached a terminal push).
+
+    The hub is a closed namespace (spec: discovery selector): every branch
+    except ``base_branch`` IS a task. The readiness filter is unchanged -
+    the selector widened, the bar did not move.
+    """
+    _git(repo, "fetch", branch_remote, "--prune")
+    _, out = _git(
+        repo, "for-each-ref", "--format=%(refname:strip=3)",
+        f"refs/remotes/{branch_remote}",
+    )
+    ready: list[str] = []
+    for task in out.splitlines():
+        if task in (base_branch, "HEAD") or not task:
+            continue
+        artifact = f"{TARGET_DIR_NAME}/tasks/{task}/merge-decision.json"
+        code, _ = _git(
+            repo, "cat-file", "-e", f"{branch_remote}/{task}:{artifact}", check=False
+        )
+        if code == 0:
+            ready.append(task)
+    return ready
+
+
+def hub_main_ancestor_of_local(
+    repo: Path, branch_remote: str, base_branch: str = "main"
+) -> bool:
+    """False = the hub's main moved where only local may write (spec S5).
+
+    The VPS never writes main; a diverged hub main is suspicion of an
+    unauthorized write (possibly including ~/laddy itself), so the CALLER
+    must abort the entire run - no branch from that hub is trustworthy.
+
+    A hub that has never seeded a main ref at all (fresh/never-pushed hub)
+    is explicitly NOT a tripwire: there is nothing to compare against, and
+    discover_ready would find no branches there either - a missing remote
+    ref is benign, not suspicious, so it is checked for and short-circuited
+    BEFORE the merge-base call (which would otherwise just fail).
+    """
+    remote_main = f"refs/remotes/{branch_remote}/{base_branch}"
+    exists, _ = _git(repo, "rev-parse", "--verify", "--quiet", remote_main, check=False)
+    if exists != 0:
+        return True
+    code, _ = _git(
+        repo, "merge-base", "--is-ancestor", remote_main, base_branch, check=False,
+    )
+    return code == 0
+
+
+@dataclass
+class GateTools:
+    """Injected real tools for gathering gates (fakeable in tests)."""
+
+    merge_check_fn: MergeCheckFn
+    # The deterministic gate (tests + coverage + semgrep + gitleaks) runs as ONE
+    # containerized pass at the pinned sha, so untrusted branch code never
+    # executes on the Director's machine (trust-model S6/S10).
+    binding_gate: BindingGate
+    rw2_runner: AgentRunner
+    security_runners: Sequence[AgentRunner]
+    roles_dir: Path
+
+
+# Agent-config entry points a headless claude/codex loads from its working
+# directory: project hooks and MCP servers execute host commands, steering files
+# inject instructions. The review panel runs these CLIs in the untrusted branch
+# worktree on the Director's TRUSTED machine (C2), so any shipped on the branch
+# would run/steer on the host - read-only tool scoping governs what the model
+# does, not the CLI's own startup config loading. Stripped from the review
+# worktree before any CLI runs; a code reviewer reviews the diff (agent-config
+# changes are also L3 by policy), it never honors the branch's agent config.
+_UNTRUSTED_AGENT_CONFIG: tuple[str, ...] = (
+    ".claude",
+    ".codex",
+    ".mcp.json",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+)
+
+
+def _neutralize_agent_config(wt: Path) -> None:
+    """Remove branch-shipped agent config from a review worktree (C2).
+
+    Only the working tree is touched (never a commit), so the commit-range diffs
+    that drive classification and merge_check are unaffected - a malicious
+    agent-config change still shows in the diff and routes to L3.
+    """
+    for rel in _UNTRUSTED_AGENT_CONFIG:
+        target = wt / rel
+        if target.is_symlink():
+            target.unlink(missing_ok=True)  # unlink the link, never follow it
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink(missing_ok=True)
+
+
+def _branch_worktree(
+    repo: Path, task_id: str, work_root: Path, branch_remote: str = "origin"
+) -> Path:
+    """Detached worktree at <branch_remote>/<task> so gates run in
+    isolation without disturbing the Director's main checkout.
+
+    Branch-shipped agent config is stripped before any reviewer CLI can load it
+    (C2); classification is unaffected (it diffs commits, not the working tree).
+    """
+    _git(repo, "fetch", branch_remote, task_id)
+    wt = work_root / f"verify-{task_id}"
+    _git(repo, "worktree", "prune")
+    if wt.exists():
+        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+    _git(repo, "worktree", "add", "--detach", str(wt), f"{branch_remote}/{task_id}")
+    _neutralize_agent_config(wt)
+    return wt
+
+
+def _worktree_sha(wt: Path) -> str:
+    _, sha = _git(wt, "rev-parse", "HEAD")
+    return sha
+
+
+def _rev(repo: Path, ref: str) -> str:
+    _, sha = _git(repo, "rev-parse", ref)
+    return sha
+
+
+def _binding_on_merged_tree(
+    repo: Path,
+    task_id: str,
+    work_root: Path,
+    base_sha: str,
+    branch_sha: str,
+    binding_gate: BindingGate,
+    coverage_package: str,
+) -> BindingResult:
+    """Run the deterministic gate on the branch TRIAL-MERGED into current local
+    main, not on the branch alone (#11).
+
+    Two branches can each pass in isolation yet leave ``main`` red once combined
+    (a semantic conflict with no textual conflict); testing the merged tree
+    catches that, and it re-verifies against whatever prior merges this batch
+    already landed. ``base_sha`` (current local main) is both the trusted ref
+    for the gate infra AND the scanner baseline, so coverage/semgrep/gitleaks
+    scope THIS change against the tree it is actually merging into - not the
+    stale ``origin/main`` remote-tracking ref. A textual merge conflict is a
+    fail (the real merge would conflict too), reported as a broken gate.
+    """
+    mwt = work_root / f"verify-merge-{task_id}"
+    _git(repo, "worktree", "prune")
+    if mwt.exists():
+        _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
+    _git(repo, "worktree", "add", "--detach", str(mwt), base_sha)
+    try:
+        code, _ = _git(
+            mwt,
+            "-c", "user.name=myapp-verify",
+            "-c", "user.email=verify@myapp.local",
+            "merge", "--no-ff", branch_sha,
+            "-m", f"verify trial-merge {task_id}",
+            check=False,
+        )
+        if code != 0:
+            _git(mwt, "merge", "--abort", check=False)
+            msg = "branch does not merge cleanly into current main (conflict); re-run the task"
+            return BindingResult(
+                tests_passed=False,
+                tests_tail=msg,
+                coverage_ok=False,
+                coverage_detail=msg,
+                scan_findings=(msg,),
+            )
+        merge_sha = _worktree_sha(mwt)
+        return binding_gate.run(
+            mwt, merge_sha, coverage_package, trusted_ref=base_sha, compare_ref=base_sha
+        )
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
+
+
+def gather_gates(
+    task_id: str,
+    repo: Path,
+    work_root: Path,
+    tools: GateTools,
+    branch_remote: str = "origin",
+    base_branch: str = "main",
+) -> GateResults:
+    """Run every gate for one branch on trusted local infra, in a worktree."""
+    wt = _branch_worktree(repo, task_id, work_root, branch_remote)
+    try:
+        verified_sha = _worktree_sha(wt)
+        code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
+        policy_ok = code == 0
+
+        from orchestrator.gitops import GitOps
+
+        gitops = GitOps(repo_url="unused", work_root=work_root, default_branch="main")
+        changed = gitops.changed_files(wt)
+        statuses = gitops.changed_statuses(wt)
+        # Per-target policy from TRUSTED main (base_branch) via git show, NOT the
+        # branch worktree - a branch cannot weaken its own classification (M1);
+        # editing .laddy/policy.toml is itself L3.
+        base_sha = _rev(repo, base_branch)
+        policy = load_target_policy(repo, ref=base_sha)
+        blast = classify_blast_radius(policy, changed, statuses)
+        from orchestrator.policy import security_paths, sensitive_paths
+
+        sensitive = tuple(
+            sensitive_paths(policy, changed) + security_paths(policy, changed)
+        )
+
+        # The deterministic gate runs on the branch TRIAL-MERGED into CURRENT
+        # local main (not the branch alone) and baselined to it (#11): catches a
+        # pair of branches that pass in isolation but conflict once combined,
+        # and re-verifies against prior merges this batch already landed. The
+        # gate infra (compose/Dockerfile/semgrep) is restored from local main,
+        # not the branch, so a branch cannot ship a hostile container definition
+        # that escapes during verification (NÁLEZ 1). verified_sha (the branch
+        # tip) stays the TOCTOU pin merge_branch integrates.
+        binding = _binding_on_merged_tree(
+            repo, task_id, work_root, base_sha, verified_sha, tools.binding_gate,
+            policy.coverage_package,
+        )
+
+        security: tuple[Verdict, ...] = ()
+        rw2: Verdict | None = None
+        if blast in (L2, L3):
+            prompt = SECURITY_PANEL_PROMPT.format(
+                role=_role(tools.roles_dir, "security"), task=task_id, base="main"
+            )
+            security = tuple(run_security_panel(tools.security_runners, prompt, wt))
+        if blast == L2:
+            rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir)
+
+        return GateResults(
+            blast=blast,
+            policy_ok=policy_ok,
+            policy_reason=msg,
+            tests_passed=binding.tests_passed,
+            tests_tail=binding.tests_tail,
+            coverage_ok=binding.coverage_ok,
+            coverage_detail=binding.coverage_detail,
+            scan_findings=binding.scan_findings,
+            rw2=rw2,
+            security_verdicts=security,
+            sensitive_files=sensitive,
+            head_sha=verified_sha,
+        )
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+
+
+def _role(roles_dir: Path, name: str) -> str:
+    return (roles_dir / f"{name}.md").read_text(encoding="utf-8")
+
+
+def _rw2(runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path) -> Verdict | None:
+    prompt = RW2_LOCAL_PROMPT.format(role=_role(roles_dir, "rw2"), task=task_id, base="main")
+    try:
+        verdict, _ = request_verdict(runner, prompt, wt)
+        return verdict
+    except VerdictError:
+        return _abstention_blocker("rw2")
+
+
+def merge_branch(
+    repo: Path,
+    task_id: str,
+    verified_sha: str,
+    base_branch: str = "main",
+    branch_remote: str = "origin",
+) -> bool:
+    """Merge the VERIFIED commit of <task> into local main.
+
+    Merges ``verified_sha`` (the exact commit the local gate saw), NOT the
+    branch ref: the untrusted VPS can push the task branch between verify
+    and merge, so integrating the ref would let an unverified commit sneak
+    into main (verify->merge TOCTOU). Fetching refreshes the object store so
+    the sha is present; the merge names the sha, so a moved tip is
+    irrelevant. Never edits code - a conflict is a hold, not a fix.
+
+    ``branch_remote`` is where task branches live (see discover_ready); the
+    merge target ``base_branch`` is always integrated locally and later
+    pushed to "origin" (GitHub) by push_and_cleanup, regardless of
+    branch_remote.
+    """
+    if not verified_sha:
+        raise ValueError("merge_branch requires the verified sha (TOCTOU pin)")
+    _git(repo, "fetch", branch_remote, task_id)
+    _git(repo, "checkout", base_branch)
+    code, _ = _git(
+        repo,
+        "-c", "user.name=myapp-merge",
+        "-c", "user.email=merge@myapp.local",
+        "merge", "--no-ff", verified_sha,
+        "-m", merge_subject(task_id, verified_sha),
+        check=False,
+    )
+    if code != 0:
+        _git(repo, "merge", "--abort", check=False)
+        return False
+    return True
+
+
+def push_and_cleanup(
+    repo: Path,
+    merged_tasks: Sequence[str],
+    base_branch: str = "main",
+    branch_remote: str = "origin",
+) -> None:
+    """Push local main to GitHub ("origin") and DELETE each merged <task>
+    branch from ``branch_remote`` (where it actually lives - "origin" unless
+    overridden, e.g. "vps" for a bare-hub VPS with read-only GitHub access).
+
+    Pure git, no AI. The merged commits are already in local main, so deleting
+    the remote branch loses nothing - it just stops merged branches cluttering
+    the ones still awaiting the Director. Held branches are never touched.
+    """
+    _git(repo, "push", "origin", base_branch)
+    for task_id in merged_tasks:
+        _git(repo, "push", branch_remote, "--delete", task_id, check=False)
+
+
+def _oracle_notice(repo: Path) -> None:
+    """Non-progress oracle trigger notice (oracle design 2026-07-12).
+
+    The merge tool is where merges happen, so it is the one place an
+    "oracle review due" cannot be forgotten - the AUTO half of "automate
+    the trigger, keep the run manual". Purely informational: it must never
+    block or break a merge run.
+    """
+    try:
+        from orchestrator.oracle import trigger as _trigger
+
+        status = _trigger.check(repo)
+    except Exception as exc:  # noqa: BLE001 - a notice must never break merging
+        print(f"[oracle] trigger check failed: {exc}")
+        return
+    if status.due:
+        print(f"[oracle] review DUE: {'; '.join(status.reasons)}")
+        print("[oracle] next: python -m orchestrator.oracle status  (then scope/prepare)")
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def _default_tools(config: object) -> GateTools:
+    from orchestrator.agents import ClaudeRunner, CodexRunner
+    from orchestrator.config import OrchestratorConfig
+    from orchestrator.merge_check import check as _merge_check
+    from orchestrator.run import default_roles_dir
+
+    assert isinstance(config, OrchestratorConfig)
+    # The LOCAL panel reviews untrusted code on the trusted machine, so it uses
+    # the least-privilege review commands (no write/exec), NOT the convergence
+    # commands (trust-model S4/S10). config enforces this even under override.
+    return GateTools(
+        merge_check_fn=_merge_check,
+        # deterministic gate: tests + coverage + semgrep(offline) + gitleaks,
+        # all in one containerized run at the pinned sha (nothing on the host)
+        binding_gate=BindingGate(),
+        # rw2 = cross-vendor (Codex); security panel = diverse models
+        rw2_runner=CodexRunner(config.review_codex_cmd),
+        security_runners=(
+            ClaudeRunner(config.review_senior_cmd),  # Opus lens, read-only
+            CodexRunner(config.review_codex_cmd),  # cross-vendor lens, read-only
+        ),
+        roles_dir=default_roles_dir(),
+    )
+
+
+def _interactive_confirm(v: MergeVerdict) -> bool:
+    """RISK_DECISION (L3) prompt: show what is sensitive, ask y/N."""
+    print("\n" + v.digest)
+    return input(f"[risk] merge {v.task_id} into main? (y/N) > ").strip().lower() == "y"
+
+
+def _ask(prompt: str) -> bool:
+    return input(prompt).strip().lower() == "y"
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    confirm: Callable[[MergeVerdict], bool] | None = None,
+    ask: Callable[[str], bool] | None = None,
+    pusher: Callable[[Path, Sequence[str]], None] | None = None,
+) -> int:
+    import argparse
+    import os
+
+    from orchestrator.artifacts import TaskArtifacts
+    from orchestrator.config import OrchestratorConfig
+
+    parser = argparse.ArgumentParser(prog="orchestrator.local_merge")
+    parser.add_argument("--repo", default=".", type=Path)
+    parser.add_argument("--work-root", default=None)
+    parser.add_argument(
+        "--no-input",
+        action="store_true",
+        help="dry run: never prompt, hold everything, mutate nothing (no merge, no push)",
+    )
+    parser.add_argument("task", nargs="*", help="task ids; default = all ready")
+    args = parser.parse_args(argv)
+
+    repo = args.repo.resolve()
+    config = OrchestratorConfig.from_env(env if env is not None else os.environ)
+    work_root = Path(args.work_root) if args.work_root else default_work_root(repo, "merge")
+    work_root.mkdir(parents=True, exist_ok=True)
+    tools = _default_tools(config)
+
+    # Tripwire (spec S5) - before the engine runs, and discover_ready also
+    # fetches inside list_ready, so fetch explicitly here first.
+    _git(repo, "fetch", config.branch_remote, "--prune")
+    if not hub_main_ancestor_of_local(repo, config.branch_remote, config.default_branch):
+        print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
+        print("The VPS must never write main - this is suspicion of an")
+        print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
+        print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
+        return 2
+
+    _confirm = confirm or ((lambda v: False) if args.no_input else _interactive_confirm)
+    _ask_fn = ask or ((lambda p: False) if args.no_input else _ask)
+    _push = pusher or (
+        lambda r, tasks: push_and_cleanup(r, tasks, branch_remote=config.branch_remote)
+    )
+    merged: list[str] = []
+
+    def _report(v: MergeVerdict) -> None:
+        if v.merged:
+            merged.append(v.task_id)
+            print(f"[merge] {v.task_id}: MERGED into local main")
+            return
+        art = TaskArtifacts(repo, v.task_id)
+        art.write_text("merge-hold.md", v.digest)
+        if v.kind == BROKEN:
+            # diagnostic: what failed, why, what is needed (no merge offer)
+            print(f"[broken] {v.task_id}: {'; '.join(v.reasons)}")
+            print(f"         see {TARGET_DIR_NAME}/tasks/{v.task_id}/merge-hold.md")
+        elif v.kind == DRY_RUN:
+            print(f"[dry-run] {v.task_id}: WOULD auto-merge (nothing changed)")
+        else:
+            print(f"[hold]  {v.task_id}: declined / not confirmed")
+
+    engine = LocalMergeEngine(
+        list_ready=lambda: (
+            args.task or discover_ready(repo, branch_remote=config.branch_remote)
+        ),
+        verify_one=lambda t: gather_gates(
+            t, repo, work_root, tools,
+            branch_remote=config.branch_remote, base_branch=config.default_branch,
+        ),
+        merge_one=lambda t, sha: merge_branch(
+            repo, t, sha, branch_remote=config.branch_remote
+        ),
+        on_verdict=_report,
+        confirm=_confirm,
+        dry_run=args.no_input,
+    )
+    results = engine.run()
+    held = [v for v in results if not v.merged]
+    print(f"\n{len(merged)} merged, {len(held)} held.")
+    _oracle_notice(repo)
+
+    if merged and _ask_fn(
+        f"[push] push main to origin and delete {len(merged)} merged branch(es)? (y/N) > "
+    ):
+        _push(repo, merged)
+        print(f"[push] main pushed; deleted: {', '.join(merged)}")
+    elif merged:
+        print(f"[push] not pushed. Merged locally: {', '.join(merged)}. "
+              "Push with: git push origin main")
+
+    return 1 if held else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

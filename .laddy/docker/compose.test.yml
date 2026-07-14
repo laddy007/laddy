@@ -1,0 +1,10 @@
+# Gate infra for laddy AS A TARGET (spec §3 step 0): restored from the
+# target's trusted main by testgate (NÁLEZ-1 defense), like any target's.
+services:
+  test:
+    build:
+      context: ../..
+      dockerfile: ${TARGET_DIR_NAME:-.laddy}/docker/Dockerfile.test
+    environment:
+      GATE_COMMAND: ${GATE_COMMAND:-ruff check . && basedpyright && pytest -n auto -q}
+    command: ["sh", "-lc", "$$GATE_COMMAND"]

@@ -1,0 +1,41 @@
+# Authoritative test gate (design doc S7): clean containerized run of the
+# full suite on the current HEAD SHA. Self-contained - decoupled from the
+# local mrzed sandbox tool (pattern reference only).
+#
+# Invoked by the orchestrator (testgate.DockerGate); GATE_COMMAND carries
+# the exact gate command so policy stays in Python, not in this file.
+# TARGET_DIR_NAME (also injected by testgate) keeps the Dockerfile path
+# in sync with the agent dir's actual folder name.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: myapp_app
+      POSTGRES_PASSWORD: myapp_local
+      POSTGRES_DB: myapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myapp_app -d myapp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  test:
+    build:
+      context: ../..
+      # TARGET_DIR_NAME is exported by testgate._containerized; the fallback
+      # matches this bundle's committed folder name.
+      dockerfile: ${TARGET_DIR_NAME:-.laddy}/docker/Dockerfile.test
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TEST_DATABASE_URL: postgresql+psycopg://myapp_app:myapp_local@db:5432/myapp
+      DATABASE_URL: postgresql+psycopg://myapp_app:myapp_local@db:5432/myapp
+      GATE_COMMAND: ${GATE_COMMAND:-ruff check . && basedpyright && pytest -n auto -q}
+    # $$GATE_COMMAND (escaped) so the CONTAINER shell expands the env var above,
+    # not host-side compose interpolation at parse time. A bare $GATE_COMMAND
+    # interpolates on the host to "" when unset (a manual `docker compose run`
+    # after onboarding) -> the container runs nothing and the default above is
+    # dead; escaping keeps the default live and mandatory-var behaviour correct.
+    command: ["bash", "-lc", "$$GATE_COMMAND"]

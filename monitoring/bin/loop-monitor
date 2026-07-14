@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PYTHONPATH="/opt/gps42-monitor${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m gps42_monitor "$@"

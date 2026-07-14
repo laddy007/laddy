@@ -1,0 +1,88 @@
+# Offline security ruleset for the local binding gate (trust-model doc S6/S9).
+#
+# Pinned + committed on purpose: `semgrep --config auto` fetches rules from the
+# registry over the network, which (a) makes a "deterministic" gate depend on a
+# remote and (b) is one more egress from the trusted machine while it processes
+# untrusted branch code. This file is the local `--config` so the scan runs with
+# NO network. Extend it as new defect classes show up; a change here is L3
+# (.laddy/orchestrator + .laddy/scripts are sensitive; this lives beside them).
+#
+# Scope: the adversarial security lens from .laddy/roles/security.md, expressed
+# as mechanical patterns. LLM panel covers what patterns cannot.
+
+rules:
+  - id: python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: >
+      Use of eval()/exec() on possibly-untrusted input is an arbitrary-code
+      vector. Justify or remove.
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+
+  - id: python-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >
+      subprocess with shell=True invites command injection when any argument is
+      interpolated. Pass an argv list and shell=False.
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+          - pattern: os.system(...)
+
+  - id: python-unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: >
+      Unsafe deserialization of untrusted data (pickle / yaml.load without a
+      SafeLoader / marshal) can execute arbitrary code.
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: yaml.load(...)
+          - pattern: marshal.loads(...)
+    pattern-not: yaml.load(..., Loader=yaml.SafeLoader)
+
+  - id: python-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: >
+      TLS verification disabled (verify=False). A MITM can read/alter traffic;
+      remove or justify with a pinned CA.
+    patterns:
+      - pattern-either:
+          - pattern: requests.get(..., verify=False, ...)
+          - pattern: requests.post(..., verify=False, ...)
+          - pattern: requests.request(..., verify=False, ...)
+          - pattern: requests.Session().get(..., verify=False, ...)
+
+  - id: python-weak-randomness-for-secrets
+    languages: [python]
+    severity: WARNING
+    message: >
+      random.* is not cryptographically secure. Use secrets/os.urandom for
+      tokens, passwords, or any security-sensitive value.
+    patterns:
+      - pattern-either:
+          - pattern: random.random(...)
+          - pattern: random.randint(...)
+          - pattern: random.choice(...)
+
+  - id: python-sql-string-format
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL built by f-string/%/format is an injection vector. Use bound
+      parameters (SQLAlchemy text() with :params, or the ORM).
+    patterns:
+      - pattern-either:
+          - pattern: cursor.execute(f"...", ...)
+          - pattern: cursor.execute("..." % ..., ...)
+          - pattern: cursor.execute("...".format(...), ...)

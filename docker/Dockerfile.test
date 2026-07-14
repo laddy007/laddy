@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# Test-gate image for the authoritative Docker gate (design doc S7).
+# Python + node/pnpm so both the mandatory backend gate and the
+# path-triggered frontend gate can run in one container.
+#
+# IMPORTANT: build context is the repo root, whose prod .dockerignore strips
+# tests/ and .git - which this image NEEDS (pytest, diff-cover, gitleaks). The
+# adjacent Dockerfile.test.dockerignore overrides it for this build (BuildKit
+# per-Dockerfile ignore-file). Do not build this image with BuildKit disabled.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Resilience against flaky PyPI downloads (a re-download of the full wheel
+    # set on any cache miss must not fail the build on one slow connection).
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
+
+ARG GITLEAKS_VERSION=8.18.4
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g pnpm \
+    # gitleaks: single Go binary, not on PyPI - fetch the pinned release.
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+        | tar -xz -C /usr/local/bin gitleaks \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+COPY requirements.txt requirements-dev.txt ./
+# The --mount=type=cache keeps downloaded wheels in a PERSISTENT BuildKit cache
+# on the host, OUTSIDE the image layers. So even when this RUN's layer is
+# invalidated (e.g. this line changes, or a dep is re-pinned), pip reuses the
+# already-downloaded wheels instead of re-fetching from PyPI - no repeated data
+# cost across rebuilds. Requires the `# syntax=docker/dockerfile:1` header above.
+#
+# App/test env = EXACTLY the app's pinned deps. `pip check` fails the BUILD if
+# they are mutually inconsistent (e.g. an unpinned transitive resolving outside
+# a pin's range) so a broken env is caught here, not mid-gate.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -q -r requirements.txt -r requirements-dev.txt && pip check
+# Scanners live in an ISOLATED venv: semgrep in particular pulls a large tree,
+# and it must never perturb the app env (that once bumped starlette out of
+# fastapi's range and broke app import). The two CLIs are SYMLINKED into
+# /usr/local/bin (not just PATH-appended): the gate runs via `bash -lc`, a
+# login shell that resets PATH from /etc/profile and would drop an appended
+# entry - so the scanners must live in a dir the default PATH already includes.
+# The symlink targets keep the venv shebang, so they still run isolated.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /opt/scanners \
+    && /opt/scanners/bin/pip install -q "diff-cover>=9,<10" "semgrep>=1.60,<2" \
+    && ln -s /opt/scanners/bin/semgrep /usr/local/bin/semgrep \
+    && ln -s /opt/scanners/bin/diff-cover /usr/local/bin/diff-cover
+
+COPY . .

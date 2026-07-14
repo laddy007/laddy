@@ -1,0 +1,20 @@
+# Per-node runtime config, copied from the *.example templates. Never committed
+# (contains machine-local paths / remotes). tasks/, runs/, reviews/ are NOT
+# ignored -- the flow commits those onto task branches.
+env.local
+env.vps
+vps.conf
+tmp/
+
+# Internal review/audit notes - not for public release.
+findings.md
+OPERATIONS.md
+
+# Python toolchain (Task 2)
+.venv/
+__pycache__/
+*.pyc
+
+# Local IDE / editor state - machine-local, never committed.
+.idea/
+.claude/
