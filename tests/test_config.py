@@ -80,6 +80,24 @@ def test_senior_cmd_also_json_enforced() -> None:
     assert "--output-format" in config.senior_cmd and "json" in config.senior_cmd
 
 
+def test_rw2_defaults_to_claude_sonnet_and_env_overrides() -> None:
+    # rw2 now runs Claude (Sonnet), not Codex; the loop factory falls back to
+    # DEFAULT_RW2_CMD when RW2_CMD is unset, and RW2_CMD overrides it (JSON
+    # output enforced like any claude command).
+    from orchestrator.run import Deps
+
+    cfg = OrchestratorConfig.from_env({"AGENT_REPO_URL": "file:///tmp/hub.git"})
+    assert cfg.rw2_cmd == ()  # empty -> factory uses the default
+    rw2 = Deps().make_rw2_runner(cfg)
+    assert rw2.name == "claude"
+
+    cfg2 = OrchestratorConfig.from_env(
+        {"AGENT_REPO_URL": "file:///tmp/hub.git", "RW2_CMD": "claude -p --model opus"}
+    )
+    assert "--model" in cfg2.rw2_cmd and "opus" in cfg2.rw2_cmd
+    assert "--output-format" in cfg2.rw2_cmd and "json" in cfg2.rw2_cmd
+
+
 def test_local_review_cmds_are_least_privilege_by_default() -> None:
     # the LOCAL trusted panel reviews untrusted branch code; its reviewers must
     # not carry write/exec grants (skip-permissions / full-auto), or a
