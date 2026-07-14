@@ -1,0 +1,7 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "low",
+  "reasons": [
+    "stale_or_missing_rw2_approval"
+  ]
+}
