@@ -37,7 +37,7 @@ UPGRADABLE=() BUSY=()
 for u in "${USERS[@]}"; do
   IFS=: read -r alias path _project <<<"${ENTRY[$u]}"
   status=$(ssh "$alias" "
-    if pgrep -u \"\$(id -un)\" -f 'orchestrator.run' >/dev/null 2>&1; then echo busy-loop;
+    if pgrep -u \"\$(id -un)\" -f '[o]rchestrator.run' >/dev/null 2>&1; then echo busy-loop;
     elif [ -n \"\$(git -C '$path' status --porcelain 2>/dev/null)\" ]; then echo dirty-tree;
     else echo clear; fi" 2>/dev/null) || status=unreachable
   if [ "$status" = clear ]; then UPGRADABLE+=("$u"); else BUSY+=("$u($status)"); fi
