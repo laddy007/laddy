@@ -83,7 +83,8 @@ nothing needs to reach the hub first.
 ### 2. Get the spec onto the hub
 
 ```bash
-git add .laddy/specs/<task>.md && git commit -m "..." && git push laddy main
+git add .laddy/specs/<task>.md && git commit -m "..."
+scripts/push-hub.sh <user>   # commit locally, then sync main -> hub
 ```
 
 The VPS worktree is cloned from the hub's `main`, so a spec that only
@@ -211,7 +212,7 @@ prompting or pushing (it holds every sensitive change and never pushes).
 the hub's `main` — do that yourself:
 
 ```bash
-git push laddy main
+scripts/push-hub.sh <user>
 ```
 
 This is not required for the tripwire (below) to stay quiet — a hub
@@ -265,7 +266,7 @@ args = every user in `vps.conf`.
   checkout updates in place — no separate `git pull` step on the VPS.
 - It only ever touches the **engine** checkout (`~/laddy`), never the
   target's hub or task branches — those are the Director's separate
-  `git push laddy main` (seeding/keeping-current) and `kickoff.sh`
+  `scripts/push-hub.sh <user>` (seeding/keeping-current) and `kickoff.sh`
   (task work).
 
 ---
@@ -296,12 +297,12 @@ args = every user in `vps.conf`.
 
 | Symptom | Cause / fix |
 |---|---|
-| `kickoff.sh` errors "missing spec" | The spec never reached the hub. `git push laddy main` from the target repo, or re-run with `--new`. |
+| `kickoff.sh` errors "missing spec" | The spec never reached the hub. `scripts/push-hub.sh <user>` from the target repo, or re-run with `--new`. |
 | `kickoff.sh` says the design gate was not approved | A high-risk task's design gate was rejected in the interactive session; the loop never detached. Revise the spec/design and retry. |
 | A task reached the cap / deadlocked | It did not converge — read `handback.md` on the branch, refine the spec, and re-run. Nothing was pushed. |
 | `merge-verified.sh` aborts with `[TRIPWIRE]` | Hub `main` diverged from local `main` — see "The tripwire" above. Do not re-run blind. |
 | `merge-verified.sh` holds everything | You ran with `--no-input` (holds every sensitive change), or Docker isn't running / the gate image failed to build (a scanner missing *inside the image* counts as a finding). Start Docker and re-run; the scanners are in the container, not on your host. |
-| A branch "no longer applies cleanly" | A prior merge moved `main`; re-run the task on the VPS to rebuild it against the new `main` (make sure you `git push laddy main` first so the VPS clones the current base). |
+| A branch "no longer applies cleanly" | A prior merge moved `main`; re-run the task on the VPS to rebuild it against the new `main` (make sure you `scripts/push-hub.sh <user>` first so the VPS clones the current base). |
 | `upgrade_laddy.sh` refuses to upgrade | Preflight found a busy loop or a dirty `~/laddy` for a named user — see "Concurrency rules". |
 
 ---

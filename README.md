@@ -29,7 +29,7 @@ Director's own machine.
    laddy  = ssh://<alias>/home/<user>/repo_<project>/hub.git   (per target)
 
    scripts/upgrade_laddy.sh <user>   engine (this repo) -> ~/laddy on the VPS
-   git push laddy main               target main -> hub (seed / keep current)
+   scripts/push-hub.sh <user>        target main -> hub (seed / keep current)
    ssh <alias> '~/laddy/scripts/kickoff.sh <task>'   kick off a task
    scripts/merge-verified.sh         re-verify + merge laddy/<task> -> local main
    git push origin main              publish the merge to GitHub
@@ -47,9 +47,9 @@ Director's own machine.
 
 A task branch is the bare task id (e.g. `mytask`), never `agent/<task>`
 — the hub is a **closed namespace**: every branch except `main` is a
-task. Locally, once you `git remote add laddy ...`, those branches show
-up as `laddy/<task>` (a remote-tracking namespace; the flow never
-checks out or switches your own branch).
+task. Locally, once the `laddy` remote exists (`push-hub.sh` adds it),
+those branches show up as `laddy/<task>` (a remote-tracking namespace;
+the flow never checks out or switches your own branch).
 
 ---
 
@@ -66,8 +66,8 @@ scripts/upgrade_laddy.sh laddy        # promote this engine repo's local main
                                        # preflight across every LADDY_USERS entry)
 
 # from the TARGET project's own local checkout (e.g. ~/myapp):
-git remote add laddy ssh://vps-laddy/home/laddy/repo_myapp/hub.git
-git push laddy main                   # seed the hub with the target's main
+scripts/push-hub.sh <user>            # add the `laddy` remote + seed the hub
+                                       # with the target's main (idempotent)
 ```
 
 **Every task after that:**
@@ -78,7 +78,7 @@ ssh vps-laddy '~/laddy/scripts/kickoff.sh <task>'   # clarify gate, then detache
 # on your machine, from the TARGET repo:
 scripts/merge-verified.sh                           # re-verify + merge, on YOUR machine
 git push origin main                                # publish to GitHub
-git push laddy main                                 # keep the hub's main current
+scripts/push-hub.sh <user>                          # keep the hub's main current
                                                       # (next kickoff clones from it)
 ```
 
@@ -103,7 +103,8 @@ scripts/        thin launchers only — all decisions live in Python:
                   watch-vps.sh / colorize-log.sh   tail + colorize a running task's log
                   vps-onboard.sh      one-shot, per-user VPS bootstrap (bare-hub model)
                   upgrade_laddy.sh    promote this repo's main into each user's ~/laddy
-                  lib/laddy_users.sh  shared LADDY_USERS parsing (both onboarding scripts)
+                  push-hub.sh         seed / keep-current the target's hub (main -> hub)
+                  lib/laddy_users.sh  shared LADDY_USERS parsing (onboard/upgrade/push-hub)
 skills/         interactive helpers (Claude Code skills):
                   create-spec/        co-author a task spec -> <target>/.laddy/specs/<task>.md
                   investigate/        diagnosis-only session -> investigations/
@@ -151,9 +152,10 @@ Onboarding a VPS user or adding a new project = the same operation
   `main` into `~/laddy` for each user — all-or-nothing: if any named
   user's loop is running or its checkout is dirty, **nothing** is
   upgraded.
-- You seed the target's `main` onto the hub yourself (`git remote add
-  laddy ...` + `git push laddy main`) — no args are needed by
-  `upgrade_laddy.sh` for this, it only ever promotes the engine.
+- You seed the target's `main` onto the hub with `scripts/push-hub.sh
+  <user>` (run from inside the target repo — it adds the `laddy` remote
+  from `vps.conf` and pushes `main`, idempotently). `upgrade_laddy.sh`
+  never does this; it only ever promotes the engine.
 
 On your local trusted machine you only need Docker running plus `git`,
 `python3`, and the `claude`/`codex` CLIs — the merge gate (lint, types,
@@ -223,10 +225,10 @@ fires.
 When something merged, it asks `push main to origin and delete N merged
 branch(es)? (y/N)`. `y` pushes your `main` to **GitHub** and deletes the
 now-merged branches from the hub; `N` leaves it local. Either way, also
-push your `main` to the hub yourself afterward (`git push laddy main`)
-— the next `kickoff.sh` clones its base from the hub, so a stale hub
-`main` means the next task starts from old code. Add `--no-input` for a
-dry run (holds every sensitive change, never pushes).
+push your `main` to the hub yourself afterward (`scripts/push-hub.sh
+<user>`) — the next `kickoff.sh` clones its base from the hub, so a
+stale hub `main` means the next task starts from old code. Add
+`--no-input` for a dry run (holds every sensitive change, never pushes).
 
 ---
 

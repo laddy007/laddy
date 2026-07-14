@@ -101,8 +101,8 @@ target project's content — that's two Director-run follow-ups it
 prints at the end, one pair per onboarded user:
 
 ```bash
-scripts/upgrade_laddy.sh laddy
-git remote add laddy ssh://vps-laddy/home/laddy/repo_myapp/hub.git && git push laddy main
+scripts/upgrade_laddy.sh laddy       # from THIS engine repo
+scripts/push-hub.sh laddy            # from the TARGET repo (seed its hub)
 ```
 
 ## 4. Seed the engine and the target
@@ -112,8 +112,8 @@ git remote add laddy ssh://vps-laddy/home/laddy/repo_myapp/hub.git && git push l
 scripts/upgrade_laddy.sh <user>            # promote local main into ~/laddy on the VPS
 
 # from the TARGET project's local checkout:
-git remote add laddy ssh://<ssh_alias>/home/<user>/repo_<project>/hub.git
-git push laddy main                        # seed the hub with the target's main
+scripts/push-hub.sh <user>                 # adds the `laddy` remote from
+                                            # vps.conf + seeds the hub (idempotent)
 ```
 
 `upgrade_laddy.sh` is all-or-nothing across whatever users you name (or
