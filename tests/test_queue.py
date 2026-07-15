@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import multiprocessing as mp
 import os
 import subprocess
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +21,32 @@ from orchestrator.queue import (
     is_running,
     run_lock,
 )
+
+
+def _race_acquire(
+    work_root: str, task_id: str, barrier: Any, results: Any, idx: int
+) -> None:
+    """Child-process worker: contend for run_lock and record the outcome.
+
+    results[idx] = our pid if we acquired the lock, 0 if we got QueueLocked.
+    A short hold keeps the winner's live pid in the lock file so the loser is
+    guaranteed to observe a live holder (not an empty/half-written file).
+    """
+    barrier.wait()  # release both children at the same instant -> a real race
+    try:
+        with run_lock(Path(work_root), task_id):
+            results[idx] = os.getpid()
+            time.sleep(0.4)
+    except QueueLocked:
+        results[idx] = 0
+
+
+def _acquire_and_signal(work_root: str, task_id: str, acquired: Any) -> None:
+    """Child-process worker: run_lock then set an event, so the parent can
+    observe whether acquisition proceeded or blocked on the guard flock."""
+    with run_lock(Path(work_root), task_id):
+        acquired.set()
+        time.sleep(0.2)
 
 
 def test_enqueue_items_fifo_order(tmp_path: Path) -> None:
@@ -152,30 +182,68 @@ def test_run_lock_reclaims_corrupt_lock_file(tmp_path: Path) -> None:
     assert is_running(tmp_path, "t1") is False
 
 
-def test_run_lock_concurrent_reclaim_raises_queue_locked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Two loops race to reclaim the same stale lock: the loser's re-open (after
-    # its unlink) hits a lock the winner already recreated. That must surface as
-    # QueueLocked (clean rc=4), not an uncaught FileExistsError traceback.
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs POSIX fork")
+def test_run_lock_concurrent_reclaim_has_single_winner(tmp_path: Path) -> None:
+    # The guard's exact scenario: a stale lock (dead pid) left by a crash, then
+    # TWO loops racing to reclaim it after a restart (e.g. an auto-restart
+    # supervisor firing at the same moment as a manual kickoff retry). Exactly
+    # ONE must acquire; the other MUST get QueueLocked. Never two live holders
+    # for one task (which would risk interleaved commits/pushes + corrupt logs).
     locks = tmp_path / "locks"
     locks.mkdir()
-    (locks / "t1.lock").write_text("424242\n")
-    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: False)
+    # 999999999 is above Linux pid_max, so it is guaranteed dead and never
+    # reused by one of the child processes -> a deterministically stale lock.
+    (locks / "t1.lock").write_text("999999999\n")
 
-    real_open = os.open
-    seen_excl = {"n": 0}
+    ctx = mp.get_context("fork")
+    barrier = ctx.Barrier(2)
+    results = ctx.Array("q", [-1, -1])  # signed; -1 = worker never wrote
+    procs = [
+        ctx.Process(
+            target=_race_acquire, args=(str(tmp_path), "t1", barrier, results, i)
+        )
+        for i in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(15)
+    for p in procs:
+        assert not p.is_alive(), "worker deadlocked"
 
-    def flaky_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
-        # 1st O_EXCL open = the stale lock (real FileExistsError, as normal);
-        # 2nd = the reclaim re-open, which we force to lose the race.
-        if flags & os.O_EXCL:
-            seen_excl["n"] += 1
-            if seen_excl["n"] == 2:
-                raise FileExistsError
-        return real_open(path, flags, mode)
+    outcomes = [results[i] for i in range(2)]
+    acquired = [r for r in outcomes if r > 0]
+    locked = [r for r in outcomes if r == 0]
+    assert len(acquired) == 1, outcomes  # exactly one winner
+    assert len(locked) == 1, outcomes  # the other got a clean QueueLocked
 
-    monkeypatch.setattr(os, "open", flaky_open)
-    with pytest.raises(QueueLocked):
-        with run_lock(tmp_path, "t1"):
-            pass
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs POSIX fork")
+def test_run_lock_acquisition_is_serialized_by_guard_flock(tmp_path: Path) -> None:
+    # Deterministic guard for the FIX's mechanism: acquisition is gated by an
+    # exclusive flock on the per-task guard file, so no two loops can be
+    # mid-acquire at once -- the property that makes concurrent double-reclaim
+    # impossible. Hold the guard here; a concurrent run_lock MUST block until we
+    # release. If the flock were ever dropped, the child would reclaim the stale
+    # lock immediately and this test would fail.
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "t1.lock").write_text("999999999\n")  # stale: would otherwise reclaim
+    guard_fd = os.open(locks / "t1.reclaim", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(guard_fd, fcntl.LOCK_EX)
+
+    ctx = mp.get_context("fork")
+    acquired = ctx.Event()
+    child = ctx.Process(
+        target=_acquire_and_signal, args=(str(tmp_path), "t1", acquired)
+    )
+    child.start()
+    try:
+        # While we hold the guard, the child cannot acquire.
+        assert not acquired.wait(timeout=0.5), "acquired despite guard held"
+        # Release the guard -> the child proceeds.
+        fcntl.flock(guard_fd, fcntl.LOCK_UN)
+        os.close(guard_fd)
+        assert acquired.wait(timeout=5.0), "child never acquired after release"
+    finally:
+        child.join(10)

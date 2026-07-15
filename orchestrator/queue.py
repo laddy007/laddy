@@ -2,13 +2,15 @@
 
 Lives under AGENT_WORK_ROOT (runtime state -- never committed to the
 repo). One JSON file per item, ordered by a numeric filename prefix.
-A .lock file created O_EXCL makes queue processing single-flight per
-node; surviving a VPS reboot is explicitly out of scope (a stale lock
-is removed by hand, the error message says which file).
+A per-task .lock file holding the holder's pid makes loop processing
+single-flight per node; acquisition is serialized by an flock guard so
+concurrent reclaimers cannot both win, and a lock left by a crashed
+loop (dead pid) is reclaimed automatically on the next run.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Callable, Iterator
@@ -130,43 +132,56 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _acquire_lock(locks: Path, lock_path: Path, task_id: str) -> None:
+    """Take the per-task lock, reclaiming one left by a crashed loop.
+
+    Writes our pid into lock_path, or raises QueueLocked if a live process
+    already holds it.
+
+    Every acquire decision for a task is serialized by an flock on a dedicated
+    guard file, so the whole read-pid -> decide -> write-pid sequence is atomic
+    across racing loops. Two racers can therefore never both observe the lock
+    as free/stale and both take it (the defect a bare unlink-then-O_EXCL-create
+    allowed: a loser's unlink could delete the winner's freshly created lock,
+    letting both opens succeed -> two live holders for one task). The pid file
+    is only ever read or written while the guard is held, so there is also no
+    empty-file window a concurrent reclaimer could misread as stale. flock is
+    released by the kernel when the fd closes OR the holder dies, so the guard
+    itself never goes stale the way a bare pid file can.
+    """
+    guard_fd = os.open(locks / f"{task_id}.reclaim", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(guard_fd, fcntl.LOCK_EX)  # blocks until sole acquirer
+        if lock_path.exists():
+            try:
+                old = int(lock_path.read_text().strip() or "0")
+            except (ValueError, OSError):
+                old = 0  # truncated / empty / unreadable -> treat as no live pid
+            if _pid_alive(old):
+                raise QueueLocked(
+                    f"task {task_id} already has a running loop (pid {old})"
+                )
+            # else: recorded pid is dead -> crashed holder, fall through to reclaim
+        lock_path.write_text(f"{os.getpid()}\n")  # create or reclaim (guard held)
+    finally:
+        os.close(guard_fd)  # releases the flock
+
+
 @contextmanager
 def run_lock(work_root: Path, task_id: str) -> Iterator[None]:
     """Per-task run lock: exactly one loop (kickoff OR queue) per task.
 
     A lock left behind by a crashed loop is auto-reclaimed: if the recorded
-    pid is no longer alive, the stale lock file is removed and re-acquired.
-    Only a lock held by a live process raises QueueLocked.
+    pid is no longer alive, the stale lock is taken over. Acquisition is
+    serialized per task by an flock (see _acquire_lock), so concurrent
+    reclaimers can never both win. Only a lock held by a live process raises
+    QueueLocked.
     """
     locks = work_root / "locks"
     locks.mkdir(parents=True, exist_ok=True)
     lock_path = locks / f"{task_id}.lock"
+    _acquire_lock(locks, lock_path, task_id)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        try:
-            old = int(lock_path.read_text().strip() or "0")
-        except (ValueError, OSError):
-            old = 0
-        if _pid_alive(old):
-            raise QueueLocked(
-                f"task {task_id} already has a running loop (pid {old})"
-            ) from None
-        lock_path.unlink(missing_ok=True)  # stale -> reclaim
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            # Another loop reclaimed the same stale lock between our unlink and
-            # re-open; it is now the live holder, so this is a normal contended
-            # lock, not a crash -> QueueLocked (which _phase_loop catches as
-            # rc=4) rather than an uncaught FileExistsError traceback.
-            raise QueueLocked(
-                f"task {task_id} already has a running loop "
-                f"(reclaimed concurrently)"
-            ) from None
-    try:
-        os.write(fd, f"{os.getpid()}\n".encode())
-        os.close(fd)
         yield
     finally:
         lock_path.unlink(missing_ok=True)
