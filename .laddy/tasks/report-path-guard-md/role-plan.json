@@ -1,0 +1,9 @@
+{
+  "task": "report-path-guard-md",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: monitoring/loop_monitor/cli.py, monitoring/loop_monitor/report_path.py",
+    "high_risk"
+  ]
+}
