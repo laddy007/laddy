@@ -10,6 +10,7 @@ loop (dead pid) is reclaimed automatically on the next run.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -132,11 +133,63 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _refuse_symlink(lock_path: Path, exc: OSError) -> None:
+    if exc.errno == errno.ELOOP:
+        raise QueueLocked(
+            f"lock path {lock_path} is a symlink - refusing to follow it "
+            "(possible attack or corrupted state; remove it by hand)"
+        ) from exc
+    raise exc
+
+
+def _read_lock_pid(lock_path: Path) -> int:
+    """Read the pid recorded in lock_path, NEVER following a symlink.
+
+    O_NOFOLLOW makes the open itself fail (ELOOP) if the final path component
+    is a symlink, rather than opening whatever it points to - a bare
+    Path.read_text()/open() would happily read (and, on the write side,
+    truncate) an attacker-planted symlink's target. Returns 0 (treated as "no
+    live holder") for a missing, empty, or unparseable file - the caller
+    already tolerates a stale/corrupt lock left by a crashed loop.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        _refuse_symlink(lock_path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises
+    with os.fdopen(fd) as f:
+        data = f.read().strip()
+    try:
+        return int(data or "0")
+    except ValueError:
+        return 0  # truncated / garbage content -> treat as no live pid
+
+
+def _write_lock_pid(lock_path: Path) -> None:
+    """Create or overwrite lock_path with our pid, NEVER following a symlink.
+
+    See _read_lock_pid: O_NOFOLLOW is what makes this refuse to write through
+    a swapped-in symlink instead of truncating whatever file it points to.
+    """
+    try:
+        fd = os.open(
+            lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        )
+    except OSError as exc:
+        _refuse_symlink(lock_path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{os.getpid()}\n")
+
+
 def _acquire_lock(locks: Path, lock_path: Path, task_id: str) -> None:
     """Take the per-task lock, reclaiming one left by a crashed loop.
 
     Writes our pid into lock_path, or raises QueueLocked if a live process
-    already holds it.
+    already holds it (or if lock_path has been replaced by a symlink - see
+    _read_lock_pid/_write_lock_pid).
 
     Every acquire decision for a task is serialized by an flock on a dedicated
     guard file, so the whole read-pid -> decide -> write-pid sequence is atomic
@@ -152,17 +205,13 @@ def _acquire_lock(locks: Path, lock_path: Path, task_id: str) -> None:
     guard_fd = os.open(locks / f"{task_id}.reclaim", os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(guard_fd, fcntl.LOCK_EX)  # blocks until sole acquirer
-        if lock_path.exists():
-            try:
-                old = int(lock_path.read_text().strip() or "0")
-            except (ValueError, OSError):
-                old = 0  # truncated / empty / unreadable -> treat as no live pid
-            if _pid_alive(old):
-                raise QueueLocked(
-                    f"task {task_id} already has a running loop (pid {old})"
-                )
-            # else: recorded pid is dead -> crashed holder, fall through to reclaim
-        lock_path.write_text(f"{os.getpid()}\n")  # create or reclaim (guard held)
+        old = _read_lock_pid(lock_path)
+        if _pid_alive(old):
+            raise QueueLocked(
+                f"task {task_id} already has a running loop (pid {old})"
+            )
+        # else: no live pid recorded -> free or crashed holder, reclaim it
+        _write_lock_pid(lock_path)  # create or reclaim (guard held)
     finally:
         os.close(guard_fd)  # releases the flock
 

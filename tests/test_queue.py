@@ -182,6 +182,28 @@ def test_run_lock_reclaims_corrupt_lock_file(tmp_path: Path) -> None:
     assert is_running(tmp_path, "t1") is False
 
 
+def test_run_lock_refuses_a_planted_symlink_instead_of_following_it(
+    tmp_path: Path,
+) -> None:
+    # Attack: something with write access to locks/ (e.g. code running in a
+    # sibling task worktree under the same AGENT_WORK_ROOT) replaces the lock
+    # path with a symlink to an arbitrary file before the next reclaim. A bare
+    # write_text()/read_text() follows the link and truncates/overwrites the
+    # target - this must refuse instead, leaving the target untouched.
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    target = tmp_path / "victim.txt"
+    target.write_text("do not touch\n")
+    (locks / "t1.lock").symlink_to(target)
+
+    with pytest.raises(QueueLocked, match="symlink"):
+        with run_lock(tmp_path, "t1"):
+            pass
+
+    assert target.read_text() == "do not touch\n"
+    assert (locks / "t1.lock").is_symlink()  # left alone, not unlinked either
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs POSIX fork")
 def test_run_lock_concurrent_reclaim_has_single_winner(tmp_path: Path) -> None:
     # The guard's exact scenario: a stale lock (dead pid) left by a crash, then
