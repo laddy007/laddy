@@ -1,0 +1,8 @@
+{
+  "task": "smoke1",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1"
+  ]
+}
