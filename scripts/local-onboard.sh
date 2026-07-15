@@ -46,6 +46,20 @@ ask() {
   echo "${ans:-$default}"
 }
 
+# Guards every value that lands in $CONF: this file is `source`d (here, and
+# again on every future run) - an unescaped `"` in an answer would close the
+# quoted assignment early and hand the rest of the line to the shell as live
+# commands the NEXT time $CONF is sourced (second-order injection into a
+# trusted-machine shell). Reject at capture time so nothing unsafe ever
+# reaches the heredoc; matches the per-field charsets laddy_targets.sh
+# already enforces on read, so a hand-edited $CONF still gets checked too.
+_safe_token() {
+  [[ "$2" =~ ^[a-zA-Z0-9._-]+$ ]] || die "$1 has unexpected characters: $2"
+}
+_safe_path() {
+  [[ "$2" == /* && "$2" =~ ^[a-zA-Z0-9._/-]+$ ]] || die "$1 must be an absolute path with only [a-zA-Z0-9._/-]: $2"
+}
+
 if [ -f "$CONF" ]; then
   # shellcheck disable=SC1090
   set -a; source "$CONF"; set +a
@@ -53,9 +67,13 @@ if [ -f "$CONF" ]; then
 else
   info "no $CONF yet - answer a few questions once, saved for future re-runs"
   T1_PROJECT=$(ask "target project name" "laddy")
+  _safe_token T1_PROJECT "$T1_PROJECT"
   T1_ALIAS=$(ask "ssh config host alias for the VPS user who owns this project's hub" "vps-$T1_PROJECT")
+  _safe_token T1_ALIAS "$T1_ALIAS"
   T1_HUB=$(ask "absolute hub path on the VPS (as seen by that alias)" "/home/$T1_PROJECT/repo_$T1_PROJECT/hub.git")
+  _safe_path T1_HUB "$T1_HUB"
   T1_PATH=$(ask "absolute path to this project's trusted checkout on THIS machine" "$ENGINE_DIR")
+  _safe_path T1_PATH "$T1_PATH"
   LADDY_TARGETS="$T1_PROJECT:$T1_ALIAS:$T1_HUB:$T1_PATH"
   cat > "$CONF" <<EOF
 # Written by local-onboard.sh - edit freely; re-run the script to apply changes.

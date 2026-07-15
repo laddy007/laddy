@@ -49,6 +49,22 @@ _safe_token() {
   [[ "$2" =~ ^[a-zA-Z0-9._@:/-]+$ ]] || die "$1 has unexpected characters: $2"
 }
 
+# Guards every value that lands in $CONF: this file is `source`d (here, and
+# again on every future run) - an unescaped `"` (or, for the unquoted
+# VAR=$VAR lines below, any shell metacharacter at all) in an answer would
+# hand the rest of the line to the shell as live commands the NEXT time
+# $CONF is sourced (second-order injection into a trusted-machine/root
+# shell). Reject at capture time so nothing unsafe ever reaches the heredoc.
+# Narrower than _safe_token (no @ or :) - these fields are LADDY_USERS'
+# colon-separated columns, and must match laddy_users.sh's own per-field
+# regex so a hand-edited $CONF still gets checked the same way on read.
+_safe_field() {
+  [[ "$2" =~ ^[a-zA-Z0-9._-]+$ ]] || die "$1 has unexpected characters: $2"
+}
+_safe_path() {
+  [[ "$2" == /* && "$2" =~ ^[a-zA-Z0-9._/-]+$ ]] || die "$1 must be an absolute path with only [a-zA-Z0-9._/-]: $2"
+}
+
 # --------------------------------------------------------------- config ---
 
 ask() {
@@ -64,14 +80,22 @@ if [ -f "$CONF" ]; then
 else
   info "no $CONF yet - answer a few questions once, saved for future re-runs"
   VPS_ROOT_SSH=$(ask "SSH target with root access (user@host, or an ssh-config alias)")
+  _safe_token VPS_ROOT_SSH "$VPS_ROOT_SSH"
   U1=$(ask "unprivileged system user for the loop" "laddy")
+  _safe_field U1 "$U1"
   U1_ALIAS=$(ask "ssh config host alias for that user (a ~/.ssh/config Host entry)" "vps-$U1")
+  _safe_field U1_ALIAS "$U1_ALIAS"
   U1_PATH=$(ask "absolute engine checkout path on the VPS for that user" "/home/$U1/laddy")
+  _safe_path U1_PATH "$U1_PATH"
   U1_PROJECT=$(ask "target project name for that user (hub = ~/repo_<project>/hub.git)" "myapp")
+  _safe_field U1_PROJECT "$U1_PROJECT"
   LADDY_USERS="$U1:$U1_ALIAS:$U1_PATH:$U1_PROJECT"
   NTFY_TOPIC=$(ask "ntfy topic (blank = skip phone notifications for now)" "")
+  [ -z "$NTFY_TOPIC" ] || _safe_field NTFY_TOPIC "$NTFY_TOPIC"
   CPU_QUOTA=$(ask "cgroup CPUQuota for each user's slice" "300%")
+  [[ "$CPU_QUOTA" =~ ^[0-9]+%$ ]] || die "CPU_QUOTA must look like 300% (got: $CPU_QUOTA)"
   MEMORY_MAX=$(ask "cgroup MemoryMax for each user's slice" "8G")
+  [[ "$MEMORY_MAX" =~ ^[0-9]+[KMG]$ ]] || die "MEMORY_MAX must look like 8G (got: $MEMORY_MAX)"
   cat > "$CONF" <<EOF
 # Written by vps-onboard.sh - edit freely; re-run the script to apply changes.
 # Git-ignored (see .gitignore) - machine-local (hostnames, paths).
