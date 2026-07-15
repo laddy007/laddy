@@ -1,0 +1,47 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "scripts/vps-onboard.sh",
+    "orchestrator/queue.py",
+    "orchestrator/artifacts.py",
+    "scripts/kickoff.sh",
+    "env.vps.example",
+    "tests/test_vps_onboard.py",
+    "tests/test_queue.py",
+    "tests/test_artifacts.py",
+    "tests/test_kickoff_wiring.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "AC#1: onboard's ENV_CONTENT_B64 now uses printf '%s\\n' so a trailing newline is preserved before append",
+      "evidence": "scripts/vps-onboard.sh:202",
+      "verified": true
+    },
+    {
+      "claim": "AC#2 dead-holder reclaim and live-holder refusal both work in isolation",
+      "evidence": "tests/test_queue.py:117-141 pass (test_run_lock_reclaims_stale_lock_from_dead_holder, test_run_lock_refuses_when_holder_alive); python3 -m pytest -q tests/test_queue.py -> 14 passed",
+      "verified": true
+    },
+    {
+      "claim": "Concurrent reclaim of the same stale lock always yields a clean QueueLocked for the loser (no double acquisition)",
+      "evidence": "Reproduced the real interleaving with plain os.open/os.unlink outside the test harness: process A unlinks the stale lock and successfully re-creates it (os.open(O_CREAT|O_EXCL) succeeds, fd_A). Process B then calls the SAME unlink(missing_ok=True) the reclaim path uses (queue.py:155) against the shared path -- this removes A's just-created file, not B's -- and B's subsequent os.open(O_CREAT|O_EXCL) also succeeds (fd_B). Both A and B exit the `except FileExistsError` block without raising QueueLocked; both proceed to os.write+yield. Script output: 'BUG CONFIRMED: both A and B completed run_lock's acquire path without QueueLocked'. The only existing concurrency test (test_run_lock_concurrent_reclaim_raises_queue_locked, test_queue.py:155-181) forces a different, narrower interleaving via a monkeypatched os.open counter where the loser's SECOND OPEN fails -- it never exercises the ordering where the loser's UNLINK executes after the winner's re-create, which is the one that produces two live holders instead of a clean QueueLocked.",
+      "verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "invariant",
+      "file": "orchestrator/queue.py",
+      "line": 155,
+      "summary": "Concurrent stale-lock reclaim can yield two live holders for the same task_id instead of one holder + QueueLocked, breaking the per-task exclusivity invariant AC#2 requires.",
+      "failure_scenario": "Task t1's lock file holds a dead pid (prior crash). Two run_lock(work_root, 't1') calls race after a restart (e.g. an auto-restart supervisor firing at the same moment as a manual kickoff.sh retry). Both hit the initial FileExistsError, both read the same stale pid, both call _pid_alive -> False. Process A executes lock_path.unlink(missing_ok=True) (queue.py:155) then os.open(O_CREAT|O_EXCL) (queue.py:157), which succeeds and creates a fresh lock file. Before A writes/closes, process B executes ITS OWN unlink(missing_ok=True) at the same path -- unlink has no notion of which process created the dentry, so this silently deletes A's freshly created lock -- then B's os.open(O_CREAT|O_EXCL) also succeeds. Neither A nor B ever hits the `except FileExistsError` branch that raises QueueLocked (that branch is only reached when the loser's OPEN, not its UNLINK, is the second op to run against an already-recreated file). Both A and B proceed to os.write(fd, pid) and yield, so two loop processes now run concurrently against the same task worktree/branch -- risking interleaved git commits/pushes and corrupted iteration-log.jsonl writes. This is strictly worse than the pre-change code, which had no unlink-by-shared-path step in the acquire path at all and therefore had zero chance of two O_EXCL opens both succeeding. Reproduced the exact syscall sequence outside any test harness; confirmed both opens succeed and no QueueLocked is raised. The only concurrency test in the diff (test_run_lock_concurrent_reclaim_raises_queue_locked) exercises a different, safe interleaving and does not cover this one, so AC#2's 'existing per-task exclusivity contract must still pass' is not actually verified for the concurrent-reclaim path."
+    }
+  ],
+  "test_assessment": "AC#1, AC#3, and AC#4 are adequately covered and match the diffs (verified by reading scripts/vps-onboard.sh, scripts/kickoff.sh, orchestrator/artifacts.py, env.vps.example directly). AC#2's single-actor paths (dead-holder reclaim, live-holder refusal, corrupt-file reclaim, pid liveness incl. EPERM) are well covered. However the concurrent-reclaim test only forces one of the two possible race orderings (loser's second OPEN fails) and never exercises the ordering where the loser's UNLINK runs after the winner's re-create -- that ordering is reproducibly a double-acquisition, not a QueueLocked, so test coverage for AC#2's exclusivity claim under concurrent stale-lock reclaim is incomplete and currently passes on a false sense of safety.",
+  "residual_risks": [
+    "PID reuse: a recycled dead pid held by an unrelated process would read as a live holder and refuse reclaim -- no worse than the prior always-refuse behaviour, not blocking.",
+    "Fixing the double-acquisition race likely requires either an ownership check before the reclaim unlink (e.g. re-read the file right before unlinking and only proceed if content still matches what was read as stale) or an atomic replace (write to a temp file + os.rename over the stale lock) rather than unlink-then-create as two separate syscalls."
+  ]
+}
