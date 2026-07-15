@@ -37,6 +37,70 @@ any kind.
 
 ---
 
+## Quick flow — the whole loop, copy-paste
+
+Two tracks: **manual** (today) and **fullrun** (one command, once its driver
+lands — currently being built, slice S3). Commands below use this deployment:
+local engine at `/mnt/c/myprogramfiles/laddy` (machine DELLi), VPS user `laddy`
+(ssh alias `vps-laddy`, engine `~/laddy`, hub `~/repo_laddy/hub.git`). For
+another user swap `laddy` for their `LADDY_USERS` entry.
+
+### A. Manual flow (today)
+
+```bash
+# 1. Author the spec — locally: hand-write .laddy/specs/<task>.md
+#    (or skip to step 4 with `kickoff.sh <task> --new` to co-author on the VPS).
+
+# 2. Spec onto the hub (skip if you used --new):
+git add .laddy/specs/<task>.md && git commit -m "spec: <task>"
+./scripts/push-hub.sh laddy
+
+# 3. Only if you changed ENGINE code (orchestrator/, scripts/): refresh the VPS engine.
+#    (Pure spec/target changes don't need this — the loop clones the target from the hub.)
+./scripts/upgrade_laddy.sh laddy
+
+# 4. Kick off on the VPS — ALWAYS in tmux: clarify/design gates run foreground
+#    and an SSH drop kills them before the loop detaches (only the loop is nohup'd).
+ssh vps-laddy
+tmux new -A -s <task>                       # attach-or-create
+cd ~/laddy && ./scripts/kickoff.sh <task>   # + --skip-clarify to skip Q&A
+#   → answer clarify, and "Approve this approach?" for a high-risk design gate
+#   → wait for "[kickoff] loop detached"; then Ctrl-b d (detach tmux), close SSH
+#   reconnect anytime:  ssh vps-laddy && tmux attach -t <task>
+```
+```bash
+# 5. Watch (from local). Real progress is the iteration-log; the .log gains
+#    [loop] heartbeat lines once round 1 finishes. Ends at stop_before_merge.
+./scripts/watch-vps.sh <task>
+
+# 6. Merge (local, from the repo, FOREGROUND — it ends with an interactive y/N):
+./scripts/merge-verified.sh <task>          # re-runs gates on trusted infra
+#   → MERGE into local main, or HOLD with a merge-hold.md digest
+#   → final "push main to origin + delete hub branch? (y/N)" — conscious choice,
+#     N keeps it local-only (never pre-answer y)
+
+# 7. Keep the hub current for the next task:
+./scripts/push-hub.sh laddy
+```
+
+### B. fullrun (once it lands — being built, slice S3)
+
+One **local** command wraps steps 2–7: `push → kickoff on VPS → poll → rw3
+(trusted cross-vendor review that feeds findings back to the developer) →
+merge-or-hold`, looping until merged/held, and **pausing + ntfy** at the human
+gates (L3 design approval, L3 merge confirm, the GitHub-push y/N).
+
+```bash
+./scripts/fullrun.sh <task>       # one task
+./scripts/fullrun.sh <project>    # all of a project's ready tasks
+./scripts/fullrun.sh              # = all: every project's every ready task
+```
+
+Both `fullrun` and `kickoff` will **auto-wrap in tmux** (shared
+`scripts/lib/tmux_wrap.sh`, on the TODO), so step 4's manual tmux goes away.
+
+---
+
 ## Before you start (once)
 
 Setup is a one-time thing per VPS user, done by the Director — see
@@ -106,8 +170,13 @@ Two gates run **interactively** in this SSH session, in order:
 2. **Design** — foreground for high-risk tasks; a no-op otherwise. A
    rejection here stops `kickoff.sh` before anything detaches.
 
-Then the loop **detaches** (`nohup`) and runs unattended — it survives
-an SSH drop.
+Then the loop **detaches** (`nohup`) and runs unattended — the *loop*
+survives an SSH drop. The two gates above do **not**: they run foreground,
+so a dropped SSH kills them before the loop ever detaches and the task
+silently never starts. **Run `kickoff.sh` inside `tmux`** (`tmux new -A -s
+<task>`) so a drop leaves the gates running — reconnect with `tmux attach
+-t <task>`. This matters most for high-risk tasks, whose design gate blocks
+on "Approve this approach?" and cannot be answered once the pipe is gone.
 
 ### 4. Watch it
 
