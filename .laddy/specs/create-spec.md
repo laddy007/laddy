@@ -23,11 +23,25 @@ branch. It just isn't exposed as a thin, env.local-based launcher. `kickoff.sh`
 is the model to mirror, but it sources `env.vps` and always continues into
 clarify → design → loop.
 
+Separately, the authoring prompt itself (`SPEC_AUTHOR_PROMPT` in `_phase_new`)
+is thin: it tells the agent to "fill in the rest (Markdown; optional front
+matter with type/roles)" and nothing about the house spec structure, the `risk`
+field, `status: draft-proposal`, the "small / testable / self-contained, slice
+big tasks" discipline, or any project context — so a well-structured spec today
+is convention, not something the tool guides. It also still says "myapp agent"
+(stale naming). Since create-spec exists to make local authoring good, the same
+change enriches that shared prompt so authored specs come out consistently
+structured — and this benefits `kickoff --new` too, since both go through
+`_phase_new`.
+
 ## Scope
-In: a new `scripts/create-spec.sh`; a doc line in `env.local.example` if a knob
-needs mentioning; tests under `tests/`.
-Out: any change to `_phase_new` behaviour; running clarify/design/loop; any
-dependency on `vps.conf`; any VPS execution; touching the merge/trust path.
+In: a new `scripts/create-spec.sh`; an enriched `SPEC_AUTHOR_PROMPT` in
+`_phase_new` (`orchestrator/run.py`) — a structured spec-format template + brief
+project context, plus fixing the stale "myapp agent" naming; a doc line in
+`env.local.example` if a knob needs mentioning; tests under `tests/`.
+Out: any change to `_phase_new`'s control flow (seed → author → commit/push) or
+the launcher's phase set beyond the prompt *text*; running clarify/design/loop;
+any dependency on `vps.conf`; any VPS execution; touching the merge/trust path.
 
 ## Behaviour
 `create-spec.sh <task>`:
@@ -47,6 +61,22 @@ dependency on `vps.conf`; any VPS execution; touching the merge/trust path.
 6. Propagates `_phase_new`'s exit code (e.g. the "authoring added nothing beyond
    the headline" and "spec already exists" refusals surface unchanged).
 
+### Enriched authoring prompt
+`SPEC_AUTHOR_PROMPT` is rewritten to guide the agent to produce a house-style
+spec, at minimum:
+- **front matter**: `type`, `roles`, `risk` (`low|medium|high`), and the
+  optional `status: draft-proposal` (with a one-line note on what draft means —
+  the loop refuses to run it);
+- **sections**: `# <task> — headline`, `## Goal`, root-cause/why context,
+  `## Scope` (explicit In / Out), `## Acceptance criteria` (numbered and
+  **testable**), `## Notes`;
+- **discipline**: keep specs small, self-contained, and testable; a large task
+  is sliced (S0, S1, …) and NOT run as one loop;
+- **naming**: target-generic (derive the target name from config / use a neutral
+  term) — remove the hardcoded "myapp agent".
+The prompt stays a co-authoring instruction (discuss, then fill in and stop); it
+gains structure, not a change to the authoring flow.
+
 ## Acceptance criteria
 1. `create-spec.sh <task>` sources `env.local` (NOT `env.vps`) and needs no
    `vps.conf`: it runs with only `env.local` present. Asserted by a test whose
@@ -62,6 +92,15 @@ dependency on `vps.conf`; any VPS execution; touching the merge/trust path.
 5. The follow-up hint naming `kickoff <task>` on the VPS is printed on success.
 6. Suite green (`ruff`, `basedpyright`, `pytest`). The script is a thin launcher
    mirroring `kickoff.sh`; keep its style consistent with the existing scripts.
+7. `SPEC_AUTHOR_PROMPT` names the required front-matter fields (incl. `risk` and
+   the optional `status: draft-proposal`) and the section structure (Goal /
+   Scope In-Out / numbered testable Acceptance criteria / Notes) and the
+   small/testable/slice discipline — asserted by a test on the prompt string
+   (the fields/section names are present) so both `create-spec` and
+   `kickoff --new` produce structured specs.
+8. The stale "myapp agent" wording is gone from the prompt; the target name is
+   target-generic — asserted by a test that the literal "myapp" no longer
+   appears in `SPEC_AUTHOR_PROMPT`.
 
 ## Notes
 - `env.local`'s `AGENT_REPO_URL` already points at the VPS hub, so `_phase_new`
@@ -72,4 +111,7 @@ dependency on `vps.conf`; any VPS execution; touching the merge/trust path.
   kickoff, note it and adjust the follow-up guidance rather than silently
   assuming it works.
 - Do not re-implement authoring logic; the script is purely a launcher around the
-  already-tested `--phase new`.
+  already-tested `--phase new`. The only code touched in `_phase_new` is the
+  prompt *text* (`SPEC_AUTHOR_PROMPT`), which is shared, so `kickoff --new` picks
+  up the better structure for free — verify its existing authoring test still
+  passes.
