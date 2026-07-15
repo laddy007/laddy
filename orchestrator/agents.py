@@ -117,6 +117,11 @@ DEFAULT_CODEX_CMD: tuple[str, ...] = ("codex", "exec", "--full-auto")
 # Senior reviewer escalation (design S13: senior = Claude Opus).
 DEFAULT_SENIOR_CMD: tuple[str, ...] = DEFAULT_CLAUDE_CMD + ("--model", "claude-opus-4-8")
 
+# rw2 reviewer. Historically the Codex cross-vendor guard; now Claude (Sonnet)
+# because this deployment has no codex login. Override with RW2_CMD in env.vps.
+# NOTE: this drops the cross-vendor property - rw1 and rw2 are both Claude now.
+DEFAULT_RW2_CMD: tuple[str, ...] = DEFAULT_CLAUDE_CMD + ("--model", "sonnet")
+
 # --- Least-privilege LOCAL review commands (trust-model S4/S10) ---------------
 #
 # The local panel (rw2 + security) reviews UNTRUSTED branch code on the

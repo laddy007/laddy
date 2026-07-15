@@ -7,4 +7,10 @@ services:
       dockerfile: ${TARGET_DIR_NAME:-.laddy}/docker/Dockerfile.test
     environment:
       GATE_COMMAND: ${GATE_COMMAND:-ruff check . && basedpyright && pytest -n auto -q}
-    command: ["sh", "-lc", "$$GATE_COMMAND"]
+    # eval, not a bare $$GATE_COMMAND: exec-form command has no outer shell to
+    # expand-then-reparse the var, so an unquoted "$GATE_COMMAND" here is just
+    # one word handed to `sh -c` - it field-splits on IFS and runs `set` with
+    # the pieces as args ("Illegal option -;") instead of executing the ';'-
+    # and '&&'-joined gate steps. eval re-parses the (quoted, unsplit) value
+    # as shell syntax, which is what the gate command actually needs.
+    command: ["sh", "-lc", "eval \"$$GATE_COMMAND\""]

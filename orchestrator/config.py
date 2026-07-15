@@ -75,6 +75,7 @@ class OrchestratorConfig:
     fast_commands: str = DEFAULT_FAST_COMMANDS
     claude_cmd: tuple[str, ...] = field(default_factory=tuple)
     codex_cmd: tuple[str, ...] = field(default_factory=tuple)
+    rw2_cmd: tuple[str, ...] = field(default_factory=tuple)
     senior_cmd: tuple[str, ...] = field(default_factory=tuple)
     # LOCAL trusted-panel reviewers - least-privilege, never write/exec.
     review_claude_cmd: tuple[str, ...] = field(default_factory=tuple)
@@ -136,6 +137,7 @@ class OrchestratorConfig:
             fast_commands=env.get("TEST_COMMANDS", DEFAULT_FAST_COMMANDS),
             claude_cmd=_claude_cmd(env.get("CLAUDE_CMD")),
             codex_cmd=tuple(shlex.split(env["CODEX_CMD"])) if env.get("CODEX_CMD") else (),
+            rw2_cmd=_claude_cmd(env.get("RW2_CMD")),
             senior_cmd=_claude_cmd(env.get("SENIOR_CMD")),
             review_claude_cmd=_review_cmd(
                 env.get("REVIEW_CLAUDE_CMD"), DEFAULT_CLAUDE_REVIEW_CMD, claude=True

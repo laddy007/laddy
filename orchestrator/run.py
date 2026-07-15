@@ -23,11 +23,10 @@ from typing import Any
 from orchestrator import ENGINE_DIR, TARGET_DIR_NAME
 from orchestrator.agents import (
     DEFAULT_CLAUDE_CMD,
-    DEFAULT_CODEX_CMD,
+    DEFAULT_RW2_CMD,
     DEFAULT_SENIOR_CMD,
     AgentRunner,
     ClaudeRunner,
-    CodexRunner,
 )
 from orchestrator.artifacts import ROLE_PLAN, TaskArtifacts
 from orchestrator.clarify import has_clarify, run_clarify_gate
@@ -101,8 +100,8 @@ class Deps:
     make_runner: Callable[[OrchestratorConfig], AgentRunner] = lambda c: ClaudeRunner(
         c.claude_cmd or DEFAULT_CLAUDE_CMD
     )
-    make_rw2_runner: Callable[[OrchestratorConfig], AgentRunner] = lambda c: CodexRunner(
-        c.codex_cmd or DEFAULT_CODEX_CMD
+    make_rw2_runner: Callable[[OrchestratorConfig], AgentRunner] = lambda c: ClaudeRunner(
+        c.rw2_cmd or DEFAULT_RW2_CMD
     )
     make_senior_runner: Callable[[OrchestratorConfig], AgentRunner] = (
         lambda c: ClaudeRunner(c.senior_cmd or DEFAULT_SENIOR_CMD)

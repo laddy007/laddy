@@ -433,4 +433,8 @@ class BindingGate:
         rc, out, err = self.shell(
             self.command(sha, coverage_package, trusted_ref, compare_ref), wt
         )
-        return parse_binding_output(out, rc, combined_tail=f"{out}\n{err}")
+        # err first, out LAST (see _subprocess_shell_gate): docker/compose
+        # build+teardown noise floods stderr, so putting it first means _tail
+        # (last N lines) lands on stdout's @@GATE line and pytest/ruff/
+        # basedpyright result instead of burying it under container chatter.
+        return parse_binding_output(out, rc, combined_tail=f"{err}\n{out}")
