@@ -1,6 +1,6 @@
 ---
 type: feature
-status: draft
+status: done
 ---
 
 # claude-md-and-guides — agent-facing engine documentation
@@ -228,9 +228,7 @@ rules live there; applies to Claude Code, OpenAI Codex, and any other agent.
 - No engine code, test, script, or policy file is modified.
 ```
 
-## Open decisions for the Director
+## Decisions (resolved)
 
-- Spec location: placed in `specs/` (laddy has no `docs/` tree). Move if you
-  prefer elsewhere.
-- `oracle.md`: folded as a pointer inside `gate.md` for now; split out only on
-  request.
+- Spec location: `specs/` (laddy has no `docs/` tree).
+- `oracle.md`: folded as a pointer inside `gate.md`; split out only on request.
