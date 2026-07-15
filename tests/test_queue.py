@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from orchestrator.queue import QueueError, QueueLocked, TaskQueue, is_running, run_lock
+from orchestrator.queue import (
+    QueueError,
+    QueueLocked,
+    TaskQueue,
+    _pid_alive,
+    is_running,
+    run_lock,
+)
 
 
 def test_enqueue_items_fifo_order(tmp_path: Path) -> None:
@@ -82,3 +91,38 @@ def test_run_lock_is_exclusive_per_task(tmp_path: Path) -> None:
         with run_lock(tmp_path, "t2"):  # different task is fine
             pass
     assert is_running(tmp_path, "t1") is False
+
+
+def test_pid_alive(tmp_path: Path) -> None:
+    assert _pid_alive(os.getpid()) is True
+    assert _pid_alive(0) is False
+    assert _pid_alive(-1) is False
+    dead = subprocess.Popen(["true"])  # spawn + reap -> a definitely-dead pid
+    dead.wait()
+    assert _pid_alive(dead.pid) is False
+
+
+def test_run_lock_reclaims_stale_lock_from_dead_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A crashed loop left a lock file behind whose pid is no longer alive.
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "t1.lock").write_text("424242\n")
+    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: False)
+    # run_lock must reclaim the stale lock instead of raising QueueLocked.
+    with run_lock(tmp_path, "t1"):
+        assert is_running(tmp_path, "t1") is True
+    assert is_running(tmp_path, "t1") is False
+
+
+def test_run_lock_refuses_when_holder_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "t1.lock").write_text("424242\n")
+    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: True)
+    with pytest.raises(QueueLocked):
+        with run_lock(tmp_path, "t1"):
+            pass

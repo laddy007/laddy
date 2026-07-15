@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import LOG, TaskArtifacts
 
@@ -30,6 +32,25 @@ def test_append_log_is_append_only(tmp_path: Path) -> None:
     # existing bytes are never rewritten - strictly appended
     assert three_entries.startswith(two_entries)
     assert three_entries.count(b"\n") == 3
+
+
+def test_append_log_heartbeat_env_gated(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _artifacts(tmp_path)
+    # off by default: no stderr noise (keeps the rest of the suite quiet)
+    monkeypatch.delenv("LADDY_LOG_HEARTBEAT", raising=False)
+    art.append_log(action="fast_tests", outcome="pass", round=1)
+    assert capsys.readouterr().err == ""
+    # on: one line per entry to stderr, so a detached run's $LOG shows progress
+    monkeypatch.setenv("LADDY_LOG_HEARTBEAT", "1")
+    art.append_log(action="rw1", outcome="approved", round=2)
+    assert "[loop] r2 rw1: approved" in capsys.readouterr().err
+    # entry without a round still prints (no rN tag)
+    art.append_log(action="terminal", outcome="PUSHED")
+    assert "[loop] terminal: PUSHED" in capsys.readouterr().err
 
 
 def test_read_log_roundtrip_with_ts(tmp_path: Path) -> None:

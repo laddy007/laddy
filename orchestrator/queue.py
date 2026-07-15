@@ -111,19 +111,49 @@ class TaskQueue:
             lock_path.unlink(missing_ok=True)
 
 
+def _pid_alive(pid: int) -> bool:
+    """True iff a process with this pid currently exists.
+
+    A dead pid means a crashed loop left the lock behind (stale). PID reuse
+    (a recycled pid held by some unrelated process before the next run) is a
+    tiny theoretical window on a single-node box and no worse than the prior
+    behaviour, which never checked liveness at all and refused unconditionally.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user -> still alive
+    return True
+
+
 @contextmanager
 def run_lock(work_root: Path, task_id: str) -> Iterator[None]:
-    """Per-task run lock: exactly one loop (kickoff OR queue) per task."""
+    """Per-task run lock: exactly one loop (kickoff OR queue) per task.
+
+    A lock left behind by a crashed loop is auto-reclaimed: if the recorded
+    pid is no longer alive, the stale lock file is removed and re-acquired.
+    Only a lock held by a live process raises QueueLocked.
+    """
     locks = work_root / "locks"
     locks.mkdir(parents=True, exist_ok=True)
     lock_path = locks / f"{task_id}.lock"
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        raise QueueLocked(
-            f"task {task_id} already has a running loop "
-            f"(remove {lock_path} if stale)"
-        ) from None
+        try:
+            old = int(lock_path.read_text().strip() or "0")
+        except (ValueError, OSError):
+            old = 0
+        if _pid_alive(old):
+            raise QueueLocked(
+                f"task {task_id} already has a running loop (pid {old})"
+            ) from None
+        lock_path.unlink(missing_ok=True)  # stale -> reclaim
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
         os.write(fd, f"{os.getpid()}\n".encode())
         os.close(fd)

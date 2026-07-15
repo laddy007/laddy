@@ -196,7 +196,10 @@ ROOT_EOF
 AGENT_REPO_URL=\$HOME/repo_$project/hub.git
 AGENT_WORK_ROOT=\$HOME/repo_$project
 NTFY_TOPIC=$NTFY_TOPIC"
-  ENV_CONTENT_B64="$(printf '%s' "$ENV_CONTENT" | base64 | tr -d '\n')"
+  # printf '%s\n' guarantees a trailing newline so a later hand-append (e.g.
+  # TEST_COMMANDS) lands on its own line instead of gluing onto NTFY_TOPIC=...
+  # and being silently swallowed into that variable's value.
+  ENV_CONTENT_B64="$(printf '%s\n' "$ENV_CONTENT" | base64 | tr -d '\n')"
 
   # ------------------------------------------------------- phase 2: as user ---
   info "[$u] phase 2/2: toolchain + bare hub + engine checkout + env.vps (idempotent)"
