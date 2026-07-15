@@ -14,7 +14,7 @@ include = ["orchestrator", "tests"]
 failOnWarnings = false
 
 [[tool.basedpyright.executionEnvironments]]
-root = "tests/server_monitor"
+root = "tests/loop_monitor"
 extraPaths = ["monitoring"]
 
 [tool.pytest.ini_options]

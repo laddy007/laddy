@@ -207,7 +207,7 @@ class _PushBlipGitOps(GitOps):
     """Fails the Nth push call with a GitError (a network blip)."""
 
     def __init__(self, *args: object, fail_on: int, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         self._fail_on = fail_on
         self.push_calls = 0
 
