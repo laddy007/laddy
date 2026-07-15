@@ -1,0 +1,9 @@
+{
+  "task": "enginefix-loop-hardening",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

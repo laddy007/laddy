@@ -102,6 +102,18 @@ def test_pid_alive(tmp_path: Path) -> None:
     assert _pid_alive(dead.pid) is False
 
 
+def test_pid_alive_permission_error_means_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pid owned by another user: os.kill(pid, 0) raises PermissionError, which
+    # proves the process EXISTS -> a live holder, so the lock must not reclaim.
+    def _deny(pid: int, sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "kill", _deny)
+    assert _pid_alive(4242) is True
+
+
 def test_run_lock_reclaims_stale_lock_from_dead_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -123,6 +135,47 @@ def test_run_lock_refuses_when_holder_alive(
     locks.mkdir()
     (locks / "t1.lock").write_text("424242\n")
     monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: True)
+    with pytest.raises(QueueLocked):
+        with run_lock(tmp_path, "t1"):
+            pass
+
+
+def test_run_lock_reclaims_corrupt_lock_file(tmp_path: Path) -> None:
+    # A truncated/garbage lock file (crash mid-write, or empty) has no parseable
+    # pid: run_lock treats old=0 -> not alive -> reclaim, rather than crashing
+    # on int(). No monkeypatch: exercises the real _pid_alive(0) path too.
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "t1.lock").write_text("not-a-pid")
+    with run_lock(tmp_path, "t1"):
+        assert is_running(tmp_path, "t1") is True
+    assert is_running(tmp_path, "t1") is False
+
+
+def test_run_lock_concurrent_reclaim_raises_queue_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two loops race to reclaim the same stale lock: the loser's re-open (after
+    # its unlink) hits a lock the winner already recreated. That must surface as
+    # QueueLocked (clean rc=4), not an uncaught FileExistsError traceback.
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "t1.lock").write_text("424242\n")
+    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: False)
+
+    real_open = os.open
+    seen_excl = {"n": 0}
+
+    def flaky_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        # 1st O_EXCL open = the stale lock (real FileExistsError, as normal);
+        # 2nd = the reclaim re-open, which we force to lose the race.
+        if flags & os.O_EXCL:
+            seen_excl["n"] += 1
+            if seen_excl["n"] == 2:
+                raise FileExistsError
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", flaky_open)
     with pytest.raises(QueueLocked):
         with run_lock(tmp_path, "t1"):
             pass

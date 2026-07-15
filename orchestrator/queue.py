@@ -153,7 +153,17 @@ def run_lock(work_root: Path, task_id: str) -> Iterator[None]:
                 f"task {task_id} already has a running loop (pid {old})"
             ) from None
         lock_path.unlink(missing_ok=True)  # stale -> reclaim
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            # Another loop reclaimed the same stale lock between our unlink and
+            # re-open; it is now the live holder, so this is a normal contended
+            # lock, not a crash -> QueueLocked (which _phase_loop catches as
+            # rc=4) rather than an uncaught FileExistsError traceback.
+            raise QueueLocked(
+                f"task {task_id} already has a running loop "
+                f"(reclaimed concurrently)"
+            ) from None
     try:
         os.write(fd, f"{os.getpid()}\n".encode())
         os.close(fd)
