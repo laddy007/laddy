@@ -1,0 +1,24 @@
+# Reference only - scripts/local-onboard.sh writes local.conf for you
+# interactively on first run (and re-reads it silently on later runs).
+# This file documents the knobs; it is not sourced by anything itself.
+# local.conf is git-ignored (see .gitignore) - machine-local (hostnames,
+# paths). Mirror of vps.conf.example, but for the TRUSTED/local side: one
+# entry per target project this machine merges into.
+
+# LADDY_TARGETS: space-separated entries
+#   project:ssh_alias:hub_path:local_repo_path
+#   - project: target project name (charset [a-zA-Z0-9._-]) - matches the
+#     `project` field of that same target's VPS-side LADDY_USERS entry.
+#   - ssh_alias: an ~/.ssh/config Host entry that reaches the VPS user who
+#     owns this project's hub (key alias lives in ssh config - NEVER key
+#     material here).
+#   - hub_path: absolute path to the bare hub on the VPS, as seen by that
+#     alias (charset [a-zA-Z0-9._/-]) - e.g. /home/laddy/repo_laddy/hub.git.
+#     Matches HUB="$HOME/repo_<project>/hub.git" from vps-onboard.sh.
+#   - local_repo_path: absolute path to this project's own trusted checkout
+#     on THIS machine (charset [a-zA-Z0-9._/-]) - must already exist (clone
+#     it from GitHub yourself; local-onboard.sh never clones). This is where
+#     the `laddy` git remote gets added and env.local gets written.
+# Parsing lives in scripts/lib/laddy_targets.sh; to onboard more than one
+# project, add more space-separated entries and re-run local-onboard.sh.
+LADDY_TARGETS="laddy:vps-laddy:/home/laddy/repo_laddy/hub.git:/mnt/c/myprogramfiles/laddy"

@@ -33,7 +33,17 @@ if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
+else
+  echo "WARN: $ENV_FILE not found - falling back to orchestrator defaults (fast-commands, no TEST_COMMANDS gate)." >&2
+  echo "      Run ./scripts/local-onboard.sh to generate it for this project (see local.conf.example)." >&2
 fi
+
+# discover_ready fetches task branches from the AGENT_BRANCH_REMOTE remote
+# (default origin) - fail fast with the exact fix instead of a raw git error
+# if that remote isn't wired up yet.
+BRANCH_REMOTE="${AGENT_BRANCH_REMOTE:-origin}"
+git -C "$REPO_DIR" remote get-url "$BRANCH_REMOTE" >/dev/null 2>&1 \
+  || die "git remote '$BRANCH_REMOTE' (AGENT_BRANCH_REMOTE) not found in $REPO_DIR - run ./scripts/local-onboard.sh to add it, or add it by hand: git -C $REPO_DIR remote add $BRANCH_REMOTE ssh://<alias><hub-path>"
 
 export PYTHONPATH="$ENGINE_DIR${PYTHONPATH:+:$PYTHONPATH}"
 PY="${PYTHON_BIN:-python3}"

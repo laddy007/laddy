@@ -4,6 +4,7 @@
 env.local
 env.vps
 vps.conf
+local.conf
 tmp/
 
 # Internal review/audit notes - not for public release.
