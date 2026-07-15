@@ -1,0 +1,64 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "scripts/vps-onboard.sh",
+    "orchestrator/queue.py",
+    "orchestrator/artifacts.py",
+    "scripts/kickoff.sh",
+    "env.vps.example",
+    "tests/test_vps_onboard.py",
+    "tests/test_queue.py",
+    "tests/test_artifacts.py",
+    "tests/test_kickoff_wiring.py",
+    "orchestrator/loop.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "AC#1: onboard encodes env with a trailing newline so an appended VAR=value parses independently",
+      "evidence": "scripts/vps-onboard.sh:202 uses printf '%s\\n'; tests/test_vps_onboard.py behavioral test + negative control pass",
+      "verified": true
+    },
+    {
+      "claim": "AC#2: run_lock reclaims a dead-pid lock, refuses a live holder, and concurrent reclaimers cannot both win",
+      "evidence": "orchestrator/queue.py:132-159 _acquire_lock serializes read-decide-write under an fcntl.flock guard on <task>.reclaim; QueueLocked raised before run_lock enters its try/finally (queue.py:172-177) so a live holder's lock is never unlinked",
+      "verified": true
+    },
+    {
+      "claim": "The double-reclaim TOCTOU flagged in Round 1 is fixed (no two live holders for one task)",
+      "evidence": "tests/test_queue.py test_run_lock_concurrent_reclaim_has_single_winner (fork, Barrier-synchronized real race, stale pid 999999999): exactly one acquired, one QueueLocked; test_run_lock_acquisition_is_serialized_by_guard_flock proves acquisition blocks while the guard flock is held",
+      "verified": true
+    },
+    {
+      "claim": "Existing per-task exclusivity contract still holds",
+      "evidence": "tests/test_queue.py test_run_lock_is_exclusive_per_task passes; python3 -m pytest tests/test_queue.py -> 15 passed",
+      "verified": true
+    },
+    {
+      "claim": "AC#3: kickoff launches loop unbuffered with heartbeat gate; heartbeat is env-gated",
+      "evidence": "scripts/kickoff.sh:70 `LADDY_LOG_HEARTBEAT=1 nohup \"$PY\" -u`; orchestrator/artifacts.py:154-165 env-gated stderr print; tests test_kickoff_launches_loop_observably + test_append_log_heartbeat_env_gated pass",
+      "verified": true
+    },
+    {
+      "claim": "Heartbeat fields match real callers (action/outcome/round)",
+      "evidence": "orchestrator/loop.py:929 passes round=rp.round with action/outcome; artifacts.py uses fields.get with graceful defaults for entries lacking round",
+      "verified": true
+    },
+    {
+      "claim": "AC#4: env.vps.example drops the duplicate-variable trap and documents fast vs Docker gate + venv-bootstrapping TEST_COMMANDS",
+      "evidence": "env.vps.example: AGENT_REPO_URL/AGENT_WORK_ROOT commented to placeholders; TEST_COMMANDS example runs `test -d .venv || python3 -m venv`; the active values come only from the onboard block at vps-onboard.sh:195-198",
+      "verified": true
+    },
+    {
+      "claim": "AC#5: full suite green, no regression",
+      "evidence": "python3 -m pytest -q -> 631 passed in 131.14s",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "AC#1: test_onboard_encodes_env_with_trailing_newline (static guard), test_appended_var_parses_independently (behavioral repro of encode/append/source), test_reproduces_the_original_glue_bug_without_newline (negative control). AC#2: test_pid_alive + test_pid_alive_permission_error_means_alive (liveness unit incl. pid<=0, reaped pid, EPERM=alive), test_run_lock_reclaims_stale_lock_from_dead_holder, test_run_lock_refuses_when_holder_alive, test_run_lock_reclaims_corrupt_lock_file (malformed/truncated input), test_run_lock_concurrent_reclaim_has_single_winner (real multi-process race), test_run_lock_acquisition_is_serialized_by_guard_flock (mechanism guard); plus the pre-existing exclusivity test. AC#3: test_kickoff_launches_loop_observably (wiring for -u + heartbeat env) and test_append_log_heartbeat_env_gated (off-by-default quiet, on with and without round tag). AC#4 is documentation prose; the trap it warns about is guarded by the AC#1 tests. New functions _pid_alive and _acquire_lock each have failure-mode coverage (dead pid, EPERM, corrupt file, empty pid, concurrent race, guard-held block). The heartbeat branch is exercised in both gated states.",
+  "residual_risks": [
+    "PID reuse: a recycled dead pid held by an unrelated process would be read as a live holder and refuse reclaim; documented in the code and no worse than prior behaviour on a single-node box.",
+    "fcntl is POSIX-only; the orchestrator targets a Linux VPS so this is fine, but the module would no longer import on Windows (the prior O_EXCL path was cross-platform). Acceptable given the deployment target."
+  ]
+}

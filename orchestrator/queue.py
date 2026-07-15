@@ -2,13 +2,16 @@
 
 Lives under AGENT_WORK_ROOT (runtime state -- never committed to the
 repo). One JSON file per item, ordered by a numeric filename prefix.
-A .lock file created O_EXCL makes queue processing single-flight per
-node; surviving a VPS reboot is explicitly out of scope (a stale lock
-is removed by hand, the error message says which file).
+A per-task .lock file holding the holder's pid makes loop processing
+single-flight per node; acquisition is serialized by an flock guard so
+concurrent reclaimers cannot both win, and a lock left by a crashed
+loop (dead pid) is reclaimed automatically on the next run.
 """
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
 from collections.abc import Callable, Iterator
@@ -111,22 +114,123 @@ class TaskQueue:
             lock_path.unlink(missing_ok=True)
 
 
+def _pid_alive(pid: int) -> bool:
+    """True iff a process with this pid currently exists.
+
+    A dead pid means a crashed loop left the lock behind (stale). PID reuse
+    (a recycled pid held by some unrelated process before the next run) is a
+    tiny theoretical window on a single-node box and no worse than the prior
+    behaviour, which never checked liveness at all and refused unconditionally.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user -> still alive
+    return True
+
+
+def _refuse_symlink(lock_path: Path, exc: OSError) -> None:
+    if exc.errno == errno.ELOOP:
+        raise QueueLocked(
+            f"lock path {lock_path} is a symlink - refusing to follow it "
+            "(possible attack or corrupted state; remove it by hand)"
+        ) from exc
+    raise exc
+
+
+def _read_lock_pid(lock_path: Path) -> int:
+    """Read the pid recorded in lock_path, NEVER following a symlink.
+
+    O_NOFOLLOW makes the open itself fail (ELOOP) if the final path component
+    is a symlink, rather than opening whatever it points to - a bare
+    Path.read_text()/open() would happily read (and, on the write side,
+    truncate) an attacker-planted symlink's target. Returns 0 (treated as "no
+    live holder") for a missing, empty, or unparseable file - the caller
+    already tolerates a stale/corrupt lock left by a crashed loop.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        _refuse_symlink(lock_path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises
+    with os.fdopen(fd) as f:
+        data = f.read().strip()
+    try:
+        return int(data or "0")
+    except ValueError:
+        return 0  # truncated / garbage content -> treat as no live pid
+
+
+def _write_lock_pid(lock_path: Path) -> None:
+    """Create or overwrite lock_path with our pid, NEVER following a symlink.
+
+    See _read_lock_pid: O_NOFOLLOW is what makes this refuse to write through
+    a swapped-in symlink instead of truncating whatever file it points to.
+    """
+    try:
+        fd = os.open(
+            lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        )
+    except OSError as exc:
+        _refuse_symlink(lock_path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{os.getpid()}\n")
+
+
+def _acquire_lock(locks: Path, lock_path: Path, task_id: str) -> None:
+    """Take the per-task lock, reclaiming one left by a crashed loop.
+
+    Writes our pid into lock_path, or raises QueueLocked if a live process
+    already holds it (or if lock_path has been replaced by a symlink - see
+    _read_lock_pid/_write_lock_pid).
+
+    Every acquire decision for a task is serialized by an flock on a dedicated
+    guard file, so the whole read-pid -> decide -> write-pid sequence is atomic
+    across racing loops. Two racers can therefore never both observe the lock
+    as free/stale and both take it (the defect a bare unlink-then-O_EXCL-create
+    allowed: a loser's unlink could delete the winner's freshly created lock,
+    letting both opens succeed -> two live holders for one task). The pid file
+    is only ever read or written while the guard is held, so there is also no
+    empty-file window a concurrent reclaimer could misread as stale. flock is
+    released by the kernel when the fd closes OR the holder dies, so the guard
+    itself never goes stale the way a bare pid file can.
+    """
+    guard_fd = os.open(locks / f"{task_id}.reclaim", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(guard_fd, fcntl.LOCK_EX)  # blocks until sole acquirer
+        old = _read_lock_pid(lock_path)
+        if _pid_alive(old):
+            raise QueueLocked(
+                f"task {task_id} already has a running loop (pid {old})"
+            )
+        # else: no live pid recorded -> free or crashed holder, reclaim it
+        _write_lock_pid(lock_path)  # create or reclaim (guard held)
+    finally:
+        os.close(guard_fd)  # releases the flock
+
+
 @contextmanager
 def run_lock(work_root: Path, task_id: str) -> Iterator[None]:
-    """Per-task run lock: exactly one loop (kickoff OR queue) per task."""
+    """Per-task run lock: exactly one loop (kickoff OR queue) per task.
+
+    A lock left behind by a crashed loop is auto-reclaimed: if the recorded
+    pid is no longer alive, the stale lock is taken over. Acquisition is
+    serialized per task by an flock (see _acquire_lock), so concurrent
+    reclaimers can never both win. Only a lock held by a live process raises
+    QueueLocked.
+    """
     locks = work_root / "locks"
     locks.mkdir(parents=True, exist_ok=True)
     lock_path = locks / f"{task_id}.lock"
+    _acquire_lock(locks, lock_path, task_id)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise QueueLocked(
-            f"task {task_id} already has a running loop "
-            f"(remove {lock_path} if stale)"
-        ) from None
-    try:
-        os.write(fd, f"{os.getpid()}\n".encode())
-        os.close(fd)
         yield
     finally:
         lock_path.unlink(missing_ok=True)

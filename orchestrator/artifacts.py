@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -150,6 +151,18 @@ class TaskArtifacts:
     def append_log(self, **fields: Any) -> None:
         """Append exactly one line; never rewrites existing content."""
         append_jsonl(self._ensure() / LOG, {"ts": self._now(), **fields})
+        # Heartbeat: mirror a one-line summary so a detached run's $LOG shows
+        # progress (loop.py is otherwise silent; run.py prints only the terminal
+        # state). stderr = diagnostic stream; env-gated so tests/CLI stay quiet.
+        if os.environ.get("LADDY_LOG_HEARTBEAT") == "1":
+            rnd = fields.get("round")
+            tag = f"r{rnd} " if rnd is not None else ""
+            print(
+                f"[loop] {tag}{fields.get('action', '?')}: "
+                f"{fields.get('outcome', '')}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def read_log(self) -> list[dict[str, Any]]:
         return read_jsonl(self.dir / LOG)

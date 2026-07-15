@@ -1,0 +1,8 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: orchestrator/artifacts.py, orchestrator/queue.py, scripts/kickoff.sh, scripts/vps-onboard.sh",
+    "high_risk"
+  ]
+}

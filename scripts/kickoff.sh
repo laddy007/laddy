@@ -64,7 +64,10 @@ fi
 }
 
 # Phase 2: loop - detached, survives SSH drop.
-nohup "$PY" -m orchestrator.run "$TASK" --phase loop ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null &
+# -u: unbuffered, so a crash before the terminal-state print does not swallow
+# buffered output (an empty $LOG that looked like an instant death otherwise).
+# LADDY_LOG_HEARTBEAT: mirror each iteration-log entry to $LOG as it happens.
+LADDY_LOG_HEARTBEAT=1 nohup "$PY" -u -m orchestrator.run "$TASK" --phase loop ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null &
 PID=$!
 echo "[kickoff] loop detached (pid $PID); log: $LOG"
 echo "[kickoff] follow with: tail -f $LOG"
