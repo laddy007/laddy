@@ -155,6 +155,54 @@ def test_missing_parent_directory_is_a_clean_refusal(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_force_refuses_hard_link_to_outside_file(tmp_path: Path) -> None:
+    # A hard link at the target pointing at a sensitive file IS a regular,
+    # non-symlink file: O_NOFOLLOW + S_ISREG alone would truncate it. --force
+    # must refuse it (st_nlink != 1) and leave the linked file untouched.
+    victim = tmp_path / "victim.secret"
+    victim.write_text("do not touch\n")
+    target = tmp_path / "report.md"
+    os.link(victim, target)  # hard link: same inode, not a symlink
+
+    with pytest.raises(ReportPathError, match="hard link"):
+        write_report("pwned", target, tmp_path, force=True)
+
+    assert victim.read_text() == "do not touch\n"  # inode never truncated
+    assert target.read_text() == "do not touch\n"  # still the same inode
+
+
+def test_parent_symlink_swapped_in_after_check_is_caught_at_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simulate the parent-directory TOCTOU: the confinement check (realpath) is
+    # forced to report a benign in-root parent, as if the symlink were swapped
+    # in only AFTER the check. The dir-fd walk (O_NOFOLLOW) must still catch the
+    # escape at open time, so nothing is written outside the root.
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside)  # the "raced-in" symlink parent
+    target = root / "link" / "report.md"
+
+    real_realpath = os.path.realpath
+
+    def fake_realpath(path: object, *args: object, **kwargs: object) -> str:
+        # Pretend root/link resolves to a real directory under root (the state
+        # the attacker showed the checker), while the filesystem still has it
+        # as a symlink for the actual open to trip over.
+        if os.fspath(path) == os.fspath(root / "link"):  # type: ignore[arg-type]
+            return os.fspath(root / "link")
+        return real_realpath(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os.path, "realpath", fake_realpath)
+
+    with pytest.raises(ReportPathError):
+        write_report("x", target, root)
+
+    assert not (outside / "report.md").exists()  # escape never happened
+
+
 def test_render_markdown_starts_with_heading_and_keeps_lines_separate() -> None:
     body = "Window: a .. b\nPeak CPU: 1.0%\n\nNearest sample: c"
     rendered = render_markdown(body)
