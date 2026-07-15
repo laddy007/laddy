@@ -14,6 +14,7 @@ from loop_monitor.config import MonitorConfig
 from loop_monitor.docker_api import DockerAPI, DockerUnavailable
 from loop_monitor.events import emit_hook_event
 from loop_monitor.report import build_report, json_report, overhead_report, parse_time
+from loop_monitor.report_path import ReportPathError, render_markdown, write_report
 
 
 def _config() -> MonitorConfig:
@@ -65,6 +66,21 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--at", help="ISO timestamp; defaults to now")
     report.add_argument("--window-minutes", type=float, default=5.0)
     report.add_argument("--json", action="store_true", dest="as_json")
+    report.add_argument(
+        "--out",
+        type=Path,
+        help="write the report to this .md file (guarded) instead of stdout",
+    )
+    report.add_argument(
+        "--out-root",
+        type=Path,
+        help="allowed output root for --out (defaults to the monitor data_dir)",
+    )
+    report.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing regular file at --out",
+    )
     overhead = subparsers.add_parser("overhead", help="measure monitor overhead")
     overhead.add_argument("--hours", type=float, default=24.0)
     subparsers.add_parser("check", help="verify local prerequisites")
@@ -90,8 +106,21 @@ def main(argv: list[str] | None = None) -> int:
         print(overhead_report(config.data_dir, args.hours))
         return 0
     if args.command == "report":
+        if args.out is not None and args.as_json:
+            report.error("--out cannot be combined with --json")
         at = parse_time(args.at) if args.at else time.time()
         window = max(0.25, args.window_minutes) * 60
+        if args.out is not None:
+            out_root = args.out_root if args.out_root is not None else config.data_dir
+            body = build_report(config.data_dir, at, window)
+            try:
+                write_report(
+                    render_markdown(body), args.out, out_root, force=args.force
+                )
+            except ReportPathError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            return 0
         output = (
             json_report(config.data_dir, at, window)
             if args.as_json
