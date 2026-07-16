@@ -48,8 +48,10 @@ def write_note(
     ``ProjectNameError`` before touching the filesystem), then creates the file
     race-free with ``O_CREAT | O_EXCL``, retrying ``name-2.md``, ``name-3.md`` …
     on collision so an existing file is never overwritten. Raises ``WriteError``
-    if the resolved path would escape ``folder`` (defence in depth) or if no free
-    name is found within ``limit`` attempts.
+    if the resolved path would escape ``folder`` (defence in depth), if no free
+    name is found within ``limit`` attempts, or if the underlying OS write fails
+    (e.g. a read-only folder or a full disk). ``WriteError`` messages never
+    contain the folder path, so the caller can surface them safely.
     """
     if not validate_project_name(project_name):
         raise ProjectNameError("project_name failed the allowlist guard")
@@ -64,9 +66,18 @@ def write_note(
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
+            # Name already taken - try the next disambiguated candidate.
             continue
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        except OSError as exc:
+            # A genuine OS failure (PermissionError, ENOSPC, …). Re-raise as a
+            # path-free WriteError so the raw errno string - which contains the
+            # absolute path - never reaches the untrusted caller (AC6).
+            raise WriteError("could not create the note file") from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+        except OSError as exc:
+            raise WriteError("could not write the note contents") from exc
         return candidate
 
     raise WriteError("no free filename found within the dedup limit")

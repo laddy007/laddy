@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -57,3 +58,35 @@ def test_write_note_exhausts_dedup_limit(tmp_path: Path) -> None:
     (tmp_path / "notes-2.md").write_text("b", encoding="utf-8")
     with pytest.raises(WriteError):
         write_note(tmp_path, "notes", "c", limit=2)
+
+
+def test_write_note_wraps_os_error_as_path_free_write_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine OS failure at create time (read-only folder / full disk) must be
+    # re-raised as a WriteError whose message never contains the absolute path -
+    # not leak the raw errno string (which does) to the caller. See AC6.
+    def boom(path: object, *args: object, **kwargs: object) -> int:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("note_server.writer.os.open", boom)
+    with pytest.raises(WriteError) as excinfo:
+        write_note(tmp_path, "notes", "body")
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+def test_write_note_wraps_write_time_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file is created but the write itself fails (e.g. ENOSPC): still a
+    # path-free WriteError, not a raw OSError escaping the writer.
+    import os
+
+    def boom_fdopen(fd: int, *args: object, **kwargs: object) -> NoReturn:
+        os.close(fd)  # release the descriptor write_note handed us
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("note_server.writer.os.fdopen", boom_fdopen)
+    with pytest.raises(WriteError) as excinfo:
+        write_note(tmp_path, "notes", "body")
+    assert str(tmp_path) not in str(excinfo.value)

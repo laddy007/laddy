@@ -106,6 +106,44 @@ def test_error_messages_never_contain_folder_path(tmp_path: Path) -> None:
         assert folder not in message
 
 
+def test_write_error_response_is_clean_and_hides_folder_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine OS write failure (read-only folder / full disk) must yield a
+    # clean write-error response that names the failing check and never contains
+    # the folder's absolute path - the raw errno string leaks it (AC6).
+    def boom(path: object, *args: object, **kwargs: object) -> int:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("note_server.writer.os.open", boom)
+    result = handle_save_note(
+        _cfg(tmp_path), _valid_token(), "proj", "body", now=FIXED_NOW
+    )
+    assert "write" in result.lower()
+    assert str(tmp_path) not in result
+
+
+def test_call_tool_write_failure_never_leaks_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end guard: even through FastMCP, an OS write failure must not
+    # surface a ToolError disclosing the absolute path. The handler returns a
+    # clean string, so call_tool completes with no exception.
+    def boom(path: object, *args: object, **kwargs: object) -> int:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("note_server.writer.os.open", boom)
+    server = build_server(_cfg(tmp_path))
+    token = totp(KEY, time.time())
+    result = asyncio.run(
+        server.call_tool(
+            "save_note",
+            {"token": token, "project_name": "proj", "content": "body"},
+        )
+    )
+    assert str(tmp_path) not in repr(result)
+
+
 def test_success_message_names_which_check_and_only_the_basename(
     tmp_path: Path,
 ) -> None:
