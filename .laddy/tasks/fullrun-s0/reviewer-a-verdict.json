@@ -1,0 +1,81 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "orchestrator/run.py",
+    "orchestrator/agents.py",
+    "orchestrator/config.py",
+    "env.vps.example",
+    "env.local.example",
+    "pyproject.toml",
+    "tests/test_role_runner.py",
+    "tests/test_config.py",
+    "tests/test_agents.py",
+    "tests/test_run_cli.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "AC1: defaults unchanged — developer/rw1/clarify->Claude default, rw2->claude/sonnet, senior->claude/opus",
+      "evidence": "run.py:96-105 _legacy_role_cmd returns DEFAULT_RW2_CMD/DEFAULT_SENIOR_CMD/DEFAULT_CLAUDE_CMD; tests/test_role_runner.py test_default_* all pass (140 passed)",
+      "verified": true
+    },
+    {
+      "claim": "AC2: ROLE_RW2_VENDOR=codex yields CodexRunner with no code change, others stay Claude",
+      "evidence": "run.py:107-129 _resolve_runner branches on binding.vendor; test_rw2_vendor_codex_yields_codex_runner + test_only_named_role_is_switched_others_stay_claude pass",
+      "verified": true
+    },
+    {
+      "claim": "AC3: model threads into --model flag (replace-in-place vs append), thinking threads into codex -c model_reasoning_effort= and is a no-op for claude",
+      "evidence": "agents.py:148-161 set_model_flag; run.py:118-128; tests test_claude_model_override_replaces_existing_model, test_codex_model_and_thinking_threaded, test_claude_thinking_is_documented_noop pass",
+      "verified": true
+    },
+    {
+      "claim": "AC4: uniform resolver, per-role factories removed",
+      "evidence": "run.py:139-141 single make_runner=_resolve_runner; make_rw2_runner/make_senior_runner deleted; test_deps_has_single_role_keyed_resolver asserts not hasattr",
+      "verified": true
+    },
+    {
+      "claim": "AC5: suite green (ruff, basedpyright, pytest)",
+      "evidence": "ruff 'All checks passed!'; basedpyright '0 errors, 1548 warnings'; pytest '686 passed'",
+      "verified": true
+    },
+    {
+      "claim": "Invalid vendor is fail-closed (ConfigError), not silent fallback",
+      "evidence": "config.py:100-105 raises ConfigError; test_role_binding_invalid_vendor_raises passes",
+      "verified": true
+    },
+    {
+      "claim": "Deleted .laddy/specs/*.md are divergence artifacts (origin/main advanced past merge-base), not branch scope creep",
+      "evidence": "git log origin/main..HEAD -- those paths is empty; merge-base c8893d7 predates origin/main 0b7f1bd which added them",
+      "verified": true
+    },
+    {
+      "claim": "pyproject enableTypeIgnoreComments change does not mask new-code errors",
+      "evidence": "grep 'type: ignore' in config.py/agents.py/run.py returns nothing (rc=1)",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "pyproject.toml",
+      "line": 15,
+      "summary": "enableTypeIgnoreComments=true is a gate-config change outside the spec's declared 'In' file set (run.py/agents.py/env examples/tests); it is a justified reproducibility fix for pre-existing suppressions and does not affect new-code type checking, but it is technically scope-adjacent.",
+      "failure_scenario": ""
+    },
+    {
+      "severity": "advisory",
+      "category": "test-adequacy",
+      "file": "orchestrator/run.py",
+      "line": 125,
+      "summary": "Codex thinking-only path (ROLE_*_VENDOR=codex + THINKING but no MODEL) appends '-c model_reasoning_effort=' independently of model; only the combined model+thinking case is tested directly, though the branches are independent and each is exercised.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "AC1 covered by test_default_roles_are_claude_with_default_cmd/test_default_rw2_is_claude_sonnet/test_default_senior_is_claude_opus/test_legacy_cmd_env_overrides_still_flow_through and test_config.test_rw2_defaults_to_claude_sonnet_and_env_overrides. AC2 by test_rw2_vendor_codex_yields_codex_runner/test_only_named_role_is_switched_others_stay_claude/test_vendor_value_is_case_insensitive. AC3 by test_claude_model_override_appends/replaces, test_codex_model_and_thinking_threaded, test_claude_thinking_is_documented_noop, test_model_without_vendor_defaults_to_claude. AC4 by test_deps_has_single_role_keyed_resolver/test_every_role_resolves_through_the_same_function. AC5 verified by running ruff (clean), basedpyright (0 errors), pytest (686 passed). New functions have failure-mode tests: set_model_flag (empty cmd, trailing bare --model, replace-vs-append), _parse_role_bindings (blank value ignored, unknown knob/prefix near-misses, invalid vendor ConfigError, partial fields None, generic unknown-role parsing), role_bindings immutability.",
+  "residual_risks": [
+    "Codex '-c model_reasoning_effort=<v>' flag/placement correctness depends on the real codex CLI accepting a global -c override on 'codex exec' after --full-auto; not exercisable in unit tests (no live model), so this rests on the documented codex convention.",
+    "make_runner signature changed from (config) to (config, role) across all call sites and Deps injection; verified all in-tree callers updated (grep) and full suite green, but any out-of-tree caller of the old signature would break."
+  ]
+}

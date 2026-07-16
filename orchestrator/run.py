@@ -23,10 +23,13 @@ from typing import Any
 from orchestrator import ENGINE_DIR, TARGET_DIR_NAME
 from orchestrator.agents import (
     DEFAULT_CLAUDE_CMD,
+    DEFAULT_CODEX_CMD,
     DEFAULT_RW2_CMD,
     DEFAULT_SENIOR_CMD,
     AgentRunner,
     ClaudeRunner,
+    CodexRunner,
+    set_model_flag,
 )
 from orchestrator.artifacts import ROLE_PLAN, TaskArtifacts
 from orchestrator.clarify import has_clarify, run_clarify_gate
@@ -90,6 +93,42 @@ def _default_author_spec(wt: Path, task_id: str, spec_rel: str) -> None:
     subprocess.run(["claude", prompt], cwd=wt, check=False)
 
 
+def _legacy_role_cmd(config: OrchestratorConfig, role: str) -> tuple[str, ...]:
+    """The backward-compatible Claude command for a role when no ROLE_* vendor
+    override is set. This is the ONLY per-role data left: rw2 and senior carry a
+    different default model than the developer/rw1/clarify chain, driven by the
+    legacy ``RW2_CMD``/``SENIOR_CMD``/``CLAUDE_CMD`` knobs. No runner selection
+    branches on it -- that is uniform in `_resolve_runner`."""
+    if role == "rw2":
+        return config.rw2_cmd or DEFAULT_RW2_CMD
+    if role == "senior":
+        return config.senior_cmd or DEFAULT_SENIOR_CMD
+    return config.claude_cmd or DEFAULT_CLAUDE_CMD
+
+
+def _resolve_runner(config: OrchestratorConfig, role: str) -> AgentRunner:
+    """One uniform role -> {vendor, model, thinking} -> runner resolver (spec
+    fullrun-s0). With no ROLE_* env for a role the binding is absent, vendor
+    defaults to claude, and the command is byte-for-byte the legacy per-role
+    fallback -- so unconfigured deployments are unchanged."""
+    binding = config.role_bindings.get(role)
+    vendor = (binding.vendor if binding else None) or "claude"
+    if vendor == "claude":
+        cmd = _legacy_role_cmd(config, role)
+        if binding and binding.model:
+            cmd = set_model_flag(cmd, binding.model)
+        # `claude -p` exposes no headless reasoning flag: thinking is a
+        # documented no-op here (never an error), per the spec.
+        return ClaudeRunner(cmd)
+    cmd = config.codex_cmd or DEFAULT_CODEX_CMD
+    if binding and binding.model:
+        cmd = set_model_flag(cmd, binding.model)
+    if binding and binding.thinking:
+        # codex exec: reasoning effort via the `-c key=value` global override.
+        cmd = (*cmd, "-c", f"model_reasoning_effort={binding.thinking}")
+    return CodexRunner(cmd)
+
+
 @dataclass
 class Deps:
     """Injectable collaborators; tests replace these with fakes."""
@@ -97,15 +136,9 @@ class Deps:
     make_gitops: Callable[[OrchestratorConfig], GitOps] = lambda c: GitOps(
         c.repo_url, c.work_root, c.default_branch
     )
-    make_runner: Callable[[OrchestratorConfig], AgentRunner] = lambda c: ClaudeRunner(
-        c.claude_cmd or DEFAULT_CLAUDE_CMD
-    )
-    make_rw2_runner: Callable[[OrchestratorConfig], AgentRunner] = lambda c: ClaudeRunner(
-        c.rw2_cmd or DEFAULT_RW2_CMD
-    )
-    make_senior_runner: Callable[[OrchestratorConfig], AgentRunner] = (
-        lambda c: ClaudeRunner(c.senior_cmd or DEFAULT_SENIOR_CMD)
-    )
+    # role -> runner: one resolver for every role (developer/rw1/clarify/rw2/
+    # senior/...); the hardcoded per-role factories are gone (spec fullrun-s0).
+    make_runner: Callable[[OrchestratorConfig, str], AgentRunner] = _resolve_runner
     ask: Callable[[str], str] = _stdin_ask
     shell: ShellRunner = field(default=_subprocess_shell)
     # Separate shell for the containerized authoritative gate: it orders stderr
@@ -195,7 +228,7 @@ def _phase_clarify(
     spec_path = wt / _spec_rel(task_id)
     artifacts.copy_spec(spec_path)
     count = run_clarify_gate(
-        deps.make_runner(config), wt, _spec_rel(task_id), deps.ask, artifacts
+        deps.make_runner(config, "clarify"), wt, _spec_rel(task_id), deps.ask, artifacts
     )
     # keep the artifact copy in sync with the (possibly clarified) spec
     artifacts.copy_spec(spec_path)
@@ -374,10 +407,10 @@ def _build_orchestrator(
     )
     return Orchestrator(
         gitops=gitops,
-        dev_runner=deps.make_runner(config),
-        rw1_runner=deps.make_runner(config),
-        rw2_runner=deps.make_rw2_runner(config) if "rw2" in roles else None,
-        senior_runner=deps.make_senior_runner(config) if "rw2" in roles else None,
+        dev_runner=deps.make_runner(config, "developer"),
+        rw1_runner=deps.make_runner(config, "rw1"),
+        rw2_runner=deps.make_runner(config, "rw2") if "rw2" in roles else None,
+        senior_runner=deps.make_runner(config, "senior") if "rw2" in roles else None,
         docker_gate=docker_gate,
         composition=roles,
         policy_enabled=True,

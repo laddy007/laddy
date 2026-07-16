@@ -1,0 +1,68 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "orchestrator/run.py",
+    "orchestrator/agents.py",
+    "orchestrator/config.py",
+    "env.vps.example",
+    "env.local.example",
+    "pyproject.toml",
+    "tests/test_role_runner.py",
+    "tests/test_config.py",
+    "tests/test_agents.py",
+    "tests/test_run_cli.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "All in-tree callers of make_runner use the new (config, role) signature; no stale 1-arg caller left",
+      "evidence": "grep 'make_runner' across orchestrator/*.py and tests/*.py — every call site is deps.make_runner(config, \"<role>\") or lambda c, role: ...; none use the old 1-arg shape",
+      "verified": true
+    },
+    {
+      "claim": "Suite is green independently re-run (not trusting rw1's numbers)",
+      "evidence": "ruff check . -> 'All checks passed!'; basedpyright -> '0 errors, 1548 warnings, 0 notes'; pytest -q -> '686 passed in 119.71s'",
+      "verified": true
+    },
+    {
+      "claim": "No .laddy/specs/*.md changes on this branch (divergence artifact, not scope creep, per rw1)",
+      "evidence": "git log origin/main..HEAD -- '.laddy/specs/*.md' is empty; merge-base c8893d7 predates origin/main HEAD 0b7f1bd",
+      "verified": true
+    },
+    {
+      "claim": "set_model_flag handles a trailing bare '--model' (no value) without crashing or corrupting the command",
+      "evidence": "agents.py:148-161 loop condition 'i + 1 < len(parts)' skips a valueless trailing flag and falls through to append; tests/test_agents.py:139-143 test_set_model_flag_trailing_model_without_value_appends covers it",
+      "verified": true
+    },
+    {
+      "claim": "Invalid ROLE_*_VENDOR is fail-closed (ConfigError) before any OrchestratorConfig is constructed, no partial state",
+      "evidence": "config.py:100-105 raises inside _parse_role_bindings, which from_env calls before returning; test_role_binding_invalid_vendor_raises passes",
+      "verified": true
+    },
+    {
+      "claim": "clarify role's runner resolves to byte-for-byte the same command as before this change (AC1)",
+      "evidence": "run.py:231 now calls deps.make_runner(config, \"clarify\"); _legacy_role_cmd's else-branch returns config.claude_cmd or DEFAULT_CLAUDE_CMD, identical to the old clarify-shared lambda",
+      "verified": true
+    },
+    {
+      "claim": "A role-name typo in ROLE_<NAME>_* env (e.g. ROLE_DEV_VENDOR instead of ROLE_DEVELOPER_VENDOR) parses into an unused binding under the wrong role key and is silently never applied",
+      "evidence": "config.py's _ROLE_ENV_RE matches any [A-Za-z0-9]+ role segment by design (spec requires future roles need no code change); run.py only queries config.role_bindings.get(role) for the five known role strings, so a mis-spelled role key sits inert",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "orchestrator/config.py",
+      "line": 83,
+      "summary": "Generic ROLE_<NAME>_* parsing accepts any role spelling, so an operator typo (ROLE_DEV_VENDOR vs ROLE_DEVELOPER_VENDOR) silently produces an inert binding instead of an error or warning.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "AC1-AC5 are each covered by a dedicated, appropriately named test in tests/test_role_runner.py, and I confirmed the assertions actually exercise the claimed code paths (not just call it) by reading both the test and the implementation side by side. Failure-mode coverage is present for the new pure functions: set_model_flag (empty cmd, trailing bare --model, replace vs append) and _parse_role_bindings (blank value ignored, unknown knob, non-ROLE-prefixed near miss, invalid vendor, partial fields). I independently re-ran ruff, basedpyright, and pytest rather than trusting the reported numbers, and got the same results (686 passed, 0 type errors).",
+  "residual_risks": [
+    "codex '-c model_reasoning_effort=<v>' flag correctness (accepted by 'codex exec --full-auto -c ...') is not exercised against a live codex binary in any test — rests on documented CLI convention, same residual risk rw1 already flagged.",
+    "Role-name typos in ROLE_*_VENDOR/MODEL/THINKING are silently inert rather than erroring, by design (spec wants unknown future roles to parse with no code change) — an operator misconfiguration risk, not a code defect."
+  ]
+}
