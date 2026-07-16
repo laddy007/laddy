@@ -1,0 +1,51 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "note_server/writer.py",
+    "note_server/totp.py",
+    "note_server/server.py",
+    "note_server/config.py",
+    "tests/note_server/test_server.py",
+    "tests/note_server/test_writer.py",
+    "tests/note_server/test_totp.py",
+    "tests/note_server/test_note_config.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "A write-time OSError (e.g. ENOSPC after O_CREAT|O_EXCL succeeded) leaves a permanent, uncleaned empty file at the intended slot",
+      "evidence": "Live repro against note_server/writer.py: monkeypatched os.fdopen to raise OSError(28, 'No space left on device') after os.open succeeded. write_note('notes', ...) raised WriteError as expected, but os.listdir(d) afterward showed 'notes.md' (0 bytes) still present. A second, successful call to write_note(folder, 'notes', 'second attempt') then silently wrote to 'notes-2.md' instead of reusing/reporting 'notes.md', leaving the empty file behind permanently.",
+      "verified": true
+    },
+    {
+      "claim": "No test asserts directory state after a write-time OS failure",
+      "evidence": "tests/note_server/test_writer.py:78-92 (test_write_note_wraps_write_time_os_error) only asserts pytest.raises(WriteError) and that the path string is absent from the exception message; it never inspects tmp_path's contents after the failure, so the orphaned empty file goes unnoticed",
+      "verified": true
+    },
+    {
+      "claim": "Suite passes (via project venv)",
+      "evidence": ".venv/bin/python -m pytest tests/note_server -q -> 54 passed in 6.76s",
+      "verified": true
+    },
+    {
+      "claim": "TOTP window logic, project_name allowlist, and auth-then-validate-then-write ordering in handle_save_note are implemented as specified",
+      "evidence": "note_server/totp.py:62-90, note_server/writer.py:12,26-28, note_server/server.py:40-51 read as spec'd; no defect found on these paths",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "correctness",
+      "file": "note_server/writer.py",
+      "line": 66,
+      "summary": "write_note creates the target file via O_CREAT|O_EXCL before writing content; if the subsequent write fails (os.fdopen/handle.write OSError, e.g. ENOSPC), the now-empty file is never removed, permanently occupying the intended filename slot with no content and no record that anything went wrong.",
+      "failure_scenario": "save_note(project_name='notes', ...) hits a transient OS failure while writing content (disk fills up mid-write, IO error, etc.). The caller gets 'Error: write failed - the note could not be saved.' but 'notes.md' now exists on disk, empty, forever - no cleanup path exists anywhere in write_note. If the caller reasonably retries the identical request expecting it to either succeed at 'notes.md' or fail again, the retry instead silently succeeds by writing to 'notes-2.md' (FileExistsError branch treats the empty derelict file as a legitimate prior note), permanently orphaning the empty file and silently renaming the user's note away from the name they asked for and expect. Reproduced live: after a simulated write-time OSError, a second write_note call for the same project_name returned 'notes-2.md' while 'notes.md' (0 bytes) remained in the folder untouched and unexplained."
+    }
+  ],
+  "test_assessment": "AC1-AC4, AC7 are well covered. AC5 (no-clobber dedup) and AC6 (no path leak) are tested for the happy path and for the auth/validation/create-time-OSError branches, but no test exercises directory state after a write-time (post-create) OS failure - which is exactly the branch where the bug above lives. The two write-time-OSError tests (test_write_note_wraps_write_time_os_error, test_write_error_response_is_clean_and_hides_folder_path) both only assert on the exception/response text, never on what got left in tmp_path.",
+  "residual_risks": [
+    "Every transient write failure after file creation (ENOSPC, revoked permissions mid-write, disk I/O error) leaves permanent empty-file debris in the notes folder and silently shifts subsequent writes to the next -N suffix, which will accumulate unnoticed on a long-running VPS process.",
+    "config.py's non-writable-folder case (noted by rw1) is a special case of this same gap: the first write attempt for a given project_name will always leave behind an empty file before the caller ever finds out the folder isn't writable."
+  ]
+}
