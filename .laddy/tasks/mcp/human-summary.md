@@ -1,4 +1,4 @@
-# Task mcp — CAP_REACHED
+# Task mcp — MERGE_DECIDED:stop_before_merge
 
 Branch: `mcp`
 Fetch: git fetch laddy mcp  (shows locally as laddy/mcp)
@@ -21,3 +21,9 @@ Fetch: git fetch laddy mcp  (shows locally as laddy/mcp)
 - 2026-07-16T19:23:25Z `fast_tests` -> pass — ownArgumentType)
 - 2026-07-16T19:26:28Z `rw1` -> approved
 - 2026-07-16T19:28:33Z `rw2` -> nogo — write_note creates the target file via O_CREAT|O_EXCL before writing content; if the subsequent write fails (os.fdopen/handle.write OSError, e.g. ENOSPC), the now-empty file is never removed, permanen
+- 2026-07-16T20:03:46Z `developer` -> ok — Full gate green: `ruff` clean, basedpyright **0 errors**, **713 passed** (+1 new test).
+- 2026-07-16T20:04:31Z `fast_tests` -> pass — ownArgumentType)
+- 2026-07-16T20:07:01Z `rw1` -> approved
+- 2026-07-16T20:07:32Z `rw2` -> go
+- 2026-07-16T20:09:06Z `senior` -> approved
+- 2026-07-16T20:11:41Z `authoritative` -> pass
