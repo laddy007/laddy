@@ -18,8 +18,13 @@
   ],
   "claims_verified": [
     {
+      "claim": "Branch unchanged since prior review; write-error handling still narrow",
+      "evidence": "HEAD 83d89d7; note_server/server.py:49 still `except WriteError` only",
+      "verified": true
+    },
+    {
       "claim": "Full suite, ruff, and basedpyright all pass",
-      "evidence": "pytest: 708 passed in 82.18s; ruff: All checks passed!; basedpyright: 0 errors, 1561 warnings (errors are the gate per pyproject.toml)",
+      "evidence": "pytest: 708 passed; ruff: All checks passed!; basedpyright: 0 errors, 1561 warnings (errors are the gate per pyproject.toml)",
       "verified": true
     },
     {
@@ -29,12 +34,12 @@
     },
     {
       "claim": "verify() accepts current & ±1 window, rejects ±2/wrong/non-ascii, skips negative counter",
-      "evidence": "note_server/totp.py:62-90 loop over range(-1,2) with candidate_counter<0 skip; tests test_totp.py:45-77 all pass",
+      "evidence": "note_server/totp.py:62-90; tests test_totp.py:45-77 pass",
       "verified": true
     },
     {
       "claim": "project_name guard rejects empty/dot/slash/traversal/whitespace/backslash and writes nothing",
-      "evidence": "note_server/writer.py:12,26-28; tests/note_server/test_writer.py:20-26 and test_server.py:85-93 pass",
+      "evidence": "note_server/writer.py:12,26-28; test_writer.py:20-26 and test_server.py:85-93 pass",
       "verified": true
     },
     {
@@ -44,7 +49,7 @@
     },
     {
       "claim": "Config env vars all required with no default; missing folder/host/port fail at startup",
-      "evidence": "note_server/config.py:31-61; tests/note_server/test_note_config.py all pass",
+      "evidence": "note_server/config.py:31-61; test_note_config.py all pass",
       "verified": true
     },
     {
@@ -58,13 +63,8 @@
       "verified": true
     },
     {
-      "claim": "loop_monitor test edit (type:ignore -> pyright:ignore) is a necessary gate fix, not gratuitous",
+      "claim": "loop_monitor test edit (type:ignore -> pyright:ignore) is a necessary gate fix",
       "evidence": "Reverting the edit reproduces 4 basedpyright errors (reportCallIssue/reportArgumentType at lines 194,196); the pyright:ignore form suppresses them, keeping the gate at 0 errors",
-      "verified": true
-    },
-    {
-      "claim": "Auth and validation error responses do not leak the folder path",
-      "evidence": "note_server/server.py:40-46; test_server.py:99-106 passes",
       "verified": true
     },
     {
@@ -91,7 +91,7 @@
       "failure_scenario": "AC6 requires that write-error responses name which check failed and never contain the folder path. test_error_messages_never_contain_folder_path only exercises auth and validation errors; no test forces write_note to hit an OS write failure (e.g. read-only folder), which is exactly the path that leaks the absolute folder path per the finding above. The uncovered branch let the leak through undetected."
     }
   ],
-  "test_assessment": "AC1 (tool surface) covered by test_registers_exactly_one_save_note_tool; AC2 (TOTP accept/reject + no-write-on-reject + reference vector) covered by test_totp.py:45-77 and test_server.py:65-79, independently cross-checked; AC3 (project_name guard incl. traversal) covered by test_writer.py:20-26 and test_server.py:85-93; AC4 (happy-path verbatim write) by test_happy_path_writes_verbatim_and_returns_filename; AC5 (no-clobber dedup) by test_writer.py:34-45 and test_dedup_returns_new_name_and_keeps_original; AC7 (config via env) fully covered by test_note_config.py; AC8 (green suite + dep hygiene) verified. Failure-mode coverage is strong for totp/writer/config, BUT AC6 is only partially covered: auth and validation error paths are tested, while the write-error response path is untested — and that untested path is broken (leaks the absolute folder path). handle_save_note lacks a failure-mode test for a genuine OS write failure.",
+  "test_assessment": "AC1 (tool surface) covered by test_registers_exactly_one_save_note_tool; AC2 (TOTP accept/reject + no-write-on-reject + reference vector) covered by test_totp.py:45-77 and test_server.py:65-79, independently cross-checked; AC3 (project_name guard incl. traversal) covered by test_writer.py:20-26 and test_server.py:85-93; AC4 (happy-path verbatim write) by test_happy_path_writes_verbatim_and_returns_filename; AC5 (no-clobber dedup) by test_writer.py:34-45 and test_dedup_returns_new_name_and_keeps_original; AC7 (config via env) fully covered by test_note_config.py; AC8 (green suite + dep hygiene) verified. Failure-mode coverage is strong for totp/writer/config, BUT AC6 is only partially covered: auth and validation error paths are tested while the write-error response path is untested — and that untested path is broken (leaks the absolute folder path). handle_save_note lacks a failure-mode test for a genuine OS write failure.",
   "residual_risks": [
     "config.py validates the folder is an existing dir but not that it is writable, so the write-failure path is reachable in normal VPS operation (read-only mount, full disk).",
     "The path-escape defence-in-depth branch (writer.py:62-63) is unreachable via the public API given the regex, so it is inherently untestable without bypassing validation — acceptable."
