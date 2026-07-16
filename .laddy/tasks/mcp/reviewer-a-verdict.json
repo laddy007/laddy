@@ -18,53 +18,38 @@
   ],
   "claims_verified": [
     {
-      "claim": "Round-4 fix: genuine OS write failures are wrapped into path-free WriteError at both create and write time",
-      "evidence": "note_server/writer.py:71-75 (os.open OSError -> WriteError 'could not create the note file') and 79-80 (fdopen/write OSError -> WriteError 'could not write the note contents'); neither message interpolates the path",
+      "claim": "Round-5 change: a write-time OSError now unlinks the empty O_CREAT file (best-effort) before raising, restoring the 'nothing written' invariant",
+      "evidence": "note_server/writer.py:79-89 — `except OSError: try: os.unlink(path) except OSError: pass; raise WriteError(...)`; fd is already closed by the with-block unwinding before unlink, so no fd leak",
       "verified": true
     },
     {
-      "claim": "Prior blocker resolved end-to-end: a write into a read-only folder no longer leaks the path",
-      "evidence": "Reproduced the exact prior-leak scenario (chmod 0o500 folder) through FastMCP call_tool: RESULT text 'Error: write failed - the note could not be saved.'; PATH LEAKED: False",
+      "claim": "The derelict-file fix prevents a failed write from silently spilling a retry onto {name}-2.md",
+      "evidence": "test_writer.py:93-116 (test_write_note_failed_write_does_not_shift_retry_to_suffix): after a mocked ENOSPC failure the folder is empty and a retry reuses notes.md, with notes-2.md absent; passes",
       "verified": true
     },
     {
-      "claim": "AC6 write-error path now has covering tests at writer, handler, and end-to-end level",
-      "evidence": "test_writer.py:60-92 (test_write_note_wraps_os_error_as_path_free_write_error, test_write_note_wraps_write_time_os_error); test_server.py:108-144 (test_write_error_response_is_clean_and_hides_folder_path asserts 'write' in result and folder path absent; test_call_tool_write_failure_never_leaks_path asserts no leak via call_tool)",
+      "claim": "Failed write leaves the folder empty (no debris)",
+      "evidence": "test_writer.py:92-93 assertion `list(tmp_path.iterdir()) == []` after the write-time OSError; passes",
       "verified": true
     },
     {
       "claim": "Full suite, ruff, and basedpyright all pass",
-      "evidence": "pytest: 712 passed in 85.28s; note_server subset: 54 passed; ruff: All checks passed!; basedpyright: 0 errors, 1571 warnings (errors are the gate)",
+      "evidence": "pytest: 713 passed in 80.80s; note_server subset: 55 passed; ruff: All checks passed!; basedpyright: 0 errors, 1574 warnings (errors are the gate)",
       "verified": true
     },
     {
-      "claim": "TOTP is standard RFC 6238 and the hardcoded base32 secret decodes correctly",
-      "evidence": "Independent recompute: KNVWKZLWFVHWW2LOMF3WC -> b'Skeev-Okinawa'; codes for ts 0/59/1234567890 = 411400/795119/948172 match test_totp.py:34-37",
+      "claim": "Prior blocker (OS write failure leaking absolute path) remains fixed",
+      "evidence": "note_server/writer.py:71-89 wraps both os.open and fdopen/write OSErrors into path-free WriteError; handler test_server.py:108-144 and end-to-end call_tool test assert no path leak; all pass",
       "verified": true
     },
     {
-      "claim": "verify() accepts current & ±1 window, rejects ±2/wrong/non-ascii, skips negative counter",
-      "evidence": "note_server/totp.py:62-90; test_totp.py:45-77 pass",
+      "claim": "TOTP is standard RFC 6238 with correctly-decoded hardcoded secret",
+      "evidence": "Independent recompute confirmed earlier: KNVWKZLWFVHWW2LOMF3WC -> b'Skeev-Okinawa'; ts 0/59/1234567890 -> 411400/795119/948172 matching test_totp.py:34-37",
       "verified": true
     },
     {
-      "claim": "project_name guard rejects empty/dot/slash/traversal/whitespace/backslash and writes nothing",
-      "evidence": "note_server/writer.py:12,26-28; test_writer.py:20-26 and test_server.py:85-93 pass",
-      "verified": true
-    },
-    {
-      "claim": "No-clobber dedup via O_CREAT|O_EXCL yields name-2.md/name-3.md and preserves original",
-      "evidence": "note_server/writer.py:60-81; test_writer.py:34-45 pass",
-      "verified": true
-    },
-    {
-      "claim": "Config env vars all required with no default; missing folder/host/port fail at startup",
-      "evidence": "note_server/config.py:31-61; test_note_config.py all pass",
-      "verified": true
-    },
-    {
-      "claim": "Exactly one save_note tool with three required string params is registered",
-      "evidence": "test_server.py:28-35 asserts [t.name]==['save_note'], required=={token,project_name,content}, all string; passes",
+      "claim": "project_name guard, no-clobber dedup, config-via-env, single-tool surface all unchanged and covered",
+      "evidence": "note_server/writer.py:12,26-28,60-81; config.py:31-61; test_server.py:28-35; all corresponding tests pass",
       "verified": true
     },
     {
@@ -74,9 +59,9 @@
     }
   ],
   "findings": [],
-  "test_assessment": "All acceptance criteria are covered. AC1 (tool surface) by test_registers_exactly_one_save_note_tool; AC2 (TOTP accept/reject + no-write-on-reject + reference vector) by test_totp.py:45-77 and test_server.py:65-79, independently cross-checked; AC3 (project_name guard incl. traversal) by test_writer.py:20-26 and test_server.py:85-93; AC4 (happy-path verbatim write) by test_happy_path_writes_verbatim_and_returns_filename; AC5 (no-clobber dedup) by test_writer.py:34-45 and test_dedup_returns_new_name_and_keeps_original; AC6 (no path leak across auth/validation/write-error) now fully covered — the previously-missing write-error branch is exercised at writer level (test_write_note_wraps_os_error_as_path_free_write_error, test_write_note_wraps_write_time_os_error), handler level (test_write_error_response_is_clean_and_hides_folder_path), and end-to-end (test_call_tool_write_failure_never_leaks_path); AC7 (config via env) by test_note_config.py; AC8 (green suite + dep hygiene) verified. Every new function (decode_secret, totp, verify, validate_project_name, write_note, from_env, handle_save_note) now has failure-mode tests including error paths, boundary/empty inputs, adversarial names, and OS-failure branches. My prior blocker (unwrapped OSError leaking the absolute folder path) is fully resolved and regression-tested.",
+  "test_assessment": "All acceptance criteria remain covered and the Round-5 delta is well-tested. AC1 (tool surface) by test_registers_exactly_one_save_note_tool; AC2 (TOTP accept/reject + no-write-on-reject + reference vector) by test_totp.py:45-77 and test_server.py:65-79; AC3 (project_name guard incl. traversal) by test_writer.py:20-26 and test_server.py:85-93; AC4 (happy path verbatim) by test_happy_path_writes_verbatim_and_returns_filename; AC5 (no-clobber dedup) by test_writer.py:34-45; AC6 (no path leak across auth/validation/write-error) by test_writer.py:60-92 and test_server.py:108-144 at writer, handler, and end-to-end levels; AC7 (config via env) by test_note_config.py; AC8 (green suite + dep hygiene) verified. write_note's error path now additionally guarantees the 'nothing written' invariant on a write-time failure, covered by two new tests (empty-folder assertion + retry-reuses-base-name). Every new function has failure-mode tests including error paths, boundary/empty inputs, adversarial names, and OS-failure branches. No blocker or advisory findings remain.",
   "residual_risks": [
-    "config.py validates the folder is an existing dir but not that it is writable; a non-writable folder now yields a clean, path-free write error at request time rather than a startup failure — acceptable and covered.",
-    "The path-escape defence-in-depth branch (writer.py:64-65) remains unreachable via the public API given the regex, so it stays inherently untestable without bypassing validation — acceptable."
+    "The best-effort os.unlink on write failure ignores unlink errors by design (the original OS error is what is reported); in the rare case the unlink itself fails, an empty file could remain and a retry would dedup to {name}-2.md — acceptable and honestly commented.",
+    "The path-escape defence-in-depth branch (writer.py:64-65) stays unreachable via the public API given the regex, so it remains inherently untestable without bypassing validation — acceptable."
   ]
 }
