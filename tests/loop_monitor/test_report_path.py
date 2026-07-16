@@ -191,9 +191,9 @@ def test_parent_symlink_swapped_in_after_check_is_caught_at_open(
         # Pretend root/link resolves to a real directory under root (the state
         # the attacker showed the checker), while the filesystem still has it
         # as a symlink for the actual open to trip over.
-        if os.fspath(path) == os.fspath(root / "link"):  # type: ignore[arg-type]
+        if os.fspath(path) == os.fspath(root / "link"):  # pyright: ignore[reportCallIssue, reportArgumentType]
             return os.fspath(root / "link")
-        return real_realpath(path, *args, **kwargs)  # type: ignore[arg-type]
+        return real_realpath(path, *args, **kwargs)  # pyright: ignore[reportCallIssue, reportArgumentType]
 
     monkeypatch.setattr(os.path, "realpath", fake_realpath)
 
