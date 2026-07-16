@@ -1,0 +1,99 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "note_server/__init__.py",
+    "note_server/config.py",
+    "note_server/totp.py",
+    "note_server/writer.py",
+    "note_server/server.py",
+    "note_server/README.md",
+    "pyproject.toml",
+    "requirements-dev.txt",
+    "tests/note_server/test_totp.py",
+    "tests/note_server/test_writer.py",
+    "tests/note_server/test_server.py",
+    "tests/note_server/test_note_config.py",
+    "tests/loop_monitor/test_report_path.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Full suite, ruff, and basedpyright all pass",
+      "evidence": "pytest: 708 passed in 82.18s; ruff: All checks passed!; basedpyright: 0 errors, 1561 warnings (errors are the gate per pyproject.toml)",
+      "verified": true
+    },
+    {
+      "claim": "TOTP is standard RFC 6238 and the hardcoded base32 secret decodes correctly",
+      "evidence": "Independent recompute: KNVWKZLWFVHWW2LOMF3WC -> b'Skeev-Okinawa'; codes for ts 0/59/1234567890 = 411400/795119/948172, matching test_totp.py:34-37",
+      "verified": true
+    },
+    {
+      "claim": "verify() accepts current & ±1 window, rejects ±2/wrong/non-ascii, skips negative counter",
+      "evidence": "note_server/totp.py:62-90 loop over range(-1,2) with candidate_counter<0 skip; tests test_totp.py:45-77 all pass",
+      "verified": true
+    },
+    {
+      "claim": "project_name guard rejects empty/dot/slash/traversal/whitespace/backslash and writes nothing",
+      "evidence": "note_server/writer.py:12,26-28; tests/note_server/test_writer.py:20-26 and test_server.py:85-93 pass",
+      "verified": true
+    },
+    {
+      "claim": "No-clobber dedup via O_CREAT|O_EXCL yields name-2.md/name-3.md and preserves original",
+      "evidence": "note_server/writer.py:58-70; test_writer.py:34-45 pass",
+      "verified": true
+    },
+    {
+      "claim": "Config env vars all required with no default; missing folder/host/port fail at startup",
+      "evidence": "note_server/config.py:31-61; tests/note_server/test_note_config.py all pass",
+      "verified": true
+    },
+    {
+      "claim": "Exactly one save_note tool with three required string params is registered",
+      "evidence": "test_server.py:28-35 asserts [t.name]==['save_note'], required=={token,project_name,content}, all string; passes",
+      "verified": true
+    },
+    {
+      "claim": "mcp is the only runtime dep and basedpyright include covers note_server",
+      "evidence": "pyproject.toml dependencies=['mcp'], include=['orchestrator','note_server','tests']",
+      "verified": true
+    },
+    {
+      "claim": "loop_monitor test edit (type:ignore -> pyright:ignore) is a necessary gate fix, not gratuitous",
+      "evidence": "Reverting the edit reproduces 4 basedpyright errors (reportCallIssue/reportArgumentType at lines 194,196); the pyright:ignore form suppresses them, keeping the gate at 0 errors",
+      "verified": true
+    },
+    {
+      "claim": "Auth and validation error responses do not leak the folder path",
+      "evidence": "note_server/server.py:40-46; test_server.py:99-106 passes",
+      "verified": true
+    },
+    {
+      "claim": "Write-error path returns a clean response and never leaks the folder path",
+      "evidence": "REFUTED: handle_save_note catches only WriteError; a valid write into a non-writable folder raises PermissionError end-to-end (FastMCP ToolError 'Permission denied: /tmp/.../proj.md'), leaking the absolute path",
+      "verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "security",
+      "file": "note_server/server.py",
+      "line": 49,
+      "summary": "A real OS write failure (PermissionError/ENOSPC — an OSError that is not FileExistsError) escapes handle_save_note unwrapped, leaking the notes folder's absolute path and returning no clean write-error response.",
+      "failure_scenario": "Notes folder exists but is non-writable (read-only mount / wrong perms) or the disk is full. A request with a valid token + valid project_name reaches write_note (note_server/writer.py:65), where os.open raises PermissionError. write_note only catches FileExistsError, so the OSError propagates; handle_save_note's `except WriteError` (server.py:49) does not catch it, so it escapes the tool. Verified end-to-end: FastMCP call_tool returns `ToolError: Error executing tool save_note: [Errno 13] Permission denied: '/tmp/.../proj.md'` — the absolute folder path is disclosed to the untrusted caller and no 'write error' check is named. Violates AC6 and the tool contract's 'never the folder's absolute filesystem path'."
+    },
+    {
+      "severity": "blocker",
+      "category": "test-adequacy",
+      "file": "tests/note_server/test_server.py",
+      "line": 99,
+      "summary": "AC6's write-error clause has no covering test: no test triggers a write failure, so the path-leak / uncaught-OSError branch ships unverified.",
+      "failure_scenario": "AC6 requires that write-error responses name which check failed and never contain the folder path. test_error_messages_never_contain_folder_path only exercises auth and validation errors; no test forces write_note to hit an OS write failure (e.g. read-only folder), which is exactly the path that leaks the absolute folder path per the finding above. The uncovered branch let the leak through undetected."
+    }
+  ],
+  "test_assessment": "AC1 (tool surface) covered by test_registers_exactly_one_save_note_tool; AC2 (TOTP accept/reject + no-write-on-reject + reference vector) covered by test_totp.py:45-77 and test_server.py:65-79, independently cross-checked; AC3 (project_name guard incl. traversal) covered by test_writer.py:20-26 and test_server.py:85-93; AC4 (happy-path verbatim write) by test_happy_path_writes_verbatim_and_returns_filename; AC5 (no-clobber dedup) by test_writer.py:34-45 and test_dedup_returns_new_name_and_keeps_original; AC7 (config via env) fully covered by test_note_config.py; AC8 (green suite + dep hygiene) verified. Failure-mode coverage is strong for totp/writer/config, BUT AC6 is only partially covered: auth and validation error paths are tested, while the write-error response path is untested — and that untested path is broken (leaks the absolute folder path). handle_save_note lacks a failure-mode test for a genuine OS write failure.",
+  "residual_risks": [
+    "config.py validates the folder is an existing dir but not that it is writable, so the write-failure path is reachable in normal VPS operation (read-only mount, full disk).",
+    "The path-escape defence-in-depth branch (writer.py:62-63) is unreachable via the public API given the regex, so it is inherently untestable without bypassing validation — acceptable."
+  ]
+}
