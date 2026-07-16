@@ -2,8 +2,19 @@
 type: feature
 roles: [developer, rw1, rw2]
 risk: high
+status: draft-proposal
 ---
 # fullrun-s1 — rw3: the local trusted review as a first-class reviewer in the feedback chain
+
+> **Depends on:** `director-resume`, which builds the shared terminal-un-stick
+> mechanism (the `RESUMES` table + `clears_terminal`) that this slice needs. With
+> it, rw3 here is one table row plus its verdict/transitions; without it, this
+> slice would invent a second bespoke un-stick inside `_recorded_terminal` —
+> exactly what `director-resume` exists to prevent.
+>
+> Hence `status: draft-proposal`: `kickoff fullrun-s1` refuses it. The spec is
+> finished and runnable; only the ordering holds it. Once `director-resume` is in
+> main, drop the `status:` line and run it.
 
 ## Goal
 
@@ -70,14 +81,20 @@ re-kickoff no-ops. Verified live: the `mcp` branch's log carries
 **Therefore S1 must un-stick the terminal, or rw3 feedback can never re-enter the
 loop.** This is not optional polish; without it the whole slice is inert.
 
-**Shared mechanism — coordinate with `cap-override-resume`.** That spec (draft,
-blocked on `loop-budget-per-gate`) invents the same shape for a different
-trigger: an append-only event, newer than the recorded terminal, that makes
-`_recorded_terminal` return `None`. Its **AC2 explicitly requires that
-`cap_override` must NOT un-stick `PUSHED`**. These do not conflict (different
-events, different terminals) but they are the same mechanism and must not be
-implemented twice in two shapes. Whichever lands first defines the helper; the
-second reuses it.
+**Shared mechanism — now owned by `director-resume`.** Three specs want the same
+rule ("an event newer than the recorded terminal makes `_recorded_terminal`
+return `None`"): `cap-override-resume` (`cap_override` → `CAP_REACHED`), this
+slice (`rw3` → `MERGE_DECIDED:*`/`PUSHED`), and the Director channel itself.
+`director-resume` builds it **once** as a table in `terminals.py`
+(`RESUMES: dict[str, frozenset[str]]` + a pure `clears_terminal`) and lands
+first. rw3 therefore contributes **one row**:
+
+    "rw3": frozenset({"PUSHED", MERGE_DECIDED_ANY})
+
+and must add **no** per-event branch to `_recorded_terminal`. Note that
+`cap-override-resume`'s AC2 requires `cap_override` NOT to clear `PUSHED` — the
+rows are deliberately different, which is precisely why the rule belongs in a
+table rather than in three hand-written conditions.
 
 ## Scope
 
@@ -91,10 +108,11 @@ second reuses it.
 - **`orchestrator/loop.py`** — `derive_resume_point` transition table: add
   `("rw3", "changes_requested") → "developer"`, `("rw3", "nogo") → "developer"`,
   `("rw3", "malformed") → "developer"`, `("rw3", "go") → "done"`.
-- **`orchestrator/loop.py`** — `_recorded_terminal`: a `MERGE_DECIDED:*` or
-  `PUSHED` terminal is **not sticky** when the log carries an `rw3` entry with
-  outcome `changes_requested`/`nogo` **later in the log** than that terminal.
-  Every other terminal is unaffected.
+- **`orchestrator/terminals.py`** — add the `rw3` row to `director-resume`'s
+  `RESUMES` table so a `MERGE_DECIDED:*`/`PUSHED` terminal is cleared by a later
+  `rw3` entry. **No change to `_recorded_terminal` itself** — the mechanism is
+  already there; this slice only registers its event. Every other terminal is
+  unaffected.
 - **`orchestrator/local_merge.py`**: on a hold whose cause is reviewable
   (security-panel blockers / gate findings), emit an **rw3 `Verdict`** in the
   rw1/rw2 schema, write it to `.laddy/tasks/<task>/reviewer-c-verdict.json` via

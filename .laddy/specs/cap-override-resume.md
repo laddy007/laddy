@@ -27,12 +27,25 @@ Motivace vychází ze dvou vlastností dnešního (a nového per-brána) capu:
 Řešení musí proto udělat **obojí naráz**: zneplatnit sticky terminál i vložit
 reset bod pro budgety. Obé jedním event-sourced úkonem.
 
-> **Závisí na:** `loop-budget-per-gate` (per-brána budgety + `cap_cause`
-> v `ResumePoint`). Tento spec resetuje ty budgety; implementovat až po něm.
+> **Závisí na dvou specech; implementovat až po obou:**
+>
+> 1. `loop-budget-per-gate` — per-brána budgety + `cap_cause` v `ResumePoint`.
+>    Tento spec ty budgety resetuje.
+> 2. `director-resume` — staví sdílenou mechaniku odemykání terminálu
+>    (tabulka `RESUMES` + `clears_terminal` v `terminals.py`) **jednou**, pro tři
+>    konzumenty. Po jeho dotečení se z níže popsané změny `_recorded_terminal`
+>    stává **jediný řádek tabulky**:
+>
+>        "cap_override": frozenset({"CAP_REACHED"})
+>
+>    Sekce Scope/Behaviour níže popisují mechaniku vlastními slovy, protože
+>    vznikly dřív — **neimplementuj ji podruhé.** Zůstává platné jen to, co je
+>    pro `cap_override` specifické: že odemyká výhradně `CAP_REACHED` (AC2) a že
+>    resetuje budgety od svého výskytu.
 >
 > Proto je označen `status: draft-proposal` — `kickoff cap-override-resume` ho
-> odmítne. Spec je hotový a runnable; drží ho jen ta závislost. Až
-> `loop-budget-per-gate` doteče do main, odstraň `status:` řádek a spusť.
+> odmítne. Spec je hotový a runnable; drží ho jen ty závislosti. Až obě dotečou
+> do main, odstraň `status:` řádek a spusť.
 
 ## Root-cause context
 
