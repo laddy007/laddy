@@ -90,3 +90,27 @@ def test_write_note_wraps_write_time_os_error(
     with pytest.raises(WriteError) as excinfo:
         write_note(tmp_path, "notes", "body")
     assert str(tmp_path) not in str(excinfo.value)
+    # The empty file O_CREAT placed at the slot must be cleaned up, not left as
+    # derelict debris that permanently occupies the name.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_note_failed_write_does_not_shift_retry_to_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # After a write-time failure, the slot is free again: a retry of the same
+    # project_name must reuse {name}.md, not silently spill onto {name}-2.md.
+    import os
+
+    def boom_fdopen(fd: int, *args: object, **kwargs: object) -> NoReturn:
+        os.close(fd)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("note_server.writer.os.fdopen", boom_fdopen)
+    with pytest.raises(WriteError):
+        write_note(tmp_path, "notes", "first")
+
+    monkeypatch.undo()  # let the retry actually write
+    assert write_note(tmp_path, "notes", "second") == "notes.md"
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "second"
+    assert not (tmp_path / "notes-2.md").exists()

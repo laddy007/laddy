@@ -77,6 +77,15 @@ def write_note(
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(content)
         except OSError as exc:
+            # O_CREAT already placed an (empty) file at this slot. A failed write
+            # must not leave that derelict behind: it would permanently occupy the
+            # name and silently push a retry onto {name}-2.md. Best-effort remove
+            # it to restore the "nothing written" invariant, ignoring any error
+            # from the unlink itself (the original failure is what we report).
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             raise WriteError("could not write the note contents") from exc
         return candidate
 
