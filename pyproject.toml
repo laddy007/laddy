@@ -1,3 +1,12 @@
+[project]
+name = "laddy-note-server"
+version = "0.1.0"
+requires-python = ">=3.11"
+# The repo's first (and only) runtime dependency: the MCP Python SDK, used by
+# note_server for its Streamable-HTTP transport. The gate image installs it via
+# requirements-dev.txt (the Dockerfile never runs `pip install .`).
+dependencies = ["mcp"]
+
 [tool.ruff]
 target-version = "py311"
 
@@ -6,7 +15,7 @@ select = ["F", "I"]
 
 [tool.basedpyright]
 pythonVersion = "3.11"
-include = ["orchestrator", "tests"]
+include = ["orchestrator", "note_server", "tests"]
 # Errors are the gate (0, honestly - task 15 audit); warnings (1.4k, mostly
 # reportAny/reportUnusedCallResult noise pre-dating any basedpyright gate)
 # stay visible but non-blocking. failOnWarnings only affects exit-code

@@ -2,3 +2,7 @@ pytest
 pytest-xdist
 ruff
 basedpyright
+# Runtime dep of note_server (declared in pyproject [project].dependencies).
+# Also listed here so the gate image and the fast local .venv install it - the
+# Dockerfile installs requirements-dev.txt but never runs `pip install .`.
+mcp
