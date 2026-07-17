@@ -19,17 +19,17 @@
   "claims_verified": [
     {
       "claim": "The un-stick rule is table-driven; _recorded_terminal consults clears_terminal and hardcodes no event name",
-      "evidence": "orchestrator/loop.py:106-118 (any(clears_terminal(...) for e in entries[idx+1:])); grep test tests/test_loop_director_resume.py:82-87 passes",
+      "evidence": "orchestrator/loop.py:106-118; grep test tests/test_loop_director_resume.py:82-87 passes",
       "verified": true
     },
     {
-      "claim": "RESUMES + clears_terminal live in terminals.py, MERGE_DECIDED matched by the shared prefix constant",
+      "claim": "RESUMES + clears_terminal live in terminals.py; MERGE_DECIDED matched by the shared prefix constant",
       "evidence": "orchestrator/terminals.py:69-96 (MERGE_DECIDED_ANY = _MERGE_DECIDED_PREFIX; clears_terminal prefix branch :95-96)",
       "verified": true
     },
     {
       "claim": "A newer director_resume un-sticks CAP_REACHED/ESCALATED_DEADLOCK/PUSHED/MERGE_DECIDED and push:ok; order is load-bearing",
-      "evidence": "live: _recorded_terminal([...,terminal CAP_REACHED,resume]) is None, [resume,...,terminal CAP_REACHED]=='CAP_REACHED'; full suite 719 passed",
+      "evidence": "live: _recorded_terminal([...,terminal CAP_REACHED,resume]) is None; [resume,...,terminal CAP_REACHED]=='CAP_REACHED'; suite 719 passed",
       "verified": true
     },
     {
@@ -38,8 +38,8 @@
       "verified": true
     },
     {
-      "claim": "director_resume not in _PHASE_ACTIONS; derive_resume_point next_phase/round unchanged",
-      "evidence": "orchestrator/loop.py:78; live: derive with/without resume both yield phase='developer', round=2",
+      "claim": "director_resume not in _PHASE_ACTIONS; derive next_phase/round unchanged",
+      "evidence": "orchestrator/loop.py:78; live: derive with/without resume both yield phase='developer', round=2, sessions preserved",
       "verified": true
     },
     {
@@ -53,7 +53,7 @@
       "verified": true
     },
     {
-      "claim": "Resume path never pushes to origin/merges/skips a reviewer; spec_sha is written but read nowhere in decision logic",
+      "claim": "Resume path never pushes to origin/merges/skips a reviewer; spec_sha written but read nowhere in decision logic",
       "evidence": "grep spec_sha -> only run.py:421-423 (write); gate_states/_decide_merge ignore director_resume (loop.py:905-922); test_resume_path_does_not_push_or_merge_or_skip_review passes",
       "verified": true
     },
@@ -88,14 +88,14 @@
       "file": "orchestrator/terminals.py",
       "line": 77,
       "summary": "Resuming an ESCALATED_DEADLOCK terminal un-sticks it, but _override_phase re-detects the still-present nonconvergence fingerprints and (senior_ran true) routes phase 'developer' -> 'deadlock', re-terminating as ESCALATED_DEADLOCK before any developer round runs — the corrected spec and note are never applied.",
-      "failure_scenario": "A task ended ESCALATED_DEADLOCK after repeated rw2 nogo (same fingerprint) following a senior verdict. Director runs `--phase resume --reason \"...\"`. _recorded_terminal returns None; derive_resume_point returns 'developer'; but _override_phase (loop.py:701-703) sees nonconvergence_detected(entries) true (the repeated fingerprints since the last senior remain in the log) and senior_ran true, so it returns 'deadlock' -> _finalize(ESCALATED_DEADLOCK) (loop.py:806-807). No developer round runs and DIRECTOR_NOTE_SECTION is never rendered; the resume is a no-op re-terminate."
+      "failure_scenario": "A task ended ESCALATED_DEADLOCK after repeated rw2 nogo (same fingerprint) following a senior verdict. Director runs `--phase resume --reason \"...\"`. _recorded_terminal returns None; derive_resume_point returns 'developer'; but _override_phase (loop.py:701-703) sees nonconvergence_detected(entries) true (repeated fingerprints since the last senior remain in the log) and senior_ran true, so it returns 'deadlock' -> _finalize(ESCALATED_DEADLOCK) (loop.py:806-807). No developer round runs and DIRECTOR_NOTE_SECTION is never rendered; the resume is a no-op re-terminate."
     },
     {
       "severity": "advisory",
       "category": "quality",
       "file": "orchestrator/run.py",
       "line": 413,
-      "summary": "When the last terminal is a retryable/non-table state (QUOTA_TIMEOUT, INTERNAL_ERROR), `--phase resume` refuses it with a message asserting 'the tree is poisoned - discard the branch and restart', which is inaccurate/misleading for a transient terminal that should simply be re-kickoffed. Consider distinguishing 'poisoned (PATH_GUARD_VIOLATION)' from 'already retryable — re-kickoff normally'.",
+      "summary": "When the last terminal is a retryable/non-table state (QUOTA_TIMEOUT, INTERNAL_ERROR), `--phase resume` refuses with a message asserting 'the tree is poisoned - discard the branch and restart', which is inaccurate/misleading for a transient terminal that should simply be re-kickoffed. Consider distinguishing 'poisoned (PATH_GUARD_VIOLATION)' from 'already retryable — re-kickoff normally'.",
       "failure_scenario": ""
     },
     {
@@ -107,7 +107,7 @@
       "failure_scenario": ""
     }
   ],
-  "test_assessment": "AC1-3,5 covered by tests/test_terminals.py + test_loop_director_resume.py (parametrized un-stick, order/one-run, PATH_GUARD_VIOLATION, prefix with novel suffix). AC4 covered by a table-driven test over RESUMES plus a source-grep against _recorded_terminal only. AC6 covered (derive unchanged with/without resume, sessions preserved). AC7 covered by pure _director_note tests + one integration round asserting note AND rw1 verdict both reach the prompt and the note self-clears. AC8/AC9 covered by five CLI refusal tests (each asserting nothing written) + a happy-path stub asserting exactly one event with reason+spec_sha and clarify-skipped loop entry. AC10 covered (summary/handback receipt, trace exclusion). AC11 covered by a source-inspection guard. AC12 covered. AC13 verified: 719 passed, ruff clean, basedpyright 0 errors. Every new pure function has failure-mode tests EXCEPT the end-to-end resume behaviour of the non-CAP_REACHED terminals — no test drives a resumed PUSHED/MERGE_DECIDED/ESCALATED_DEADLOCK task through _run_phases to confirm a developer round actually runs, which is exactly where the two blockers hide (AC1 checks only that _recorded_terminal returns None, not that the loop then does productive work).",
+  "test_assessment": "AC1-3,5 covered by tests/test_terminals.py + test_loop_director_resume.py (parametrized un-stick, order/one-run, PATH_GUARD_VIOLATION, prefix with novel suffix). AC4 covered by a table-driven test over RESUMES plus a source-grep against _recorded_terminal only. AC6 covered (derive unchanged with/without resume, sessions preserved). AC7 covered by pure _director_note tests + one integration round asserting note AND rw1 verdict both reach the prompt and the note self-clears. AC8/AC9 covered by five CLI refusal tests (each asserting nothing written) + a happy-path stub asserting exactly one event with reason+spec_sha and clarify-skipped loop entry. AC10 covered (summary/handback receipt + trace exclusion). AC11 covered by a source-inspection guard. AC12 covered. AC13 verified: 719 passed, ruff clean, basedpyright 0 errors. Every new pure function has failure-mode tests EXCEPT the end-to-end resume behaviour of the non-CAP_REACHED terminals — no test drives a resumed PUSHED/MERGE_DECIDED/ESCALATED_DEADLOCK task through _run_phases to confirm a developer round actually runs, which is exactly where the two blockers hide (AC1 checks only that _recorded_terminal returns None, not that the loop then does productive work).",
   "residual_risks": [
     "Of the four terminals director_resume claims to resume, only CAP_REACHED productively re-runs the developer; PUSHED, MERGE_DECIDED:*, and ESCALATED_DEADLOCK un-stick but immediately re-terminate without a developer round (the two blockers). Because the spec puts transition-table and nonconvergence-slicing changes out of scope, resolving this likely needs a spec-level decision (narrow director_resume's frozenset, or define how 'done'/'deadlock'-deriving resumes reach a developer round).",
     "task_worktree returns an existing local worktree without fetching, so a spec the Director edited-and-pushed elsewhere may not be present at resume time and spec_sha then records the stale blob. Pre-existing worktree behaviour, not introduced here, but it bears on whether 'the ask changed' is truly reflected.",
