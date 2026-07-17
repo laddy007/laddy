@@ -255,6 +255,13 @@ def validate_rw2(verdict: Verdict) -> None:
 
 T = TypeVar("T")
 
+# A non-"ok" run's text is agent-controlled and lands in a report a human reads
+# (via local_merge._abstention_blocker, bounded there at 300). Bound the snippet
+# so a runaway/multi-line blob cannot bury the rest of the digest; <=196 leaves
+# the abstention prefix room to fit both bounds without a second truncation. The
+# text is quoted as a diagnostic only - never parsed, never trusted.
+_ERROR_TEXT_MAX = 180
+
 
 def request_payload(
     runner: AgentRunner,
@@ -279,6 +286,13 @@ def request_payload(
     closed by raising. Quota is surfaced by QuotaAwareRunner (it waits or
     raises QuotaTimeout before we get here); a plain runner reporting
     "quota"/"error" is simply not trusted.
+
+    A failed run's text is QUOTED into ``last_error`` (bounded,
+    whitespace-collapsed) so the reason the agent itself gave reaches the
+    human-facing report - an expired login reads differently from a rejected
+    ``--model`` flag. That quote is a diagnostic only: it is never parsed,
+    never checked for a verdict, and a non-"ok" run's output still never
+    reaches ``parse``. Making a failure legible does not make it trusted.
     """
     attempt_prompt = prompt
     session = resume
@@ -287,10 +301,19 @@ def request_payload(
         result = runner.run(attempt_prompt, cwd, resume=session)
         session = result.session_id or session
         if result.exit_reason != "ok":
-            last_error = (
+            base = (
                 f"agent run did not complete cleanly "
-                f"(exit_reason={result.exit_reason!r}, rc={result.returncode}); "
-                "its output is not trustworthy"
+                f"(exit_reason={result.exit_reason!r}, rc={result.returncode})"
+            )
+            # Collapse every whitespace run (incl. newlines) to one space and
+            # bound it: quote what the agent SAID as a diagnostic, but keep it
+            # one readable digest item. Empty text keeps the standing clause so
+            # the message never trails a dangling separator.
+            snippet = " ".join(result.text.split())[:_ERROR_TEXT_MAX]
+            last_error = (
+                f"{base}: {snippet}"
+                if snippet
+                else f"{base}; its output is not trustworthy"
             )
             attempt_prompt = RETRY_TEMPLATE.format(original=prompt, error=last_error)
             continue
