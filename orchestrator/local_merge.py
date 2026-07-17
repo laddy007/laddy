@@ -134,7 +134,7 @@ def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[
 
     # BROKEN: diagnostic, no merge offer
     lines += ["## What failed", ""]
-    lines += [f"- {r}" for r in reasons if r != _L3_REASON]
+    lines += [f"- {r}" for r in reasons]
     sec = _security_blockers(gates)
     if sec:
         lines += ["", "## Security panel findings", ""] + [f"- {s}" for s in sec]
@@ -179,7 +179,11 @@ def decide(task_id: str, gates: GateResults) -> MergeVerdict:
         )
 
     if broken:
-        reasons = tuple(broken + ([_L3_REASON] if gates.blast == L3 else []))
+        # No _L3_REASON here: this branch returns before the L3 y/N prompt can
+        # ever be offered, so naming a "human risk decision" would advertise a
+        # decision the Director is not being given. The blast level still
+        # reaches them through the digest header.
+        reasons = tuple(broken)
         return MergeVerdict(
             task_id, "hold", BROKEN, reasons,
             build_digest(task_id, gates, BROKEN, reasons),

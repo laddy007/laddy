@@ -85,6 +85,19 @@ def test_failed_gate_is_broken_even_on_sensitive_surface() -> None:
     assert "Merge `t1` into main? (y/N)" not in v.digest
 
 
+def test_broken_hold_on_l3_never_claims_a_risk_decision_is_required() -> None:
+    # decide() returns BROKEN before it can ever offer the L3 y/N prompt, so a
+    # broken hold must not tell the Director a risk call is pending: there is
+    # no code path that would take it. `reasons` is printed verbatim by the CLI
+    # ("[broken] <task>: <reasons>"), so the claim must be absent from both.
+    v = decide("t1", _gates(blast=L3, tests_passed=False))
+    assert not any("human risk decision" in r for r in v.reasons)
+    assert "human risk decision" not in v.digest
+    # the blast level itself is still reported - only the false claim is gone
+    assert "blast L3" in v.digest
+    assert any("test suite is red" in r for r in v.reasons)
+
+
 def test_failed_tests_hold() -> None:
     v = decide("t1", _gates(tests_passed=False))
     assert v.decision == "hold"
