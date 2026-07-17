@@ -9,6 +9,51 @@
 #
 # Scope: the adversarial security lens from .laddy/roles/security.md, expressed
 # as mechanical patterns. LLM panel covers what patterns cannot.
+#
+# ---------------------------------------------------------------------------
+# FS-safety rules (fullrun-s2): the filesystem-safety defect classes that
+# produced the first two dogfood merge holds, encoded MECHANICALLY so they fail
+# fast and deterministically on both gate ends instead of relying on the LLM
+# panel to notice them. Precision is the whole point: the gate BLOCKS merges, so
+# a rule that fires on correct code is worse than no rule. Each shipped rule is
+# tested for zero false positives against the nine real os.open sites in main
+# (tests/test_semgrep_fsrules.py, AC2).
+#
+# Severity / blocking (established empirically, semgrep 1.169.0): `semgrep
+# --error` returns non-zero on a WARNING finding just as it does on an ERROR
+# one, so severity does NOT decide whether a finding blocks - every finding
+# blocks. (This is also why the pre-existing WARNING rule
+# python-weak-randomness-for-secrets already blocks the gate.) The two new rules
+# below are ERROR because they flag genuine FS-safety defects, not because ERROR
+# is needed to make them block.
+#
+# Of the umbrella's four candidate classes (fullrun.md §3), two ship below
+# (Rule A, Rule B) and two are deliberately NOT ENCODED - named here so a later
+# reader does not assume coverage:
+#   * Rule C - parent-directory TOCTOU (realpath-authorise then reopen-by-
+#     string). A dataflow-and-ordering property; every attempt to express it in
+#     semgrep OSS taint mode (os.path.realpath -> os.open) also fires on
+#     report_path.py, which does exactly this shape CORRECTLY - the realpath only
+#     informs the confinement decision while the write walks from a pinned root
+#     dir-fd and never re-traverses the string. Firing there would flag the best
+#     FS-safety code in the repo, so this is left to the LLM panel. NOT ENCODED.
+#   * Rule D - write outside a validated root from agent-supplied input. Pure
+#     provenance/taint over "is this path attacker-controlled?" - the intent-
+#     inference half of the pattern/panel boundary this ruleset draws, not
+#     precisely expressible in semgrep OSS without false positives. NOT ENCODED.
+#
+# Adjudication of the two unguarded sites (fullrun-s2 AC3): artifacts.py:143 and
+# queue.py:205 both open O_CREAT|O_RDWR for writing with NEITHER O_NOFOLLOW NOR
+# O_EXCL, so Rule A fires on both. They are flock guard-file opens on
+# engine-derived paths under AGENT_WORK_ROOT and so are PLAUSIBLY safe in
+# practice - but "the path is engine-derived" is a provenance/intent argument,
+# exactly what this ruleset refuses to encode, and queue.py:205 lacks the
+# O_NOFOLLOW its own siblings (queue.py:156,177) carry. They are therefore
+# recorded as GENUINE low-severity findings, not narrowed away or suppressed.
+# --baseline-commit scopes the gate to the diff, so these pre-existing sites
+# keep main green; the fix is a follow-up hardening (add O_NOFOLLOW, ideally
+# O_CLOEXEC). rw1/rw2 ratify this call.
+# ---------------------------------------------------------------------------
 
 rules:
   - id: python-eval-exec
@@ -86,3 +131,37 @@ rules:
           - pattern: cursor.execute(f"...", ...)
           - pattern: cursor.execute("..." % ..., ...)
           - pattern: cursor.execute("...".format(...), ...)
+
+  # --- FS-safety rules (fullrun-s2); see the header note above ---------------
+  - id: python-open-without-nofollow-or-excl
+    languages: [python]
+    severity: ERROR
+    message: >
+      os.open() for writing whose flags contain NEITHER O_NOFOLLOW NOR O_EXCL
+      follows a final-component symlink swapped in after any check (the
+      parent-directory TOCTOU): the write lands on the symlink's target. Either
+      is independently sufficient - O_NOFOLLOW refuses to follow a symlink,
+      O_CREAT|O_EXCL fails EEXIST against a pre-existing one. Read-only opens are
+      exempt: the risk is the write.
+    patterns:
+      - pattern: os.open($PATH, $FLAGS, ...)
+      - metavariable-regex:
+          metavariable: $FLAGS
+          regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
+
+  - id: python-ftruncate-without-nlink-check
+    languages: [python]
+    severity: ERROR
+    message: >
+      os.ftruncate(fd, 0) inside a function with no st_nlink check is the
+      force-overwrite hard-link hole: a hard link to a sensitive file IS a
+      regular, non-symlink file, so O_NOFOLLOW + S_ISREG pass and the truncate
+      lands on the linked file. Refuse st_nlink != 1 before truncating (see
+      report_path.py _open_existing_for_force, which closes exactly this hole).
+    patterns:
+      - pattern: os.ftruncate($FD, 0)
+      - pattern-not-inside: |
+          def $F(...):
+              ...
+              <... $X.st_nlink ...>
+              ...
