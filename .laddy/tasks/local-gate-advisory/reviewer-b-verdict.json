@@ -1,0 +1,41 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "tests/test_local_merge.py",
+    ".laddy/specs/local-gate-advisory.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Deterministic gates never waived under --advisory",
+      "evidence": "local_merge.py:272 blocking = deterministic + ([] if advisory_mode else judgment); test_advisory_never_waives_deterministic_gates covers tests/coverage/scan/policy/infra",
+      "verified": true
+    },
+    {
+      "claim": "Advisory record fires on both auto-merge and L3-confirm paths, keyed on the verdict",
+      "evidence": "run() :451-467, replace(verdict, decision='merge') at :440 preserves .advisory through confirm; test_engine_l3_advisory_confirm_preserves_and_records_advisory passes",
+      "verified": true
+    },
+    {
+      "claim": "--advisory + --no-input (dry run) preview is honest about waived judgment-gate findings",
+      "evidence": "Reproduced directly: LocalMergeEngine(dry_run=True, advisory_mode=True) on an L1 branch with a security-panel IDOR blocker returns MergeVerdict(kind='dry_run', reasons=('would auto-merge (dry run: --no-input, nothing changed)',), advisory=()) - the advisory tuple is dropped by the dry-run swap at local_merge.py:441-450, and the CLI prints the generic '[dry-run] t1: WOULD auto-merge (nothing changed)' (local_merge.py:1096), identical to a fully clean branch. No test in test_local_merge.py or test_trust_blockers.py exercises advisory_mode+dry_run together (grepped both files).",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "correctness",
+      "file": "orchestrator/local_merge.py",
+      "line": 441,
+      "summary": "`--advisory --no-input` (dry-run preview) silently drops the waived judgment-gate findings, presenting an advisory-eligible merge identically to a fully clean one.",
+      "failure_scenario": "Director runs `merge-verified --advisory --no-input` to preview a batch before deciding whether to actually re-run for real (this is the documented purpose of --no-input: 'report what WOULD auto-merge but never mutate'). Task t1 has a live security-panel IDOR blocker and is otherwise green (L1/L2). decide(..., advisory_mode=True) correctly returns a merge verdict with advisory=('security panel blocker(s): IDOR on order',). But run() (local_merge.py:441-450) unconditionally rebuilds the verdict as a plain MergeVerdict with reasons=('would auto-merge (dry run: --no-input, nothing changed)',) and no advisory field (defaults to ()), so the CLI prints '[dry-run] t1: WOULD auto-merge (nothing changed)' (local_merge.py:1096) - word-for-word the same message a fully-clean L1 branch gets. The Director cannot tell from the preview that this specific branch has an active security finding that a real run would waive and commit into main via merge-advisory.md. This directly contradicts spec constraint 5 ('Honest labeling ... never presented as a fully-verified merge') for the one code path whose entire purpose is to let the Director inspect before committing to --advisory. Verified by direct repro (see claims_verified) and by absence of any dry_run+advisory_mode test in the suite."
+    }
+  ],
+  "test_assessment": "Strong coverage for decide()'s deterministic/judgment split and for the engine's auto-merge and L3-confirm record paths (AC1-AC5 each have a directly corresponding test). The gap is the --no-input (dry-run) interaction: no test in test_local_merge.py or test_trust_blockers.py combines advisory_mode=True with dry_run=True, and the one that would have caught this (a dry-run digest/report assertion mentioning waived findings) is absent. This is exactly the kind of untested interaction the spec's own implementation sketch warns about for the confirm path (AC5) but the same class of bug exists one level over, in the dry-run swap, and was not caught by either the developer or rw1.",
+  "residual_risks": [
+    "--advisory + --local combination remains untested (rw1's noted residual risk) though no concrete failure was found there.",
+    "If _record_advisory's git commit is ever run twice for the same task_id with byte-identical file content (e.g. a re-run before push_and_cleanup deletes the merged branch), git commit would fail on nothing-to-commit and raise unhandled inside run()'s loop after the merge already landed - no evidence this is reachable today (list_ready sources from remote branches, not merged main), so left as a residual risk rather than a blocker."
+  ]
+}
