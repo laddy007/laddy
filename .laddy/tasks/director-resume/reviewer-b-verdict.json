@@ -1,59 +1,47 @@
 {
-  "verdict": "CHANGES_REQUESTED",
-  "risk_level": "high",
+  "verdict": "APPROVED",
+  "risk_level": "low",
   "files_reviewed": [
-    "orchestrator/terminals.py",
-    "orchestrator/loop.py",
-    "orchestrator/run.py",
     "orchestrator/gitops.py",
-    "orchestrator/handoff.py",
-    "scripts/kickoff.sh",
-    "USAGE.md",
-    "SECURITY.md",
-    "tests/test_loop_director_resume.py",
+    "orchestrator/run.py",
+    "tests/test_gitops.py",
     "tests/test_run_cli.py"
   ],
   "claims_verified": [
     {
-      "claim": "The resume table / clears_terminal mechanism is table-driven and positionally correct (AC1, AC2, AC3, AC4, AC5)",
-      "evidence": "orchestrator/terminals.py:74-96, orchestrator/loop.py:81-122 - confirmed no hardcoded event name in _recorded_terminal, order-sensitivity via entries[idx+1:] scan",
+      "claim": "A new GitOps.sync_worktree_to_origin fetches origin and hard-resets the persisted task worktree to origin/<branch> before spec_sha is computed, closing the stale-worktree gap",
+      "evidence": "orchestrator/gitops.py:123-152 (fetch + rev-parse remote ref + hard reset, False when branch absent on origin)",
       "verified": true
     },
     {
-      "claim": "director_resume is excluded from _PHASE_ACTIONS so derive_resume_point/transitions are untouched (AC6)",
-      "evidence": "orchestrator/loop.py:78 unchanged; _director_note/_resume_developer_point are a separate override layer (loop.py:141-182)",
+      "claim": "_phase_resume calls the sync AFTER all validation (empty reason, terminal exists, terminal resumable) and BEFORE computing spec_sha / appending the director_resume event",
+      "evidence": "orchestrator/run.py:433-442 - sync_worktree_to_origin(wt, task_id) precedes blob_sha() and append_log()",
       "verified": true
     },
     {
-      "claim": "USAGE.md's documented Director workflow (section 8, this diff) instructs editing and pushing the spec correction from a SEPARATE clone/checkout, not the VPS's own persistent task worktree",
-      "evidence": "USAGE.md new section: `git fetch laddy <task> && git checkout <task>` / edit / `git commit -am ... && git push laddy <task>` — a distinct git remote/checkout from the VPS's `work_root/wt/<task>`",
+      "claim": "Sync does not run when validation fails (e.g. still-running task or PATH_GUARD_VIOLATION), so a live/poisoned worktree is never hard-reset",
+      "evidence": "tests/test_run_cli.py:1012-1028 test_resume_does_not_sync_worktree_when_validation_fails monkeypatches sync_worktree_to_origin and asserts it's never called when the terminal is non-resumable",
       "verified": true
     },
     {
-      "claim": "`_phase_resume` (orchestrator/run.py:399-400) never fetches/refreshes the task worktree from origin before reading the spec or hashing it; `GitOps.task_worktree` (orchestrator/gitops.py:98-121) returns the existing local worktree unchanged (no fetch) whenever `(wt/.git).exists()`",
-      "evidence": "orchestrator/gitops.py:104-105 `if (wt / \".git\").exists(): return wt` with no fetch/pull; orchestrator/run.py:399-400 calls `gitops.task_worktree(task_id)` directly, no `refresh_base()` call (contrast with `_phase_status`, run.py:288, which does call `refresh_base()`)",
+      "claim": "My exact reported scenario (VPS worktree stale at CAP_REACHED, Director pushes a spec correction from a separate clone, then --resume) now delivers the corrected spec, records the correct spec_sha, and the local worktree ends up built on top of the Director's commit (no non-fast-forward push rejection)",
+      "evidence": "tests/test_run_cli.py:1059-1106 test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone: asserts worktree spec content flips from stale to corrected, spec_sha matches the corrected blob's real git hash-object, and `git merge-base HEAD director_tip == director_tip` (HEAD descends from the Director's pushed commit)",
       "verified": true
     },
     {
-      "claim": "Reproduced live: when the Director pushes a spec correction from a separate clone while the VPS's persistent task worktree stays at its pre-terminal commit, the eventual `gitops.push` (no --force) at the end of the resumed run is rejected as non-fast-forward",
-      "evidence": "Live repro with three real git repos (VPS worktree cloned/committed 'Record terminal CAP_REACHED' and pushed; a separate 'director-clone' edited spec.md and pushed 'spec: add missing requirement' on top; then committing 'Director resume for t1' on the STALE VPS worktree and running the exact push gitops.push performs: `git push origin HEAD:refs/heads/t1` -> `! [rejected] HEAD -> t1 (fetch first)` / non-fast-forward error, exactly as predicted",
+      "claim": "Unit-level sync behavior (fast-forward when remote branch has moved; no-op when branch absent on origin) is covered directly on GitOps",
+      "evidence": "tests/test_gitops.py: test_sync_worktree_to_origin_fast_forwards_to_pushed_tip and test_sync_worktree_to_origin_is_noop_when_branch_absent_on_origin, both passing",
+      "verified": true
+    },
+    {
+      "claim": "Full suite green after the fix",
+      "evidence": "`python3 -m pytest -q` -> 733 passed; targeted resume/sync tests -> 13 passed",
       "verified": true
     }
   ],
-  "findings": [
-    {
-      "severity": "blocker",
-      "category": "correctness",
-      "file": "orchestrator/run.py",
-      "line": 399,
-      "summary": "The resume CLI never re-fetches the task branch from origin before reading/hashing the spec, so the exact Director workflow this diff documents in USAGE.md silently fails to deliver the corrected spec, and the resumed run's final push is rejected.",
-      "failure_scenario": "Task `t1` runs to CAP_REACHED on the VPS; its worktree persists at `work_root/wt/t1` (nothing ever deletes it - grepped for worktree removal / rmtree, none found for this path). Per the new USAGE.md section 8, the Director follows the documented steps on their OWN machine: `git fetch laddy t1 && git checkout t1`, edits `.laddy/specs/t1.md` to add the missing requirement, commits, and `git push laddy t1`. The Director then runs `scripts/kickoff.sh t1 --resume --reason \"added throttling\"` on the VPS. `_phase_resume` calls `gitops.task_worktree(\"t1\")` (run.py:400), which returns the VPS's PRE-EXISTING local worktree unchanged (gitops.py:104-105: `if (wt/.git).exists(): return wt`, no fetch). `_load_spec` (run.py:401) and `gitops.blob_sha` (run.py:433) then read/hash the STALE, pre-correction spec file - the developer's next round (loop.py:_run_developer) reads that same stale spec, never seeing the fix that was the entire point of the resume. The recorded `spec_sha` receipt is silently wrong (looks like a normal resume in the log/handback with no error). Separately, when the resumed run eventually reaches its terminal and calls `gitops.push` (`git push origin HEAD:refs/heads/t1`, no `--force`, gitops.py:165-177), the push is rejected non-fast-forward because origin's `t1` tip (the Director's spec-correction commit) is not an ancestor of the local stale HEAD - verified live with real git repos, reproducing `! [rejected] HEAD -> t1 (fetch first)`. That GitError propagates through `run()`'s catch-all (loop.py:757-758) into terminal `INTERNAL_ERROR`, which is retryable - but every subsequent `--resume`/re-kickoff hits the identical rejection forever, because nothing ever fetches the stale worktree onto the new origin tip. The task is now permanently stuck with no path forward except manual intervention on the VPS filesystem that is undocumented anywhere in USAGE.md/SECURITY.md. This directly contradicts the spec's stated Goal (\"hand the developer a corrected spec ... and let the loop continue\") and the mcp motivating example (\"the code was not wrong, the spec was\") - the mechanism this spec exists to fix cannot actually deliver a spec correction pushed from a separate Director clone, which is exactly the workflow this diff's own USAGE.md documents."
-    }
-  ],
-  "test_assessment": "AC1-AC7 (the table-driven un-stick mechanism, order-sensitivity, PATH_GUARD_VIOLATION exclusion, note delivery/self-clear) are well covered by tests/test_loop_director_resume.py and hold up under inspection. AC8/AC9 (CLI validation and happy path) are tested, but every test in tests/test_run_cli.py's resume section operates within a single shared work_root/worktree - none exercises the documented multi-machine workflow (Director edits+pushes from a separate clone while the VPS's persistent worktree is stale), so the CLI happy-path test's assertion that `spec_sha` is 'present' never checks that it reflects a freshly-fetched spec, and nothing catches the non-fast-forward push failure this causes in the realistic deployment topology USAGE.md itself documents (git fetch/checkout against a `laddy` remote, separate from the VPS's kickoff.sh invocation). This is the test-adequacy gap behind the blocker above.",
+  "findings": [],
+  "test_assessment": "The prior blocker (stale persisted worktree causing the resumed spec correction to be silently dropped and the eventual push to be rejected non-fast-forward) is directly fixed and directly tested: an integration test reproduces the exact multi-clone scenario I verified live in the previous round, plus focused unit tests on the new sync_worktree_to_origin covering both the fast-forward case and the branch-absent no-op case, plus a negative test proving the sync never fires on a refused (still-running/poisoned) resume.",
   "residual_risks": [
-    "This gap is not unique to the resume path - `task_worktree`'s reuse-without-fetch behavior is pre-existing across every phase - but director-resume is the first feature whose entire value proposition depends on the VPS worktree picking up an externally-pushed correction, and it ships without addressing or even flagging that dependency.",
-    "Even absent the Director-edits-the-spec case, ANY external push to a task's branch between its original run and a later --resume (e.g., a second Director editing something else, or a hub sync) reproduces the same non-fast-forward failure.",
-    "The trust-model reasoning in SECURITY.md/the prior rw1 review (resumed run re-traverses every gate, spec_sha is inert, no push/merge bypass) is unaffected by this finding - it is a correctness/reliability defect in delivering the corrected ask, not a trust or security regression."
+    "sync_worktree_to_origin runs outside the run_lock held later by _phase_loop; two concurrent `--phase resume` invocations on the same task could race on the hard reset. This is a narrow, self-inflicted scenario (the Director would have to issue two overlapping resume commands) and is outside the scope of the finding I raised, so not blocking here."
   ]
 }
