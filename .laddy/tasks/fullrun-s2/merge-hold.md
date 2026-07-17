@@ -3,12 +3,14 @@
 ## What failed
 
 - local full test suite is red
-- security panel blocker(s): security panel member 'claude' did not return a valid verdict; holding for human review; The hard-link protection rule is trivially bypassed by an unrelated or post-truncation st_nlink access.
+- gate infra changed by this branch was NOT verified - the gate ran trusted main's copy of: .laddy/security/semgrep.yml
+- security panel blocker(s): security panel member 'claude' did not return a valid verdict; holding for human review - output still malformed after 2 retries: agent run did not complete cleanly (exit_reason='error', rc=1); its output is not trustworthy; Precomputed flags bypass the unguarded write-open rule; Any unrelated or late st_nlink reference suppresses the hard-link protection rule
 
 ## Security panel findings
 
-- security panel member 'claude' did not return a valid verdict; holding for human review
-- The hard-link protection rule is trivially bypassed by an unrelated or post-truncation st_nlink access.
+- security panel member 'claude' did not return a valid verdict; holding for human review - output still malformed after 2 retries: agent run did not complete cleanly (exit_reason='error', rc=1); its output is not trustworthy
+- Precomputed flags bypass the unguarded write-open rule
+- Any unrelated or late st_nlink reference suppresses the hard-link protection rule
 
 ## Local test failure (tail)
 
@@ -34,10 +36,10 @@ FAILED tests/test_semgrep_fsrules.py::test_rule_a_fires_on_unguarded_write_open_
 FAILED tests/test_semgrep_fsrules.py::test_rule_b_fires_on_ftruncate_without_nlink_fixture
 FAILED tests/test_semgrep_fsrules.py::test_rule_a_reports_the_two_unguarded_sites_as_findings
 FAILED tests/test_semgrep_fsrules.py::test_two_ruleset_copies_are_byte_identical
-6 failed, 692 passed in 38.42s
+6 failed, 705 passed in 30.63s
 -------------
 Diff Coverage
-Diff: 42aa9e8be8b6f6de2ac6d66c6d11be37be14fd81...HEAD, staged and unstaged changes
+Diff: d0beff126a8eeac11803870f6eb9f3f4ae259d83...HEAD, staged and unstaged changes
 -------------
 No lines with coverage information in this diff.
 -------------
@@ -47,6 +49,12 @@ No lines with coverage information in this diff.
 
 ## What is needed
 
-This change is not mergeable as-is. Re-run the task on the VPS to fix
-the failing gate(s), or address them and push a new revision of the
-branch. `fullrun-s2` is NOT merged and NOT deleted.
+This branch changes the gate's own infrastructure, which the gate
+restores from trusted main before it runs, so re-running does not clear it:
+the next run restores the same paths. No gate here can judge the branch's
+own copy - landing those paths is your call, on a route you trust.
+
+Any red gate above may be the restore's doing rather than a defect:
+the suite ran against main's infra, not this branch's.
+
+`fullrun-s2` is NOT merged and NOT deleted.
