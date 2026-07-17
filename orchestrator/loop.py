@@ -155,6 +155,33 @@ def _director_note(entries: Sequence[Mapping[str, Any]]) -> str | None:
     return None
 
 
+def _resume_developer_point(
+    entries: Sequence[Mapping[str, Any]], rp: ResumePoint
+) -> ResumePoint | None:
+    """Force the next phase to a developer round when an UNCONSUMED
+    director_resume is present, else None (director-resume).
+
+    The un-stick primitive only makes ``run()`` re-enter; on its own the pure
+    derivation then routes the resumed run straight back to a terminal - a
+    PUSHED/MERGE_DECIDED tail derives ``done``, a CAP_REACHED tail re-caps, an
+    ESCALATED_DEADLOCK tail re-``deadlock``s - so NO developer round runs and
+    the corrected spec + note are silently dropped (the whole Goal). This
+    override, a sibling of ``_override_phase`` and likewise layered ON TOP of
+    the untouched pure derivation, gives the Director's resume exactly one
+    developer round to act on the corrected ask, at the next round number
+    (``rounds_used + 1``). It self-clears: once that developer entry lands,
+    ``_director_note`` is None and the loop derives normally (one event, one
+    run - the run then continues to its next terminal, re-capping/re-deadlocking
+    only if it fails to converge again). ``derive_resume_point`` is NOT touched
+    (director_resume stays out of ``_PHASE_ACTIONS``); rp's sessions are kept so
+    the developer resumes its session.
+    """
+    if _director_note(entries) is None:
+        return None
+    rounds_used = sum(1 for e in entries if e.get("action") == "developer")
+    return dataclasses.replace(rp, phase="developer", round=rounds_used + 1)
+
+
 def derive_resume_point(
     entries: Sequence[Mapping[str, Any]],
     max_loops: int,
@@ -772,13 +799,22 @@ class Orchestrator:
             self._run_explorer(task_id, wt, artifacts, spec_rel)
 
         while True:
+            entries = artifacts.read_log()
             rp = derive_resume_point(
-                artifacts.read_log(),
+                entries,
                 self.max_loops,
                 with_rw2=self.rw2_runner is not None,
                 with_authoritative=self.docker_gate is not None,
             )
-            phase = self._override_phase(rp.phase, artifacts, wt)
+            # A fresh director_resume re-arms one developer round (delivering the
+            # corrected spec + note), overriding whatever the pure derivation and
+            # the backstop produced - otherwise the un-stuck run derives straight
+            # back to a terminal. Sibling of _override_phase, on top of derive.
+            resumed = _resume_developer_point(entries, rp)
+            if resumed is not None:
+                rp, phase = resumed, "developer"
+            else:
+                phase = self._override_phase(rp.phase, artifacts, wt)
 
             if phase == "developer":
                 self._run_developer(task_id, wt, artifacts, spec_rel, rp)

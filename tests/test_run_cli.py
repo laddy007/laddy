@@ -978,6 +978,20 @@ def test_resume_refuses_path_guard_violation_writes_nothing(
     assert _resume_events(env, "t1") == []
 
 
+def test_resume_refuses_retryable_terminal_with_rekickoff_hint(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # a transient/retryable terminal (QUOTA_TIMEOUT) is NOT poisoned - it already
+    # resumes on a plain re-kickoff, so the refusal must say that, not "discard".
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "QUOTA_TIMEOUT")
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+    err = capsys.readouterr().err
+    assert "re-kickoff" in err and "poisoned" not in err
+
+
 def test_resume_refuses_task_with_no_terminal_writes_nothing(
     remote: Path, tmp_path: Path
 ) -> None:

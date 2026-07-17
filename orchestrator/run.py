@@ -411,12 +411,24 @@ def _phase_resume(
         )
         return 2
     if not clears_terminal("director_resume", state):
-        print(
-            f"ERROR: terminal {state} is not resumable by --phase resume "
-            "(PATH_GUARD_VIOLATION and unknown states are excluded by design: "
-            "the tree is poisoned - discard the branch and restart).",
-            file=sys.stderr,
-        )
+        # Two distinct refusals: a RETRYABLE terminal (QUOTA_TIMEOUT /
+        # INTERNAL_ERROR) is not poisoned - it already resumes on a plain
+        # re-kickoff, so pointing at "discard the branch" would be wrong. A
+        # sticky non-table state (PATH_GUARD_VIOLATION / unknown) IS the
+        # discard-and-restart case.
+        if not terminal_spec(state).sticky:
+            print(
+                f"ERROR: terminal {state} is transient and already resumable - "
+                "just re-kickoff the task normally (no --phase resume needed).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: terminal {state} is not resumable by --phase resume "
+                "(PATH_GUARD_VIOLATION and unknown states are excluded by design: "
+                "the tree is poisoned - discard the branch and restart).",
+                file=sys.stderr,
+            )
         return 2
     spec_sha = gitops.blob_sha(wt, _spec_rel(task_id))
     artifacts.append_log(

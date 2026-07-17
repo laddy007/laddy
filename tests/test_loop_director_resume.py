@@ -19,10 +19,11 @@ from orchestrator.loop import (
     Orchestrator,
     _director_note,
     _recorded_terminal,
+    _resume_developer_point,
     derive_resume_point,
     last_terminal_state,
 )
-from tests.fakes import FakeRunner, FakeShell, blocker, write_policy_toml
+from tests.fakes import FakeRunner, FakeShell, blocker, verdict_json, write_policy_toml
 
 
 def _e(action: str, outcome: str, **extra: Any) -> dict[str, Any]:
@@ -99,8 +100,12 @@ def test_unknown_future_terminal_stays_sticky_with_newer_director_resume() -> No
 
 
 def test_recorded_terminal_hardcodes_no_resume_event_name() -> None:
+    # AC4 targets the UN-STICK RULE specifically: _recorded_terminal must consult
+    # terminals.clears_terminal, never a per-event `if action == "director_resume"`
+    # (else the next consumers add more bespoke ifs). Note-rendering (_director_note)
+    # legitimately names the event - that is not the un-stick rule and is out of
+    # this grep's scope; the un-stick's freedom from event names is what AC4 locks.
     src = inspect.getsource(_recorded_terminal)
-    # the un-stick must consult terminals.clears_terminal, never a per-event if
     assert "director_resume" not in src, "un-stick rule must be table-driven"
     assert "cap_override" not in src
     assert "clears_terminal" in src
@@ -148,6 +153,61 @@ def test_crash_safe_resume_continues_without_a_second_event() -> None:
     ]
     assert _recorded_terminal(entries) is None
     assert derive_resume_point(entries, max_loops=4).phase == "fast_tests"
+
+
+# --- resume override: a fresh resume forces a productive developer round ------
+# Regression guard for the two rw1 blockers: the un-stick primitive alone lets
+# the pure derivation route the resumed run straight back to a terminal (done /
+# cap_reached / deadlock) with NO developer round. _resume_developer_point
+# overrides that, on top of the untouched derivation.
+
+
+def _rp(phase: str, round_: int = 1) -> Any:
+    from orchestrator.loop import ResumePoint
+
+    return ResumePoint(round=round_, phase=phase, dev_session="d1",
+                       rw1_session="r1", rw2_session=None)
+
+
+def test_fresh_resume_forces_developer_over_done_phase() -> None:
+    # PUSHED / MERGE_DECIDED tail derives 'done' - the resume must still develop
+    entries = [
+        _e("developer", "ok"), _e("push", "ok"),
+        _e("terminal", "MERGE_DECIDED:stop_before_merge"), _resume(),
+    ]
+    forced = _resume_developer_point(entries, _rp("done", round_=1))
+    assert forced is not None
+    assert forced.phase == "developer"
+    assert forced.round == 2  # rounds_used(1) + 1
+    assert forced.dev_session == "d1"  # session continuity preserved
+
+
+def test_fresh_resume_forces_developer_over_cap_reached_phase() -> None:
+    entries = [
+        _e("developer", "ok"), _e("developer", "ok"),
+        _e("terminal", "CAP_REACHED"), _resume(),
+    ]
+    forced = _resume_developer_point(entries, _rp("cap_reached", round_=3))
+    assert forced is not None and forced.phase == "developer"
+    assert forced.round == 3  # rounds_used(2) + 1
+
+
+def test_fresh_resume_forces_developer_over_deadlock_phase() -> None:
+    entries = [_e("developer", "ok"), _e("senior", "deadlock"),
+               _e("terminal", "ESCALATED_DEADLOCK"), _resume()]
+    forced = _resume_developer_point(entries, _rp("deadlock"))
+    assert forced is not None and forced.phase == "developer"
+
+
+def test_no_resume_override_without_a_resume_event() -> None:
+    entries = [_e("developer", "ok"), _e("terminal", "CAP_REACHED")]
+    assert _resume_developer_point(entries, _rp("cap_reached")) is None
+
+
+def test_resume_override_self_clears_once_a_developer_round_ran() -> None:
+    # a developer entry AFTER the resume consumes it - no more forcing
+    entries = [_e("terminal", "CAP_REACHED"), _resume(), _e("developer", "ok")]
+    assert _resume_developer_point(entries, _rp("fast_tests")) is None
 
 
 # --- AC7 (pure): the note self-clears once a phase action runs after it -------
@@ -254,3 +314,119 @@ def test_note_and_verdict_both_reach_developer_then_self_clear(
     )
     orch._run_developer("t1", wt, artifacts, "spec.md", rp2)
     assert "spec omitted throttling" not in dev.calls[-1].prompt
+
+
+# --- end-to-end: a resumed run drives a real developer round through _run_phases
+# (the rw1-blocker regression: AC1 only proved _recorded_terminal returns None;
+# these prove the loop then does PRODUCTIVE work for each terminal class) -------
+
+
+def _full_orch(
+    remote: Path,
+    tmp_path: Path,
+    roles_dir: Path,
+    *,
+    dev: FakeRunner,
+    rw1: FakeRunner,
+    shell: FakeShell,
+    max_loops: int = 4,
+    senior: FakeRunner | None = None,
+) -> Orchestrator:
+    dev.name, rw1.name = "dev", "rw1"
+    return Orchestrator(
+        gitops=GitOps(repo_url=remote.as_uri(), work_root=tmp_path / "work"),
+        dev_runner=dev,
+        rw1_runner=rw1,
+        senior_runner=senior,
+        fast_commands="fake-tests",
+        shell=shell,
+        roles_dir=roles_dir,
+        max_loops=max_loops,
+        now=lambda: "2026-07-17T00:00:00Z",
+    )
+
+
+def _dev_entries_after_resume(artifacts: TaskArtifacts) -> list[dict[str, Any]]:
+    log = artifacts.read_log()
+    idx = max(i for i, e in enumerate(log) if e.get("action") == "director_resume")
+    return [e for e in log[idx + 1 :] if e.get("action") == "developer"]
+
+
+def test_resumed_cap_reached_runs_developer_round_and_converges(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    dev = FakeRunner(["applied the corrected spec"])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    orch = _full_orch(remote, tmp_path, roles_dir, dev=dev, rw1=rw1,
+                      shell=FakeShell(results=[(0, "green")]), max_loops=2)
+    wt = orch.gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    for r in (1, 2):  # a run that hit the round cap
+        art.append_log(action="developer", outcome="ok", round=r, session_id="d1")
+        art.append_log(action="fast_tests", outcome="pass", round=r)
+        art.append_log(action="rw1", outcome="changes_requested", round=r, session_id="r1")
+    art.write_json(RW1_VERDICT, {"verdict": "CHANGES_REQUESTED",
+                                 "findings": [blocker(summary="missing throttling")]})
+    art.append_log(action="terminal", outcome="CAP_REACHED")
+    art.append_log(action="director_resume", outcome="ok",
+                   reason="added the throttling the spec omitted")
+
+    terminal = orch.run("t1")
+
+    assert terminal == "PUSHED"  # the corrected round converged
+    dev_rounds = _dev_entries_after_resume(art)
+    assert len(dev_rounds) == 1  # exactly one developer round ran (one event, one run)
+    assert dev_rounds[0]["round"] == 3  # rounds_used(2) + 1
+    assert "added the throttling the spec omitted" in dev.calls[-1].prompt
+
+
+def test_resumed_pushed_runs_developer_round_not_redone(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # trailing push:ok derives 'done'; the resume must still develop, not re-push
+    dev = FakeRunner(["reworked per the corrected spec"])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    orch = _full_orch(remote, tmp_path, roles_dir, dev=dev, rw1=rw1,
+                      shell=FakeShell(results=[(0, "green")]))
+    wt = orch.gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    art.append_log(action="developer", outcome="ok", round=1, session_id="d1")
+    art.append_log(action="fast_tests", outcome="pass", round=1)
+    art.append_log(action="rw1", outcome="approved", round=1, session_id="r1")
+    art.append_log(action="push", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome="PUSHED")
+    art.append_log(action="director_resume", outcome="ok", reason="ask was incomplete")
+
+    terminal = orch.run("t1")
+
+    assert terminal == "PUSHED"
+    dev_rounds = _dev_entries_after_resume(art)
+    assert len(dev_rounds) == 1 and dev_rounds[0]["round"] == 2
+    assert "ask was incomplete" in dev.calls[-1].prompt
+
+
+def test_resumed_deadlock_develops_instead_of_re_deadlocking(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # A log that WOULD make _override_phase route developer -> deadlock (2 rw2
+    # nogos since the last senior, senior_ran true). A fresh resume must bypass
+    # that backstop for one developer round, not immediately re-terminate.
+    dev = FakeRunner(["reworked"])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    orch = _full_orch(remote, tmp_path, roles_dir, dev=dev, rw1=rw1,
+                      shell=FakeShell(results=[(0, "green")]),
+                      senior=FakeRunner([]))  # senior present -> _override_phase active
+    wt = orch.gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    art.append_log(action="senior", outcome="approved", round=1, sha="s1")
+    art.append_log(action="rw2", outcome="nogo", round=1, sha="s1")
+    art.append_log(action="rw2", outcome="nogo", round=1, sha="s1")
+    art.append_log(action="terminal", outcome="ESCALATED_DEADLOCK")
+    # sanity: without the resume this log re-terminates as a deadlock
+    assert orch._override_phase("developer", art, wt) == "deadlock"
+    art.append_log(action="director_resume", outcome="ok", reason="broke the tie in the spec")
+
+    terminal = orch.run("t1")
+
+    assert terminal == "PUSHED"  # developed + converged, did NOT re-deadlock
+    assert len(_dev_entries_after_resume(art)) == 1
