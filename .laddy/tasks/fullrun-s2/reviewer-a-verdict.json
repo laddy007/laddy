@@ -1,0 +1,79 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "security/semgrep.yml",
+    ".laddy/security/semgrep.yml",
+    "tests/test_semgrep_fsrules.py",
+    "tests/fixtures/semgrep/rule_a_bad_write_open.py",
+    "tests/fixtures/semgrep/rule_b_bad_ftruncate.py",
+    "orchestrator/queue.py",
+    "orchestrator/artifacts.py",
+    "monitoring/loop_monitor/report_path.py",
+    "orchestrator/testgate.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Rule A fires on the anti-pattern fixture (AC1)",
+      "evidence": "semgrep 1.169.0 scan: python-open-without-nofollow-or-excl at tests/fixtures/semgrep/rule_a_bad_write_open.py:19",
+      "verified": true
+    },
+    {
+      "claim": "Rule B fires on the ftruncate-without-nlink fixture (AC1)",
+      "evidence": "semgrep scan: python-ftruncate-without-nlink-check at tests/fixtures/semgrep/rule_b_bad_ftruncate.py:19",
+      "verified": true
+    },
+    {
+      "claim": "Zero false positives on the corpus; canary queue.py:104 (O_CREAT|O_EXCL) spared (AC2)",
+      "evidence": "targeted scan of queue.py/artifacts.py/report_path.py fires ONLY at artifacts.py:143 and queue.py:205; queue.py:104,156,177 and report_path.py:83,86,112,129,145 produce no findings",
+      "verified": true
+    },
+    {
+      "claim": "Rule B deep-expression operator correctly spares report_path.py:129 (st_nlink guard lives in an if-condition)",
+      "evidence": "scan of report_path.py yields no python-ftruncate-without-nlink-check finding at line 129 (info.st_nlink != 1 at line 124 matched by <... $X.st_nlink ...>)",
+      "verified": true
+    },
+    {
+      "claim": "The two unguarded sites are adjudicated as genuine findings, not suppressed (AC3)",
+      "evidence": "Rule A fires on artifacts.py:143 and queue.py:205; ruleset header records the reasoning; test_rule_a_reports_the_two_unguarded_sites_as_findings locks it in; no nosem present",
+      "verified": true
+    },
+    {
+      "claim": "Fixtures under tests/ do not fail the branch's own gate",
+      "evidence": "full-tree 'semgrep --config ... .' scan (as _binding_gate runs it) produces no new-rule findings under tests/; only artifacts.py:143 & queue.py:205 fire, both excluded by --baseline-commit since the diff touches neither file",
+      "verified": true
+    },
+    {
+      "claim": "Two copies are byte-identical (AC5)",
+      "evidence": "cmp security/semgrep.yml .laddy/security/semgrep.yml => IDENTICAL; test_two_ruleset_copies_are_byte_identical passes",
+      "verified": true
+    },
+    {
+      "claim": "Offline/pinned and trust boundary untouched (AC6/AC7)",
+      "evidence": "diff --stat shows testgate.py, local_merge.py, queue.py, artifacts.py, report_path.py all unchanged; test_gate_semgrep_is_offline_and_pinned, test_trusted_ref_passed_only_by_local_merge, test_no_vps_scan_result_is_authoritative all pass",
+      "verified": true
+    },
+    {
+      "claim": "semgrep --error blocks on WARNING too (AC8)",
+      "evidence": "throwaway WARNING-severity rule + `semgrep --error` => rc=1; header records this; both new rules are ERROR",
+      "verified": true
+    },
+    {
+      "claim": "Suite/lint/type clean for touched scope (AC9)",
+      "evidence": "pytest tests/test_semgrep_fsrules.py => 12 passed (semgrep on PATH); ruff check => All checks passed; basedpyright => 0 errors (8 warnings, reportAny/reportPrivateUsage, non-blocking via failOnWarnings=false, identical pattern to existing test_testgate.py)",
+      "verified": true
+    },
+    {
+      "claim": "Rules C and D documented as not-encoded with reasons (AC4)",
+      "evidence": "security/semgrep.yml header names Rule C (realpath-authorise/report_path.py) and Rule D (taint/provenance) as NOT ENCODED; test_not_encoded_classes_are_documented passes",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "AC1: covered by test_rule_a_fires_on_unguarded_write_open_fixture and test_rule_b_fires_on_ftruncate_without_nlink_fixture (both fire, verified via pinned semgrep). AC2: covered by test_rule_a_no_false_positive_on_guarded_corpus (asserts queue.py:104/156/177 and report_path.py clean) and test_rule_b_no_false_positive_on_guarded_report_path — the two hardest canaries (O_EXCL-only open; st_nlink-in-if-condition) both pass. AC3: covered by test_rule_a_reports_the_two_unguarded_sites_as_findings, locking the adjudication as findings rather than a suppression. AC4/AC8: covered by test_not_encoded_classes_are_documented and test_severity_behaviour_recorded_and_new_rules_are_error. AC5: test_two_ruleset_copies_are_byte_identical. AC6/AC7: offline/pinned, trust-boundary, and gate-semantics tests. Each new rule has both a positive (fixture fires) and a negative/failure-mode (corpus + canary does-not-fire) test — the false-positive path, which is the class this slice exists to prevent, is the more thoroughly covered one. The requires_semgrep tests SKIP on the Director's box (no semgrep) and run in the gate container; I independently exercised all of them here against the pinned semgrep, so rule behaviour is verified, not merely asserted.",
+  "residual_risks": [
+    "Rule A's metavariable-regex is name-based: flags passed via a precomputed variable (flags = ...; os.open(p, flags)) escape the rule — a false negative the spec explicitly prefers over a false positive; acceptable by design.",
+    "artifacts.py:143 and queue.py:205 remain genuine (unfixed) low-severity findings in main, deliberately left for a follow-up hardening; --baseline-commit keeps main green, but a future diff touching either line will trip the gate — the intended, documented consequence of the AC3 adjudication.",
+    "Nothing but test_two_ruleset_copies_are_byte_identical enforces the two-copy invariant; a future edit to one YAML and not the other is caught only if that test runs."
+  ]
+}
