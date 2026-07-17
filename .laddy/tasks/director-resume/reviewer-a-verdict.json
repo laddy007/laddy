@@ -1,0 +1,116 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/terminals.py",
+    "orchestrator/loop.py",
+    "orchestrator/run.py",
+    "orchestrator/gitops.py",
+    "orchestrator/handoff.py",
+    "scripts/kickoff.sh",
+    "tests/test_loop_director_resume.py",
+    "tests/test_terminals.py",
+    "tests/test_run_cli.py",
+    "tests/test_handoff.py",
+    "tests/test_kickoff_wiring.py",
+    "USAGE.md",
+    "SECURITY.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "The un-stick rule is table-driven; _recorded_terminal hardcodes no event name and consults clears_terminal",
+      "evidence": "orchestrator/loop.py:106-117 iterates and calls clears_terminal(...); grep of inspect.getsource(_recorded_terminal) in tests/test_loop_director_resume.py:82-87 passes",
+      "verified": true
+    },
+    {
+      "claim": "RESUMES table + clears_terminal live in terminals.py with MERGE_DECIDED prefix matching via the shared _MERGE_DECIDED_PREFIX constant",
+      "evidence": "orchestrator/terminals.py:69-96 (MERGE_DECIDED_ANY = _MERGE_DECIDED_PREFIX; clears_terminal prefix branch at :95-96)",
+      "verified": true
+    },
+    {
+      "claim": "A newer director_resume un-sticks CAP_REACHED/ESCALATED_DEADLOCK/PUSHED/MERGE_DECIDED and push:ok; order is load-bearing (event older than terminal does not un-stick)",
+      "evidence": "verified live: _recorded_terminal([...,terminal CAP_REACHED,resume]) is None; [resume,...,terminal CAP_REACHED]=='CAP_REACHED'; tests pass 120/120",
+      "verified": true
+    },
+    {
+      "claim": "PATH_GUARD_VIOLATION and unknown states stay sticky",
+      "evidence": "orchestrator/terminals.py:76-84 (RESUMES omits PATH_GUARD_VIOLATION); tests/test_loop_director_resume.py:99-108 pass",
+      "verified": true
+    },
+    {
+      "claim": "director_resume is not in _PHASE_ACTIONS, so derive_resume_point's next_phase/round are unchanged",
+      "evidence": "orchestrator/loop.py:78; verified live: derive with and without resume both yield phase='developer', round=2",
+      "verified": true
+    },
+    {
+      "claim": "The note is prepended additively in _run_developer and self-clears after a phase action",
+      "evidence": "orchestrator/loop.py:982-987 prepends DIRECTOR_NOTE_SECTION; _director_note (loop.py:142-155) returns None once a _PHASE_ACTIONS entry follows the resume; integration test test_note_and_verdict_both_reach_developer_then_self_clear passes",
+      "verified": true
+    },
+    {
+      "claim": "CLI validation is all-or-nothing; nothing is written on empty/missing reason, PATH_GUARD_VIOLATION, no-terminal, or unknown task",
+      "evidence": "orchestrator/run.py:379-427; tests/test_run_cli.py:951-1000 (5 refusal tests) pass, each asserting _resume_events == []",
+      "verified": true
+    },
+    {
+      "claim": "The resume path never pushes to origin/merges/skips a reviewer; spec_sha is a record only, read nowhere in decision logic",
+      "evidence": "grep spec_sha -> only written (run.py:421-423); gate_states/_decide_merge ignore director_resume (loop.py:905-922); inspect-source test test_resume_path_does_not_push_or_merge_or_skip_review passes",
+      "verified": true
+    },
+    {
+      "claim": "Receipt: handback/summary show count + latest reason and exclude director_resume from the round trace",
+      "evidence": "orchestrator/handoff.py:46-69,96,161; tests/test_handoff.py:162-201 pass",
+      "verified": true
+    },
+    {
+      "claim": "Suite green, ruff clean, basedpyright 0 errors for touched scope",
+      "evidence": "pytest -q -> 719 passed; ruff check orchestrator/ tests/ -> All checks passed; basedpyright -> 0 errors, 229 (pre-existing reportAny) warnings",
+      "verified": true
+    },
+    {
+      "claim": "SPEC-CITED LIVE EXAMPLE mcp (MERGE_DECIDED:stop_before_merge) is un-stuck but the resumed loop derives phase 'done', not a developer round",
+      "evidence": "verified live: _finalize appends push:ok for success-kind MERGE_DECIDED (loop.py:862-865); derive_resume_point on [...,push:ok,terminal MERGE_DECIDED,resume] returns phase='done'; loop.py:808-823 re-records+returns with no developer run",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "correctness",
+      "file": "orchestrator/loop.py",
+      "line": 808,
+      "summary": "Resuming a PUSHED or MERGE_DECIDED:* terminal un-sticks it but the loop derives phase 'done' (from the trailing push:ok that _finalize appends for success-kind terminals), so it re-records the same terminal and returns WITHOUT any developer round — the corrected spec is never acted on and DIRECTOR_NOTE_SECTION is silently dropped. This defeats round-trip steps 5-7 and the Goal ('hand the developer a corrected spec and a written note') for two of the four resumable terminals, including the spec's own cited live example.",
+      "failure_scenario": "Director runs `kickoff mcp --resume --reason \"spec was missing throttling; added it\"` on the cited mcp branch (last terminal MERGE_DECIDED:stop_before_merge, preceded by push:ok). _recorded_terminal returns None (un-stuck), but derive_resume_point returns phase='done' (transitions[('push','ok')]='done'); _run_phases hits the 'done' branch (loop.py:808-823), re-appends terminal MERGE_DECIDED, re-pushes the task branch, and returns MERGE_DECIDED — no _run_developer call ever runs, so the amended spec is ignored and the note reason is never delivered. Same for a plain PUSHED terminal."
+    },
+    {
+      "severity": "blocker",
+      "category": "correctness",
+      "file": "orchestrator/terminals.py",
+      "line": 77,
+      "summary": "Resuming an ESCALATED_DEADLOCK terminal un-sticks it, but _override_phase re-detects the still-present nonconvergence fingerprints and, since senior_ran is true, immediately routes phase 'developer' -> 'deadlock', re-terminating as ESCALATED_DEADLOCK before any developer round runs — again the corrected spec/note are never applied.",
+      "failure_scenario": "A task ended ESCALATED_DEADLOCK after repeated rw2 nogo (same fingerprint) following a senior verdict. Director runs `--phase resume --reason \"...\"`. _recorded_terminal returns None; derive_resume_point returns 'developer'; but _override_phase (loop.py:701-703) sees nonconvergence_detected(entries) true (the repeated fingerprints since the last senior are still in the log) and senior_ran true, so it returns 'deadlock' -> _finalize(ESCALATED_DEADLOCK) at loop.py:806-807. No developer round runs and DIRECTOR_NOTE_SECTION is never rendered; the resume is a no-op re-terminate."
+    },
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "orchestrator/run.py",
+      "line": 413,
+      "summary": "When the last terminal is a retryable/non-table state (e.g. QUOTA_TIMEOUT, INTERNAL_ERROR), `--phase resume` refuses it with a message asserting 'the tree is poisoned - discard the branch and restart', which is inaccurate and misleading for a transient/retryable terminal (which should simply be re-kickoffed). Consider distinguishing 'poisoned (PATH_GUARD_VIOLATION)' from 'already retryable — just re-kickoff'.",
+      "failure_scenario": ""
+    },
+    {
+      "severity": "advisory",
+      "category": "test-adequacy",
+      "file": "orchestrator/loop.py",
+      "line": 153,
+      "summary": "AC4's grep clause ('no event name is hardcoded in loop.py') is only enforced by the test against _recorded_terminal's source; _director_note (loop.py:153) legitimately hardcodes 'director_resume'. The un-stick rule itself is correctly table-driven (AC4 intent met), but the note-rendering exception to the literal AC4 wording is worth an explicit comment/test note so a future reader doesn't mistake it for the bespoke-if anti-pattern the spec warns against.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "AC1-3,5 covered by tests/test_terminals.py and test_loop_director_resume.py (parametrized un-stick, order, PATH_GUARD_VIOLATION, prefix). AC4 covered by a table-driven test + a source-grep on _recorded_terminal only. AC6 covered (derive unchanged with/without resume). AC7 covered by pure _director_note tests + one integration round asserting the note AND the rw1 verdict both reach the prompt and self-clear. AC8/AC9 covered by five CLI refusal tests (each asserting nothing written) + a happy-path stub asserting one event with reason+spec_sha and clarify-skipped loop entry. AC10 covered (summary/handback receipt). AC11 covered by a source-inspection guard. AC12 covered. AC13 verified: 719 passed, ruff clean, basedpyright 0 errors. Every new function has failure-mode tests EXCEPT the end-to-end resume behaviour of the non-CAP_REACHED terminals: no test drives a resumed PUSHED/MERGE_DECIDED/ESCALATED_DEADLOCK task through _run_phases to confirm a developer round actually runs — which is exactly where the two blockers hide (AC1 only checks _recorded_terminal returns None, not that the loop then does productive work).",
+  "residual_risks": [
+    "Of the four terminals director_resume claims to resume, only CAP_REACHED productively re-runs the developer with the corrected spec/note; PUSHED, MERGE_DECIDED:*, and ESCALATED_DEADLOCK un-stick but immediately re-terminate without a developer round (the two blockers). Because the spec forbids changing the transition table / nonconvergence slicing, resolving this likely needs a spec-level decision (e.g. narrow director_resume's frozenset to CAP_REACHED/ESCALATED_DEADLOCK-with-handling, or define how 'done'/'deadlock'-deriving resumes reach a developer round).",
+    "task_worktree returns an existing local worktree without fetching, so a spec the Director edited-and-pushed elsewhere may not be present at resume time; spec_sha then records the stale blob. This is pre-existing worktree behaviour, not introduced here, but affects whether 'the ask changed' is truly reflected.",
+    "Trust surface reviewed and holds: director_resume/spec_sha are inert in gate_states_from_log and _decide_merge; the resume CLI neither pushes to origin nor merges nor skips a reviewer; a forged resume from a compromised VPS only buys more of its own compute."
+  ]
+}
