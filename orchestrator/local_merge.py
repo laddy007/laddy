@@ -234,17 +234,29 @@ def run_security_panel(
     for runner in runners:
         try:
             verdict, _ = request_verdict(runner, prompt, cwd, validate=None)
-        except VerdictError:
+        except VerdictError as exc:
             # a panel member that cannot produce a valid verdict is a flag,
             # not a pass: synthesize a blocker so decide() holds for a human
-            verdict = _abstention_blocker(runner.name)
+            verdict = _abstention_blocker(runner.name, str(exc))
         verdicts.append(verdict)
     return verdicts
 
 
-def _abstention_blocker(member: str) -> Verdict:
+# An abstention reason quotes agent-controlled text (a schema error echoes the
+# value it rejected) into a report a human reads. Bounded so a runaway blob
+# cannot bury the rest of the digest; the full text is the runner's to log.
+_ABSTENTION_REASON_MAX = 300
+
+
+def _abstention_blocker(member: str, reason: str = "") -> Verdict:
     from orchestrator.verdict import Finding
 
+    # WHY it abstained is the whole diagnostic value: quota, a rejected model
+    # flag and a schema violation all abstain identically, and only this
+    # message tells them apart. request_verdict already knows - carry it.
+    detail = reason.strip()
+    if len(detail) > _ABSTENTION_REASON_MAX:
+        detail = f"{detail[:_ABSTENTION_REASON_MAX]}..."
     return Verdict(
         verdict="CHANGES_REQUESTED",
         risk_level="high",
@@ -257,7 +269,8 @@ def _abstention_blocker(member: str) -> Verdict:
                 file="",
                 line=0,
                 summary=f"security panel member {member!r} did not return a "
-                "valid verdict; holding for human review",
+                "valid verdict; holding for human review"
+                + (f" - {detail}" if detail else ""),
                 failure_scenario="unreviewed change on a security-relevant path",
             ),
         ),
@@ -637,8 +650,8 @@ def _rw2(runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path) -> Verdic
     try:
         verdict, _ = request_verdict(runner, prompt, wt)
         return verdict
-    except VerdictError:
-        return _abstention_blocker("rw2")
+    except VerdictError as exc:
+        return _abstention_blocker("rw2", str(exc))
 
 
 def merge_branch(

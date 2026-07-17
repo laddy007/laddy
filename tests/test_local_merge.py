@@ -225,6 +225,40 @@ def test_panel_malformed_member_becomes_blocking_abstention(tmp_path: Path) -> N
     assert any("did not return a valid verdict" in f.summary for f in blockers)
 
 
+def test_panel_abstention_carries_the_reason_it_abstained(tmp_path: Path) -> None:
+    # An abstention that only says "no valid verdict" is undiagnosable: the
+    # Director cannot tell a quota'd run from a broken model flag from a schema
+    # violation, and the engine ALREADY knows which - request_verdict says so in
+    # the VerdictError it raises. Dropping it sends everyone guessing.
+    p1 = FakeRunner([verdict_json("APPROVED")])
+    p2 = FakeRunner(["not json at all", "still not json", "nope"])
+    p1.name, p2.name = "opus", "codex"
+    verdicts = run_security_panel([p1, p2], "review", tmp_path)
+    blockers = [f for v in verdicts for f in v.blockers]
+    assert any("no JSON object found" in f.summary for f in blockers)
+
+
+def test_panel_abstention_reason_is_bounded(tmp_path: Path) -> None:
+    # The reason quotes agent-controlled text into a report a human reads; a
+    # runaway blob must not bury the rest of the digest.
+    runner = FakeRunner([f"{'x' * 5000} no json", f"{'x' * 5000} no json", "nope"])
+    runner.name = "chatty"
+    (verdict,) = run_security_panel([runner], "review", tmp_path)
+    assert len(verdict.blockers[0].summary) < 500
+
+
+def test_rw2_abstention_carries_the_reason_it_abstained(tmp_path: Path) -> None:
+    from orchestrator.local_merge import _rw2
+
+    runner = FakeRunner(["garbage", "garbage", "garbage"])
+    roles = tmp_path / "roles"
+    roles.mkdir()
+    _ = (roles / "rw2.md").write_text("role", encoding="utf-8")
+    verdict = _rw2(runner, "t1", tmp_path, roles)
+    assert verdict is not None
+    assert any("no JSON object found" in f.summary for f in verdict.blockers)
+
+
 # --- engine: sequential, hold-does-not-block-others, never-fix ---------------
 
 
