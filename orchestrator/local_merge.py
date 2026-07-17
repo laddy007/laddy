@@ -6,6 +6,16 @@ infra - it never trusts the VPS gate log - and either MERGES into local
 main or HOLDS for a human risk decision. It NEVER edits code or fixes a
 failing test: a needed fix is a new VPS task, not this tool's job.
 
+``--local <ref>`` is the trusted-machine escape hatch for a task the local
+gate held BROKEN: the Director authors the fix by hand with ordinary git and
+this tool judges that locally-committed revision through the IDENTICAL gate
+(no fetch of the remote branch, no VPS round trip). It stays fix-free - the
+only new capability is sourcing the judged/merged commit from a local ref
+instead of a fetched one. It does not trust the code more, it trusts the
+route: the Director is the trusted author, the same gate judges the diff, and
+the judged sha is the merged sha (dirty-tree guarded), so nothing unverified
+slips in. A stopgap until bounce-to-VPS exists.
+
 Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L1 safe-by-construction : merge after the mechanical gates, no review
   L2 ordinary logic       : the agents ARE the gate (rw2 + security panel)
@@ -166,6 +176,15 @@ def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[
             "This change is not mergeable as-is. Re-run the task on the VPS to fix",
             "the failing gate(s), or address them and push a new revision of the",
             "branch.",
+            "",
+            "Or fix it right here on the trusted machine and re-judge locally:",
+            "commit the fix ON TOP of this branch with ordinary git, then run",
+            "`merge-verified.sh <task> --local <ref>` (a sha, branch, or worktree",
+            "path). --local does not trust the code more - it trusts the route:",
+            "you are the trusted author and the IDENTICAL gate still judges the",
+            "diff, and the judged sha is the merged sha, so nothing unverified",
+            "slips in. It is a stopgap until bounce-to-VPS exists (and a",
+            "legitimate escape hatch after).",
         ]
     lines += ["", f"`{task_id}` is NOT merged and NOT deleted.", ""]
     return "\n".join(lines)
@@ -485,23 +504,68 @@ def _neutralize_agent_config(wt: Path) -> None:
             target.unlink(missing_ok=True)
 
 
-def _branch_worktree(
-    repo: Path, task_id: str, work_root: Path, branch_remote: str = "origin"
-) -> Path:
-    """Detached worktree at <branch_remote>/<task> so gates run in
-    isolation without disturbing the Director's main checkout.
+def _worktree_at_sha(repo: Path, task_id: str, work_root: Path, sha: str) -> Path:
+    """Detached worktree at ``sha`` so gates run in isolation without disturbing
+    the Director's main checkout.
 
     Branch-shipped agent config is stripped before any reviewer CLI can load it
     (C2); classification is unaffected (it diffs commits, not the working tree).
+    The remote and local modes share this tail: only how ``sha`` is obtained
+    differs (a fetched remote branch vs. a local ref), never what the gate sees.
     """
-    _git(repo, "fetch", branch_remote, task_id)
     wt = work_root / f"verify-{task_id}"
     _git(repo, "worktree", "prune")
     if wt.exists():
         _git(repo, "worktree", "remove", "--force", str(wt), check=False)
-    _git(repo, "worktree", "add", "--detach", str(wt), f"{branch_remote}/{task_id}")
+    _git(repo, "worktree", "add", "--detach", str(wt), sha)
     _neutralize_agent_config(wt)
     return wt
+
+
+def _branch_worktree(
+    repo: Path, task_id: str, work_root: Path, branch_remote: str = "origin"
+) -> Path:
+    """Detached worktree at <branch_remote>/<task> (fetched first) so gates run
+    in isolation without disturbing the Director's main checkout."""
+    _git(repo, "fetch", branch_remote, task_id)
+    sha = _rev(repo, f"{branch_remote}/{task_id}")
+    return _worktree_at_sha(repo, task_id, work_root, sha)
+
+
+def _resolve_local_ref(repo: Path, ref: str) -> str:
+    """Resolve ``ref`` to a commit sha already in the target repo, with NO fetch.
+
+    ``--local`` judges a locally-committed revision the Director authored by hand
+    (the engine never edits code - it only sources the commit from a local ref
+    instead of a fetched one). ``ref`` may be a sha / branch / tag (resolved as a
+    plain rev) or a worktree PATH like ``../fix`` (the Behaviour recipe): a path
+    is not a rev, so on the rev lookup failing we try it as a git worktree and
+    take its HEAD, then require that commit to exist in this repo's object store
+    (a worktree shares it). Raises on anything that does not resolve - an
+    unresolvable ref must fail cleanly (non-zero), never merge nothing silently.
+    """
+    code, sha = _git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+    if code == 0 and sha:
+        return sha
+    p = Path(ref)
+    if p.is_dir():
+        code, sha = _git(p, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+        if code == 0 and sha:
+            present, _ = _git(repo, "cat-file", "-e", sha, check=False)
+            if present == 0:
+                return sha
+    raise RuntimeError(
+        f"--local ref {ref!r} does not resolve to a commit in {repo} - commit the "
+        "fix and pass its sha, branch, or worktree path"
+    )
+
+
+def _local_worktree(repo: Path, task_id: str, work_root: Path, ref: str) -> Path:
+    """Detached worktree at the local sha ``ref`` resolves to, WITHOUT fetching
+    the remote branch - the whole point of --local is to judge the Director's
+    local commit rather than re-deriving from the remote tip."""
+    sha = _resolve_local_ref(repo, ref)
+    return _worktree_at_sha(repo, task_id, work_root, sha)
 
 
 def _worktree_sha(wt: Path) -> str:
@@ -574,9 +638,22 @@ def gather_gates(
     tools: GateTools,
     branch_remote: str = "origin",
     base_branch: str = "main",
+    local_ref: str | None = None,
 ) -> GateResults:
-    """Run every gate for one branch on trusted local infra, in a worktree."""
-    wt = _branch_worktree(repo, task_id, work_root, branch_remote)
+    """Run every gate for one branch on trusted local infra, in a worktree.
+
+    ``local_ref`` selects --local mode: source the worktree from the local sha
+    that ``local_ref`` resolves to (no fetch of the remote branch) instead of
+    the fetched remote tip. Everything downstream - trial-merge into current
+    main, merge_check, policy from trusted base_branch, binding gate, security
+    panel, rw2, and the ``head_sha`` TOCTOU pin - is byte-identical, so --local
+    runs the SAME gate set; only the commit's provenance differs.
+    """
+    wt = (
+        _local_worktree(repo, task_id, work_root, local_ref)
+        if local_ref is not None
+        else _branch_worktree(repo, task_id, work_root, branch_remote)
+    )
     try:
         verified_sha = _worktree_sha(wt)
         code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
@@ -660,6 +737,7 @@ def merge_branch(
     verified_sha: str,
     base_branch: str = "main",
     branch_remote: str = "origin",
+    fetch: bool = True,
 ) -> bool:
     """Merge the VERIFIED commit of <task> into local main.
 
@@ -670,6 +748,11 @@ def merge_branch(
     the sha is present; the merge names the sha, so a moved tip is
     irrelevant. Never edits code - a conflict is a hold, not a fix.
 
+    ``fetch=False`` (--local) skips the remote refresh: the judged sha is a
+    local commit already in the object store, and there may be no reachable
+    remote at all. The sha is still the one the gates pinned, so judged ==
+    merged holds identically.
+
     ``branch_remote`` is where task branches live (see discover_ready); the
     merge target ``base_branch`` is always integrated locally and later
     pushed to "origin" (GitHub) by push_and_cleanup, regardless of
@@ -677,7 +760,8 @@ def merge_branch(
     """
     if not verified_sha:
         raise ValueError("merge_branch requires the verified sha (TOCTOU pin)")
-    _git(repo, "fetch", branch_remote, task_id)
+    if fetch:
+        _git(repo, "fetch", branch_remote, task_id)
     _git(repo, "checkout", base_branch)
     code, _ = _git(
         repo,
@@ -791,8 +875,25 @@ def main(
         action="store_true",
         help="dry run: never prompt, hold everything, mutate nothing (no merge, no push)",
     )
+    parser.add_argument(
+        "--local",
+        default=None,
+        metavar="REF",
+        help="judge a locally-committed <REF> (sha/branch/worktree path) of ONE "
+        "task with the full gate, no fetch - the Director-authored fix path",
+    )
     parser.add_argument("task", nargs="*", help="task ids; default = all ready")
     args = parser.parse_args(argv)
+
+    local_ref: str | None = args.local
+    if local_ref is not None:
+        # --local judges exactly one named, locally-committed revision; discovery
+        # is bypassed and a missing/blank ref or a task count != 1 is a hard error
+        # (nothing is merged).
+        if len(args.task) != 1:
+            parser.error("--local requires exactly one task id")
+        if not local_ref.strip():
+            parser.error("--local requires a non-empty <ref>")
 
     repo = args.repo.resolve()
     config = OrchestratorConfig.from_env(env if env is not None else os.environ)
@@ -800,15 +901,44 @@ def main(
     work_root.mkdir(parents=True, exist_ok=True)
     tools = _default_tools(config)
 
+    # Dirty-tree guard (--local only): what is judged must be exactly a committed
+    # revision, so nothing uncommitted can ride along into the merged tree
+    # (judged == merged). Refuse before any gate runs; nothing is merged.
+    if local_ref is not None:
+        _, porcelain = _git(repo, "status", "--porcelain")
+        if porcelain.strip():
+            print("[dirty] the target working tree has uncommitted changes.")
+            print("--local judges a committed revision so judged == merged;")
+            print("commit or stash your changes first. NOTHING was merged.")
+            return 1
+
     # Tripwire (spec S5) - before the engine runs, and discover_ready also
-    # fetches inside list_ready, so fetch explicitly here first.
-    _git(repo, "fetch", config.branch_remote, "--prune")
-    if not hub_main_ancestor_of_local(repo, config.branch_remote, config.default_branch):
-        print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
-        print("The VPS must never write main - this is suspicion of an")
-        print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
-        print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
-        return 2
+    # fetches inside list_ready, so fetch explicitly here first. In --local mode
+    # the tripwire is honoured when the remote is REACHABLE (a diverged hub main
+    # is a real tamper signal regardless of mode), but an absent/unreachable
+    # remote only warns and proceeds - the whole point of --local is "no VPS".
+    if local_ref is not None:
+        code, _ = _git(repo, "fetch", config.branch_remote, "--prune", check=False)
+        if code == 0:
+            if not hub_main_ancestor_of_local(
+                repo, config.branch_remote, config.default_branch
+            ):
+                print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
+                print("The VPS must never write main - this is suspicion of an")
+                print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
+                print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
+                return 2
+        else:
+            print(f"[WARN] branch remote '{config.branch_remote}' is absent/unreachable;")
+            print("--local proceeds with no hub to consult (the 'no VPS' case).")
+    else:
+        _git(repo, "fetch", config.branch_remote, "--prune")
+        if not hub_main_ancestor_of_local(repo, config.branch_remote, config.default_branch):
+            print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
+            print("The VPS must never write main - this is suspicion of an")
+            print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
+            print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
+            return 2
 
     _confirm = confirm or ((lambda v: False) if args.no_input else _interactive_confirm)
     _ask_fn = ask or ((lambda p: False) if args.no_input else _ask)
@@ -834,15 +964,24 @@ def main(
             print(f"[hold]  {v.task_id}: declined / not confirmed")
 
     engine = LocalMergeEngine(
+        # --local processes only the one named task (discovery bypassed): the
+        # gate sources the local ref, and the merge skips the fetch (the judged
+        # sha is a local commit; there may be no reachable remote).
         list_ready=lambda: (
-            args.task or discover_ready(repo, branch_remote=config.branch_remote)
+            args.task if local_ref is not None
+            else (args.task or discover_ready(repo, branch_remote=config.branch_remote))
         ),
+        # In the default path the call signature is unchanged (no local_ref
+        # kwarg), so existing gather_gates fakes/tests are untouched; --local
+        # adds the kwarg only when it is actually in local mode.
         verify_one=lambda t: gather_gates(
             t, repo, work_root, tools,
             branch_remote=config.branch_remote, base_branch=config.default_branch,
+            **({"local_ref": local_ref} if local_ref is not None else {}),
         ),
         merge_one=lambda t, sha: merge_branch(
-            repo, t, sha, branch_remote=config.branch_remote
+            repo, t, sha, branch_remote=config.branch_remote,
+            fetch=local_ref is None,
         ),
         on_verdict=_report,
         confirm=_confirm,
