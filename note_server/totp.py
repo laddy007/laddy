@@ -2,9 +2,9 @@
 
 HMAC-SHA1, 6 digits, 30-second step, with a ±1 step drift window. The current
 time is injected (``now``) so the window logic is deterministically testable.
-The shared secret is hardcoded per spec (single-user design) - see the "Known
-limitation" note in ``note_server/README.md``: this is effectively a shared
-static credential, not per-user auth.
+The shared secret is supplied at runtime as key bytes (decoded from the
+``NOTE_SERVER_TOTP_SECRET`` env var by ``NoteConfig``); this module never holds
+a secret of its own - it only operates on a caller-provided key.
 """
 
 from __future__ import annotations
@@ -13,9 +13,6 @@ import base64
 import hashlib
 import hmac
 import struct
-
-# Base32 shared TOTP secret, hardcoded per spec (decodes to b"Skeev-Okinawa").
-SECRET_B32 = "KNVWKZLWFVHWW2LOMF3WC"  # gitleaks:allow
 
 STEP_SECONDS = 30
 DIGITS = 6

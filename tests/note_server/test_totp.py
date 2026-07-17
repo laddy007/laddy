@@ -5,23 +5,27 @@ import binascii
 import pytest
 
 from note_server.totp import (
-    SECRET_B32,
     STEP_SECONDS,
     decode_secret,
     totp,
     verify,
 )
 
+# Test-only key (not a live credential). The production secret is injected from
+# NOTE_SERVER_TOTP_SECRET at runtime; these vectors only pin the RFC 6238
+# algorithm against a fixed, known key.
+TEST_KEY_B32 = "NZXXIZJNONSXE5TFOIWXIZLTOQWWWZLZ"  # decodes to b"note-server-test-key"
+
 # A large, realistic fixed timestamp (avoids the pre-epoch counter edge).
 FIXED_NOW = 1_000_000_000.0
-KEY = decode_secret(SECRET_B32)
+KEY = decode_secret(TEST_KEY_B32)
 
 
 def test_decode_secret_normalizes_and_pads() -> None:
-    # The hardcoded secret decodes cleanly to a known 13-byte value.
-    assert decode_secret(SECRET_B32) == b"Skeev-Okinawa"
+    # A base32 vector decodes cleanly to its known byte value.
+    assert decode_secret(TEST_KEY_B32) == b"note-server-test-key"
     # Lower-case + surrounding whitespace normalize to the same bytes.
-    assert decode_secret("  knvwkzlwfvhww2lomf3wc  ") == b"Skeev-Okinawa"
+    assert decode_secret(f"  {TEST_KEY_B32.lower()}  ") == b"note-server-test-key"
 
 
 def test_decode_secret_rejects_non_base32() -> None:
@@ -31,7 +35,7 @@ def test_decode_secret_rejects_non_base32() -> None:
 
 @pytest.mark.parametrize(
     ("timestamp", "expected"),
-    [(0, "411400"), (59, "795119"), (1234567890, "948172")],
+    [(0, "863683"), (59, "176782"), (1234567890, "848688")],
 )
 def test_totp_reference_vectors(timestamp: int, expected: str) -> None:
     assert totp(KEY, timestamp) == expected

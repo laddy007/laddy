@@ -15,11 +15,8 @@ import time
 from mcp.server.fastmcp import FastMCP
 
 from note_server.config import NoteConfig
-from note_server.totp import SECRET_B32, decode_secret, verify
+from note_server.totp import verify
 from note_server.writer import WriteError, validate_project_name, write_note
-
-# Decoded once at import; the secret is a module constant, not per-request state.
-_SECRET_KEY = decode_secret(SECRET_B32)
 
 SERVER_NAME = "note-server"
 
@@ -37,7 +34,7 @@ def handle_save_note(
     Error strings name which check failed and never contain the notes folder's
     absolute path. No file is written unless auth AND validation both pass.
     """
-    if not verify(token, _SECRET_KEY, now=now):
+    if not verify(token, cfg.totp_secret, now=now):
         return "Error: authentication failed - TOTP token invalid for the current time window."
     if not validate_project_name(project_name):
         return (

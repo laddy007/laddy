@@ -8,14 +8,18 @@ import pytest
 
 from note_server.config import NoteConfig
 from note_server.server import build_server, handle_save_note
-from note_server.totp import SECRET_B32, decode_secret, totp
+from note_server.totp import decode_secret, totp
 
 FIXED_NOW = 1_000_000_000.0
-KEY = decode_secret(SECRET_B32)
+# Test-only key (not a live credential); the real secret is injected via env.
+TEST_KEY_B32 = "NZXXIZJNONSXE5TFOIWXIZLTOQWWWZLZ"
+KEY = decode_secret(TEST_KEY_B32)
 
 
 def _cfg(folder: Path) -> NoteConfig:
-    return NoteConfig(notes_folder=folder, host="127.0.0.1", port=8080)
+    return NoteConfig(
+        notes_folder=folder, host="127.0.0.1", port=8080, totp_secret=KEY
+    )
 
 
 def _valid_token() -> str:

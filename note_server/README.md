@@ -7,17 +7,15 @@ is written.
 
 ## Configuration (environment variables)
 
-All three are **required, with no default** — startup fails clearly if any is
-unset (or the folder is missing):
+All four are **required, with no default** — startup fails clearly if any is
+unset (or the folder is missing, or the secret is not valid base32):
 
-| Variable             | Meaning                                              |
-|----------------------|------------------------------------------------------|
-| `NOTE_SERVER_FOLDER` | Existing server-side directory the notes are written into. |
-| `NOTE_SERVER_HOST`   | Plain-HTTP bind host (e.g. `127.0.0.1`).             |
-| `NOTE_SERVER_PORT`   | Plain-HTTP bind port (integer, `1..65535`).          |
-
-The TOTP shared secret is **hardcoded in `note_server/totp.py`** (single-user
-design); it is *not* an environment variable.
+| Variable                  | Meaning                                              |
+|---------------------------|------------------------------------------------------|
+| `NOTE_SERVER_FOLDER`      | Existing server-side directory the notes are written into. |
+| `NOTE_SERVER_HOST`        | Plain-HTTP bind host (e.g. `127.0.0.1`).             |
+| `NOTE_SERVER_PORT`        | Plain-HTTP bind port (integer, `1..65535`).          |
+| `NOTE_SERVER_TOTP_SECRET` | Base32 TOTP shared secret. Keep it out of source; the caller minting tokens must use the same value. |
 
 ## Running
 
@@ -25,6 +23,7 @@ design); it is *not* an environment variable.
 NOTE_SERVER_FOLDER=/srv/notes \
 NOTE_SERVER_HOST=127.0.0.1 \
 NOTE_SERVER_PORT=8080 \
+NOTE_SERVER_TOTP_SECRET=<base32-secret> \
 python -m note_server.server
 ```
 
@@ -46,10 +45,11 @@ of scope for this process.
 
 ## Known limitation (single-user by design)
 
-One secret, one folder. The secret is hardcoded in committed source, so anyone
-with repo-read access — or anyone who can reach the endpoint and knows the
-secret — can mint valid tokens; TOTP here is effectively a **shared static
-credential**, not per-user auth. The real write-time safety boundary is the
+One secret, one folder. The secret is a single value shared by every caller
+(injected via `NOTE_SERVER_TOTP_SECRET`, never committed), so anyone who can
+reach the endpoint and knows it can mint valid tokens; TOTP here is effectively
+a **shared static credential**, not per-user auth. The real write-time safety
+boundary is the
 `project_name` allowlist (`^[A-Za-z0-9_-]+$`) plus the no-clobber writer. This
 is acceptable for the stated single-user VPS use; it is **not** safe to hand the
 secret to a second person without adding per-user secrets and/or per-user

@@ -50,9 +50,9 @@ security boundaries — auth-before-write and a path-traversal guard on
 
 ## Authentication (TOTP)
 - Standard RFC 6238: **HMAC-SHA1, 6 digits, 30-second time step**.
-- Shared secret, base32, hardcoded in the server source:
-  `KNVWKZLWFVHWW2LOMF3WC`. Decode it with correct base32 handling (upper-case,
-  pad to a multiple of 8) before use.
+- Shared secret, base32, provided at runtime via the `NOTE_SERVER_TOTP_SECRET`
+  environment variable (no default; never hardcoded in source). Decode it with
+  correct base32 handling (upper-case, pad to a multiple of 8) before use.
 - On each request the server computes the valid code(s) server-side and accepts
   the received `token` if it matches the current window **or ±1 step** (clock
   drift). Anything else (including ±2) is an auth failure.
