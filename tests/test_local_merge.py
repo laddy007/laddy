@@ -405,6 +405,50 @@ def test_engine_l3_advisory_confirm_preserves_and_records_advisory() -> None:
     assert len(recorded) == 1 and recorded[0].advisory
 
 
+def test_engine_dry_run_advisory_preview_carries_waived_findings() -> None:
+    # rw2 blocker: --advisory + --no-input (dry run) must preview an
+    # advisory-eligible branch DISTINCTLY from a clean one (constraint 5). The
+    # waived findings are carried on the DRY_RUN verdict; nothing is merged or
+    # recorded (a dry run touches nothing).
+    from orchestrator.local_merge import DRY_RUN
+
+    merged: list[str] = []
+    recorded: list[MergeVerdict] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _sec_blocker_gates(blast=L1),
+        merge_one=lambda t, sha: (merged.append(t) or True),
+        advisory_mode=True,
+        dry_run=True,
+        record_advisory=lambda v: recorded.append(v),
+    )
+    [v] = engine.run()
+    assert v.decision == "hold" and v.kind == DRY_RUN
+    assert any("IDOR on order" in a for a in v.advisory)  # findings preserved
+    assert any("WOULD be waived" in r for r in v.reasons)
+    assert "IDOR on order" in v.digest
+    assert "NOT a fully-verified merge" in v.digest
+    assert merged == [] and recorded == []  # dry run touched nothing
+
+
+def test_engine_dry_run_clean_branch_keeps_the_plain_preview() -> None:
+    # The dry-run swap must NOT invent a "waived findings" preview for a branch
+    # with nothing to waive: a clean advisory dry run reads exactly like today.
+    from orchestrator.local_merge import DRY_RUN
+
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _gates(blast=L1),
+        merge_one=lambda t, sha: True,
+        advisory_mode=True,
+        dry_run=True,
+    )
+    [v] = engine.run()
+    assert v.kind == DRY_RUN and v.advisory == ()
+    assert "would auto-merge" in v.reasons[0]
+    assert "WAIVING" not in v.digest
+
+
 # --- security panel ----------------------------------------------------------
 
 
@@ -971,6 +1015,45 @@ def test_cli_l3_advisory_confirmed_records_on_main(
         f"main:{TARGET_DIR_NAME}/tasks/t1/merge-advisory.md",
     )
     assert "IDOR on order" in content
+
+
+def test_cli_advisory_dry_run_preview_is_honest_and_mutates_nothing(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    # rw2 blocker (CLI): `--advisory --no-input` previews an advisory-eligible
+    # branch with a distinct, honest line (never the generic clean-merge line),
+    # and mutates nothing - no merge into main, no merge-advisory.md committed.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # L2
+    from orchestrator import local_merge
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2, security_verdicts=_sec_blocker_verdicts())
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--advisory", "--no-input", "t1"],
+            env=env,
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert "[dry-run*]" in out
+    assert "WOULD be WAIVED" in out
+    assert "[dry-run] t1: WOULD auto-merge" not in out  # not the clean line
+    assert rc == 1  # held (dry run)
+    # nothing landed in main, and no advisory record was committed
+    unmerged = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert unmerged != 0
+    rel = f"{TARGET_DIR_NAME}/tasks/t1/merge-advisory.md"
+    no_record = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", f"main:{rel}"],
+        capture_output=True,
+    ).returncode
+    assert no_record != 0
 
 
 def test_engine_risk_decision_confirmed_merges() -> None:

@@ -439,14 +439,35 @@ class LocalMergeEngine:
                     # silently drop its record (AC5). kind stays RISK_DECISION.
                     verdict = replace(verdict, decision="merge")
             if verdict.merged and self.dry_run:
-                # dry run: record what WOULD auto-merge, but touch nothing.
+                # dry run: record what WOULD auto-merge, but touch nothing. The
+                # advisory tuple is CARRIED (not dropped): the whole point of the
+                # preview is to inspect before committing to --advisory, so a
+                # branch that would waive judgment findings must read differently
+                # from a fully-clean one (constraint 5 - honest labeling).
+                if verdict.advisory:
+                    reasons = (
+                        "would merge under --advisory (dry run: --no-input, "
+                        "nothing changed); judgment gates WOULD be waived:",
+                        *verdict.advisory,
+                    )
+                    digest = (
+                        f"# Dry run (--advisory): {task_id}\n\n"
+                        "Would merge into local main under --advisory, WAIVING the "
+                        "judgment-gate findings below and recording them in "
+                        "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
+                        "## Judgment-gate findings that WOULD be waived\n\n"
+                        + "\n".join(f"- {r}" for r in verdict.advisory)
+                        + "\n\nRe-run without --no-input to apply.\n"
+                    )
+                else:
+                    reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
+                    digest = (
+                        f"# Dry run: {task_id}\n\nWould auto-merge into local main; "
+                        "re-run without --no-input to apply.\n"
+                    )
                 verdict = MergeVerdict(
-                    task_id,
-                    "hold",
-                    DRY_RUN,
-                    ("would auto-merge (dry run: --no-input, nothing changed)",),
-                    f"# Dry run: {task_id}\n\nWould auto-merge into local main; "
-                    "re-run without --no-input to apply.\n",
+                    task_id, "hold", DRY_RUN, reasons, digest,
+                    advisory=verdict.advisory,
                 )
             if verdict.merged:
                 if not self.merge_one(task_id, gates.head_sha):
@@ -1093,7 +1114,17 @@ def main(
             print(f"[broken] {v.task_id}: {'; '.join(v.reasons)}")
             print(f"         see {TARGET_DIR_NAME}/tasks/{v.task_id}/merge-hold.md")
         elif v.kind == DRY_RUN:
-            print(f"[dry-run] {v.task_id}: WOULD auto-merge (nothing changed)")
+            if v.advisory:
+                # Preview must flag an advisory-eligible branch distinctly, never
+                # as a clean auto-merge (constraint 5): a real run would waive
+                # these findings and commit them into main.
+                print(
+                    f"[dry-run*] {v.task_id}: WOULD merge under --advisory - "
+                    "judgment gates WOULD be WAIVED (nothing changed)"
+                )
+                print(f"           see {TARGET_DIR_NAME}/tasks/{v.task_id}/merge-hold.md")
+            else:
+                print(f"[dry-run] {v.task_id}: WOULD auto-merge (nothing changed)")
         else:
             print(f"[hold]  {v.task_id}: declined / not confirmed")
 
