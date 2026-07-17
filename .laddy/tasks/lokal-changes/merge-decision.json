@@ -1,0 +1,9 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: orchestrator/local_merge.py, scripts/merge-verified.sh",
+    "security_auth_paths: orchestrator/local_merge.py",
+    "high_risk"
+  ]
+}
