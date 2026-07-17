@@ -220,6 +220,46 @@ def test_binding_gate_without_trusted_ref_does_not_touch_infra() -> None:
     assert f"{TARGET_DIR_NAME}/docker {TARGET_DIR_NAME}/security" not in cmd
 
 
+def test_restore_command_is_built_from_the_declared_infra_paths() -> None:
+    # RESTORED_INFRA_PATHS is the single source of truth: the restore command
+    # and the "what did the branch lose" query must never drift apart.
+    from orchestrator.testgate import RESTORED_INFRA_PATHS, BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp", trusted_ref="trustedsha")
+    assert f"checkout trustedsha -- {' '.join(RESTORED_INFRA_PATHS)}" in cmd
+
+
+def test_restored_infra_paths_names_what_the_branch_silently_loses() -> None:
+    # A branch changing these paths does NOT get them verified: the gate ran
+    # trusted main's copy instead. Naming them is what lets the caller say so.
+    from orchestrator.testgate import restored_infra_paths
+
+    changed = (
+        f"{TARGET_DIR_NAME}/security/semgrep.yml",
+        f"{TARGET_DIR_NAME}/docker/compose.test.yml",
+        "security/semgrep.yml",  # the root mirror is NOT restored - not ours
+        "orchestrator/queue.py",
+    )
+    assert restored_infra_paths(changed) == (
+        f"{TARGET_DIR_NAME}/security/semgrep.yml",
+        f"{TARGET_DIR_NAME}/docker/compose.test.yml",
+    )
+
+
+def test_restored_infra_paths_is_empty_for_an_ordinary_change() -> None:
+    from orchestrator.testgate import restored_infra_paths
+
+    assert restored_infra_paths(("orchestrator/queue.py", "tests/test_queue.py")) == ()
+
+
+def test_restored_infra_paths_does_not_match_a_sibling_prefix() -> None:
+    # ".laddy/security-notes.md" merely starts with the same characters; the
+    # gate does not restore it, so claiming it was overridden would be a lie.
+    from orchestrator.testgate import restored_infra_paths
+
+    assert restored_infra_paths((f"{TARGET_DIR_NAME}/security-notes.md",)) == ()
+
+
 _GREEN = "@@GATE lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0"
 
 

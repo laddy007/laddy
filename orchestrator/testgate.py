@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -182,6 +182,36 @@ def _compose_project(sha: str) -> str:
     return f"laddy-gate-{sha[:12]}-{os.getpid()}"
 
 
+# The gate infra restored from the trusted ref over the branch clone. Declared
+# once: the restore command below and restored_infra_paths() (which tells the
+# caller WHOSE copy a green run actually judged) must never drift apart.
+RESTORED_INFRA_PATHS: tuple[str, ...] = (
+    f"{TARGET_DIR_NAME}/docker",
+    f"{TARGET_DIR_NAME}/security",
+)
+
+
+def restored_infra_paths(changed: Iterable[str]) -> tuple[str, ...]:
+    """Which of ``changed`` the restore silently replaces with trusted main's copy.
+
+    A branch that edits these paths never has its OWN version verified: the gate
+    ran the trusted copy instead, so a green result says nothing about the
+    branch's edit, and a red one may be the restore's doing rather than the
+    branch's defect (a branch changing the semgrep ruleset gets its own tests run
+    against main's rules). Neither reading is safe to leave implicit, so the
+    caller names these paths in its report instead of guessing.
+
+    Restoring is deliberate and stays (NÁLEZ 1) - this only makes its cost
+    visible. Matching is path-segment exact: ``<dir>/security-notes.md`` is not
+    under ``<dir>/security`` and is not restored.
+    """
+    return tuple(
+        p
+        for p in changed
+        if any(p == d or p.startswith(f"{d}/") for d in RESTORED_INFRA_PATHS)
+    )
+
+
 def _containerized(
     compose_rel: str, sha: str, gate_command: str, trusted_ref: str | None = None
 ) -> str:
@@ -209,7 +239,7 @@ def _containerized(
         raise ValueError("gate_command must not contain a single quote")
     project = _compose_project(sha)
     restore_infra = (
-        f'&& git -C "$tmp/repo" checkout {trusted_ref} -- {TARGET_DIR_NAME}/docker {TARGET_DIR_NAME}/security '
+        f'&& git -C "$tmp/repo" checkout {trusted_ref} -- {" ".join(RESTORED_INFRA_PATHS)} '
         if trusted_ref
         else ""
     )

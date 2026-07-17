@@ -25,6 +25,7 @@ def _gates(
     rw2_blockers: list[dict[str, object]] | None = None,
     security_blockers: list[dict[str, object]] | None = None,
     sensitive_files: tuple[str, ...] = (),
+    infra_overridden: tuple[str, ...] = (),
 ) -> GateResults:
     rw2 = parse_verdict(verdict_json("CHANGES_REQUESTED", rw2_blockers)) if rw2_blockers else (
         parse_verdict(verdict_json("APPROVED"))
@@ -46,6 +47,7 @@ def _gates(
         rw2=rw2,
         security_verdicts=sec,
         sensitive_files=sensitive_files or (("myapp/models.py",) if blast == L3 else ()),
+        infra_overridden=infra_overridden,
     )
 
 
@@ -96,6 +98,62 @@ def test_broken_hold_on_l3_never_claims_a_risk_decision_is_required() -> None:
     # the blast level itself is still reported - only the false claim is gone
     assert "blast L3" in v.digest
     assert any("test suite is red" in r for r in v.reasons)
+
+
+def test_infra_override_holds_even_when_every_gate_is_green() -> None:
+    # The gate restores .laddy/docker + .laddy/security from trusted main over
+    # the branch (NÁLEZ 1), so for a branch that CHANGES those paths a green run
+    # is a verdict on main's infra, not on the branch's. Offering that as
+    # "all gates passed, your risk call" would be a false claim - it is a hold.
+    from orchestrator.local_merge import BROKEN
+
+    v = decide(
+        "t1",
+        _gates(blast=L3, infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",)),
+    )
+    assert v.decision == "hold"
+    assert v.kind == BROKEN
+    assert any("NOT verified" in r for r in v.reasons)
+    assert any(f"{TARGET_DIR_NAME}/security/semgrep.yml" in r for r in v.reasons)
+
+
+def test_infra_override_reason_explains_a_red_suite_it_caused() -> None:
+    # fullrun-s2's real shape: the restore reverted the branch's own ruleset, so
+    # its tests scanned main's rules and failed. Both facts must reach the
+    # digest - "tests are red" alone blames the branch for the engine's doing.
+    v = decide(
+        "t1",
+        _gates(
+            blast=L3,
+            tests_passed=False,
+            infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",),
+        ),
+    )
+    assert any("test suite is red" in r for r in v.reasons)
+    assert any("NOT verified" in r for r in v.reasons)
+    assert "NOT verified" in v.digest
+
+
+def test_no_infra_override_reason_when_the_branch_leaves_infra_alone() -> None:
+    v = decide("t1", _gates(blast=L2, tests_passed=False))
+    assert not any("NOT verified" in r for r in v.reasons)
+
+
+def test_infra_override_digest_does_not_advise_a_rerun_that_cannot_help() -> None:
+    # The generic broken advice ("re-run the task on the VPS to fix the failing
+    # gate(s)") is false here: the next run restores the same paths and lands in
+    # the same place. Telling the Director to re-run would burn a VPS cycle to
+    # reproduce the identical hold.
+    v = decide(
+        "t1", _gates(blast=L3, infra_overridden=(f"{TARGET_DIR_NAME}/docker/compose.test.yml",))
+    )
+    assert "Re-run the task on the VPS" not in v.digest
+    assert "re-running does not clear it" in v.digest
+
+
+def test_ordinary_broken_digest_still_advises_the_rerun() -> None:
+    v = decide("t1", _gates(blast=L2, tests_passed=False))
+    assert "Re-run the task on the VPS" in v.digest
 
 
 def test_failed_tests_hold() -> None:

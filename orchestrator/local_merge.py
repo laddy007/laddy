@@ -38,7 +38,7 @@ from orchestrator.merge_subject import (
 )
 from orchestrator.policy import L2, L3, classify_blast_radius
 from orchestrator.target_policy import load_target_policy
-from orchestrator.testgate import BindingGate, BindingResult
+from orchestrator.testgate import BindingGate, BindingResult, restored_infra_paths
 from orchestrator.verdict import Verdict, VerdictError, request_verdict
 
 __all__ = [
@@ -74,6 +74,10 @@ class GateResults:
     security_verdicts: tuple[Verdict, ...]
     sensitive_files: tuple[str, ...] = ()  # the paths that made it L3
     head_sha: str = ""  # the exact commit these gates verified (TOCTOU pin)
+    # Gate-infra paths this branch changed whose branch version the gate did NOT
+    # run: it restored trusted main's copy over them (NÁLEZ 1). Empty for every
+    # branch that leaves the gate infra alone - i.e. almost all of them.
+    infra_overridden: tuple[str, ...] = ()
 
 
 # Hold kinds (trust-model S8) - the CLI treats them differently:
@@ -142,15 +146,28 @@ def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[
         lines += ["", "## rw2 findings", ""] + [f"- {f.summary}" for f in gates.rw2.blockers]
     if not gates.tests_passed:
         lines += ["", "## Local test failure (tail)", "", "```", gates.tests_tail[-1500:], "```"]
-    lines += [
-        "",
-        "## What is needed",
-        "",
-        "This change is not mergeable as-is. Re-run the task on the VPS to fix",
-        "the failing gate(s), or address them and push a new revision of the",
-        f"branch. `{task_id}` is NOT merged and NOT deleted.",
-        "",
-    ]
+    lines += ["", "## What is needed", ""]
+    if gates.infra_overridden:
+        # A branch must not supply the container it is judged in, so the gate
+        # restores that infra from trusted main - which is exactly why
+        # re-running does not clear it: the next run restores the same paths.
+        # Naming the limit beats sending the Director around the loop again.
+        lines += [
+            "This branch changes the gate's own infrastructure, which the gate",
+            "restores from trusted main before it runs, so re-running does not clear it:",
+            "the next run restores the same paths. No gate here can judge the branch's",
+            "own copy - landing those paths is your call, on a route you trust.",
+            "",
+            "Any red gate above may be the restore's doing rather than a defect:",
+            "the suite ran against main's infra, not this branch's.",
+        ]
+    else:
+        lines += [
+            "This change is not mergeable as-is. Re-run the task on the VPS to fix",
+            "the failing gate(s), or address them and push a new revision of the",
+            "branch.",
+        ]
+    lines += ["", f"`{task_id}` is NOT merged and NOT deleted.", ""]
     return "\n".join(lines)
 
 
@@ -169,6 +186,14 @@ def decide(task_id: str, gates: GateResults) -> MergeVerdict:
         broken.append(
             f"security scan flagged {len(gates.scan_findings)} item(s): "
             + "; ".join(gates.scan_findings[:5])
+        )
+    # Not a defect in the branch - a limit of what this gate can say about it.
+    # It still blocks: the alternative is merging a gate-infra change no gate
+    # ever ran, or blaming the branch for a red suite the restore caused.
+    if gates.infra_overridden:
+        broken.append(
+            "gate infra changed by this branch was NOT verified - the gate ran "
+            "trusted main's copy of: " + ", ".join(gates.infra_overridden)
         )
     # judgment gates - a blocker is BROKEN (needs a fix, not a risk call)
     if sec := _security_blockers(gates):
@@ -597,6 +622,7 @@ def gather_gates(
             security_verdicts=security,
             sensitive_files=sensitive,
             head_sha=verified_sha,
+            infra_overridden=restored_infra_paths(changed),
         )
     finally:
         _git(repo, "worktree", "remove", "--force", str(wt), check=False)
