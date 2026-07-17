@@ -53,7 +53,7 @@ from orchestrator.policy import (
 )
 from orchestrator.quota import QuotaAwareRunner, QuotaBudget, QuotaPolicy, QuotaTimeout
 from orchestrator.target_policy import load_target_policy
-from orchestrator.terminals import terminal_spec
+from orchestrator.terminals import clears_terminal, terminal_spec
 from orchestrator.testgate import DockerGate, ShellRunner, frontend_touched, run_fast
 from orchestrator.verdict import (
     VerdictError,
@@ -94,14 +94,64 @@ def _recorded_terminal(entries: Sequence[Mapping[str, Any]]) -> str | None:
     QuotaBudget is per-run) must RESUME and finish the task, not return the
     stale state forever. They read as non-terminal here; the log entry stays
     as a record and derive_resume_point replays the last real phase.
+
+    A sticky terminal is ALSO un-stuck by a resume event recorded AFTER it
+    (director-resume): a log action that ``terminals.clears_terminal`` admits
+    for that state, appearing later in the log, returns None so the loop runs
+    once more. "After" is positional (append-only order), never a parsed ts -
+    one event buys exactly one run (an event OLDER than the terminal does not
+    un-stick it, so a resumed run that hits a new terminal is sticky again).
+    The rule is table-driven in terminals.py; this scan hardcodes no event name.
+    """
+    for idx in range(len(entries) - 1, -1, -1):
+        action = entries[idx].get("action")
+        if action == "terminal":
+            outcome = str(entries[idx].get("outcome"))
+            if not terminal_spec(outcome).sticky:
+                return None
+            state = outcome
+        elif action == "push" and entries[idx].get("outcome") == "ok":
+            state = "PUSHED"
+        else:
+            continue
+        if any(
+            clears_terminal(str(e.get("action")), state) for e in entries[idx + 1 :]
+        ):
+            return None
+        return state
+    return None
+
+
+def last_terminal_state(entries: Sequence[Mapping[str, Any]]) -> str | None:
+    """The RAW last recorded terminal state (or None), ignoring stickiness and
+    any newer resume event. Distinct from ``_recorded_terminal``: this answers
+    "what did this run last finish as?" for the resume CLI's validation gate
+    (is it a state director_resume may clear?), not "should run() short-circuit
+    now?". The un-stick decision stays in ``_recorded_terminal`` alone.
     """
     for entry in reversed(entries):
         action = entry.get("action")
         if action == "terminal":
-            outcome = str(entry.get("outcome"))
-            return outcome if terminal_spec(outcome).sticky else None
+            return str(entry.get("outcome"))
         if action == "push" and entry.get("outcome") == "ok":
             return "PUSHED"
+    return None
+
+
+def _director_note(entries: Sequence[Mapping[str, Any]]) -> str | None:
+    """The Director's ``reason`` for the LAST director_resume, or None.
+
+    Positional and self-clearing (director-resume): scanning back from the end,
+    a phase action seen first means a developer round already ran AFTER the
+    resume, so the note has been delivered and must not repeat. Only when the
+    newest director_resume is newer than every phase action does its reason
+    render - the first developer round after the resume, once.
+    """
+    for entry in reversed(entries):
+        if entry.get("action") in _PHASE_ACTIONS:
+            return None
+        if entry.get("action") == "director_resume":
+            return entry.get("reason")
     return None
 
 
@@ -452,6 +502,17 @@ EXPLORATION_SECTION = """
 
 ```
 {exploration}
+```
+"""
+
+DIRECTOR_NOTE_SECTION = """
+## Director note (the ask was corrected; resume)
+
+The Director put this task back to work and left a note. The spec on the
+branch may have changed - re-read it. Their note, verbatim:
+
+```
+{reason}
 ```
 """
 
@@ -918,6 +979,12 @@ class Orchestrator:
         exploration = artifacts.read_text(EXPLORATION)
         if exploration and rp.round == 1:
             context = EXPLORATION_SECTION.format(exploration=exploration) + context
+        # A Director resume prepends its note ADDITIVELY (director-resume): the
+        # developer reads both the corrected ask and the verdict/tail that
+        # stopped it. Self-clears after the next developer round (see helper).
+        note = _director_note(entries)
+        if note is not None:
+            context = DIRECTOR_NOTE_SECTION.format(reason=note) + context
 
         prompt = DEVELOPER_PROMPT.format(
             role=self._role(role_name),

@@ -131,6 +131,15 @@ class GitOps:
     def head_sha(self, wt: Path) -> str:
         return _run(["git", "-C", str(wt), "rev-parse", "HEAD"])
 
+    def blob_sha(self, wt: Path, rel_path: str) -> str:
+        """The git blob SHA of a working-tree file (``git hash-object``).
+
+        Used as a receipt for the spec at director-resume time: recorded so the
+        handback shows whether the ask changed. It is a RECORD only - nothing
+        branches on it (that would make it a trust input on a VPS-written log).
+        """
+        return _run(["git", "-C", str(wt), "hash-object", rel_path])
+
     def code_sha(self, wt: Path) -> str:
         """SHA of the last commit touching anything OUTSIDE <agent-dir>/tasks/.
 

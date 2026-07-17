@@ -59,3 +59,38 @@ def terminal_spec(state: str) -> TerminalSpec:
     if state.startswith(_MERGE_DECIDED_PREFIX):
         return TERMINALS["PUSHED"]
     return TERMINALS.get(state, _UNKNOWN)
+
+
+# --- Resume table (director-resume): one home for "which log action un-sticks
+# which terminal". A log event NEWER than a sticky terminal re-arms iteration
+# when it appears here for that state; loop._recorded_terminal is the ONLY
+# consumer and reads this table rather than hardcoding any event name (the next
+# two consumers, cap_override and rw3, become rows here, not new `if`s).
+
+# Sentinel standing for "clears any MERGE_DECIDED:<decision>". Reuses the same
+# prefix constant terminal_spec keys on, so the prefix rule lives in one place.
+MERGE_DECIDED_ANY = _MERGE_DECIDED_PREFIX
+
+RESUMES: dict[str, frozenset[str]] = {
+    # The Director's explicit resume channel un-sticks every finished terminal
+    # EXCEPT PATH_GUARD_VIOLATION (a poisoned tree - discard, do not continue).
+    "director_resume": frozenset(
+        {"CAP_REACHED", "ESCALATED_DEADLOCK", "PUSHED", MERGE_DECIDED_ANY}
+    ),
+    # Rows added by their own specs as they land (director-resume is the seam):
+    # "cap_override": frozenset({"CAP_REACHED"}),
+    # "rw3":          frozenset({"PUSHED", MERGE_DECIDED_ANY}),
+}
+
+
+def clears_terminal(action: str, terminal: str) -> bool:
+    """Does a log ``action`` un-stick a recorded ``terminal`` state? (pure)
+
+    The single place that knows the ``MERGE_DECIDED:*`` prefix rule for the
+    resume table: a table entry may name the ``MERGE_DECIDED_ANY`` sentinel to
+    clear every decided-push suffix, or an exact terminal state for the rest.
+    """
+    states = RESUMES.get(action, frozenset())
+    if terminal in states:
+        return True
+    return terminal.startswith(_MERGE_DECIDED_PREFIX) and MERGE_DECIDED_ANY in states

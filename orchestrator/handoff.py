@@ -43,6 +43,32 @@ def _flags_section(entries: Sequence[Mapping[str, Any]]) -> list[str]:
     return lines
 
 
+def _resume_section(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Rendered ``↻ Director resumes`` receipt, or [] when none.
+
+    The Director's own interventions on this task: how many times they put it
+    back to work and the latest reason. Visibility guarantee (director-resume)
+    so a subsequent terminal shows the resumes that led to it.
+    """
+    resumes = [e for e in entries if e.get("action") == "director_resume"]
+    if not resumes:
+        return []
+    latest = str(resumes[-1].get("reason", "")).strip().splitlines()
+    latest_line = latest[0][:200] if latest else "(no reason)"
+    return [
+        f"## ↻ Director resumes: {len(resumes)}×",
+        "",
+        f"Latest: {latest_line}",
+        "",
+    ]
+
+
+# director_resume is a metadata event (a Director intervention, not a loop
+# round): it carries outcome="ok" so it would otherwise leak into the per-round
+# trace as a `director_resume` -> ok line. It renders in _resume_section instead.
+_TRACE_EXCLUDED_ACTIONS = frozenset({"director_resume"})
+
+
 def build_summary(
     task_id: str,
     terminal_state: str,
@@ -58,6 +84,7 @@ def build_summary(
         f"(shows locally as {branch_remote_hint}/{task_id})",
         "",
         *_flags_section(entries),
+        *_resume_section(entries),
         "## Rounds",
         "",
     ]
@@ -66,7 +93,7 @@ def build_summary(
         # metadata-only events like flags render in the ⚑ Flags section above
         # and would otherwise show as garbled "-> ?" lines. Positive filter, so
         # any future metadata-only event kind is excluded by default.
-        if "outcome" not in entry:
+        if "outcome" not in entry or entry.get("action") in _TRACE_EXCLUDED_ACTIONS:
             continue
         action = entry.get("action", "?")
         outcome = entry.get("outcome", "?")
@@ -131,13 +158,15 @@ def build_handback(
         f"(shows locally as {branch_remote_hint}/{artifacts.task_id})",
         "",
         *_flags_section(entries),
+        *_resume_section(entries),
         "## What was tried, per round",
         "",
     ]
     for entry in entries:
         # Only round-trace entries (carrying an ``outcome``) belong here; flags
-        # and other metadata-only events render in the ⚑ Flags section above.
-        if "outcome" not in entry:
+        # and other metadata-only events render in the ⚑ Flags section above,
+        # director resumes in the ↻ receipt (they carry outcome="ok").
+        if "outcome" not in entry or entry.get("action") in _TRACE_EXCLUDED_ACTIONS:
             continue
         detail = str(entry.get("detail", "")).strip().splitlines()
         first = detail[0][:160] if detail else ""

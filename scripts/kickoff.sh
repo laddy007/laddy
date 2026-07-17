@@ -2,11 +2,17 @@
 set -euo pipefail
 
 # kickoff.sh <task> [--new] [--skip-clarify]
+# kickoff.sh <task> --resume --reason "<what changed>"
 #
 # VPS entrypoint for the Python dev-loop orchestrator (design doc S11).
 # Thin launcher ONLY - all policy/state/decisions live in Python:
 #   1. clarify gate runs interactively in this terminal (SSH session),
 #   2. the loop then runs DETACHED (nohup) and survives an SSH drop.
+#
+# --resume un-sticks a FINISHED task and continues it (director-resume):
+# it skips clarify/design (the task is already under way), appends one logged
+# director_resume event carrying --reason, and detaches the loop. All policy
+# (which terminals are resumable, the mandatory reason) lives in Python.
 #
 # Config comes from <engine-dir>/env.vps (exported here verbatim); see
 # env.vps.example for the knobs (AGENT_REPO_URL, AGENT_WORK_ROOT,
@@ -41,13 +47,31 @@ LOG_DIR="${AGENT_LOG_DIR:-$HOME/agent-logs}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$TASK.log"
 
-# Phase 0 (optional): --new - interactive spec authoring when no spec exists.
-# Run it foreground first, then strip --new from the args passed onward.
+# Parse launcher-only flags out of the forwarded args. --new/--resume are
+# handled here; everything else (--skip-clarify, --reason "text", ...) rides
+# along in REST to the Python phases verbatim.
 REST=()
 DO_NEW=0
+DO_RESUME=0
 for a in "$@"; do
-  if [ "$a" = "--new" ]; then DO_NEW=1; else REST+=("$a"); fi
+  case "$a" in
+    --new) DO_NEW=1 ;;
+    --resume) DO_RESUME=1 ;;
+    *) REST+=("$a") ;;
+  esac
 done
+
+# --resume: skip clarify/design (task already under way); the Python phase
+# validates + appends the director_resume event, then runs the loop detached.
+if [ "$DO_RESUME" = "1" ]; then
+  LADDY_LOG_HEARTBEAT=1 nohup "$PY" -u -m orchestrator.run "$TASK" --phase resume ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null &
+  PID=$!
+  echo "[kickoff] resume detached (pid $PID); log: $LOG"
+  echo "[kickoff] follow with: tail -f $LOG"
+  exit 0
+fi
+
+# Phase 0 (optional): --new - interactive spec authoring when no spec exists.
 if [ "$DO_NEW" = "1" ]; then
   "$PY" -m orchestrator.run "$TASK" --phase new
 fi

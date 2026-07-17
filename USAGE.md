@@ -289,6 +289,37 @@ This is not required for the tripwire (below) to stay quiet — a hub
 it. It matters because `kickoff.sh` clones its task worktree base from
 the hub: skip this and the next task starts from stale code.
 
+### 8. Correct the ask and resume a finished task
+
+A task that stopped — hit the iteration cap (`CAP_REACHED`), deadlocked
+(`ESCALATED_DEADLOCK`), or landed at `stop_before_merge`/`PUSHED` — is
+**sticky**: a plain re-kickoff no-ops. When the reason it stopped is that the
+**spec was wrong** (the code was fine, the ask was incomplete), there is one
+explicit, logged way to put it back to work:
+
+```bash
+# 1. Edit the spec ON THE TASK BRANCH with your own editor and push it:
+git fetch laddy <task> && git checkout <task>
+$EDITOR .laddy/specs/<task>.md          # fix the ask
+git commit -am "spec: <task> — add the missing requirement" && git push laddy <task>
+
+# 2. Resume, with a mandatory note saying what you changed:
+scripts/kickoff.sh <task> --resume \
+  --reason "spec was missing throttling; added it + replay protection"
+```
+
+The `--reason` note is prepended to the **next developer round** (on top of the
+reviewer verdict that stopped it, not instead of it), so the developer reads
+both the corrected ask and where it got stuck. One `--resume` buys exactly one
+run to the next terminal; resume again to keep going (unbounded, but every
+resume is logged and the count + latest reason show up in the handback). A
+`PATH_GUARD_VIOLATION` is **not** resumable — that tree carries forbidden edits;
+discard the branch and restart instead.
+
+Resume changes nothing about trust: it re-arms iteration only. The resumed run
+re-traverses rw1/rw2/the authoritative gate exactly as a fresh one, never pushes
+to origin, and never skips a reviewer (see SECURITY.md).
+
 ---
 
 ## The tripwire (what fires, and what to do)

@@ -156,6 +156,49 @@ def test_build_handback_omits_flags_section_when_none(tmp_path: Path) -> None:
     assert "⚑ Flags" not in text
 
 
+# --- director resume receipt (director-resume): count + latest reason ---------
+
+
+def test_summary_shows_director_resume_count_and_latest_reason() -> None:
+    entries = [
+        {"ts": "t1", "action": "developer", "outcome": "ok", "round": 1},
+        {"ts": "t2", "action": "terminal", "outcome": "CAP_REACHED"},
+        {"ts": "t3", "action": "director_resume", "outcome": "ok",
+         "reason": "first correction"},
+        {"ts": "t4", "action": "developer", "outcome": "ok", "round": 2},
+        {"ts": "t5", "action": "director_resume", "outcome": "ok",
+         "reason": "second, sharper correction"},
+        {"ts": "t6", "action": "developer", "outcome": "ok", "round": 3},
+        {"ts": "t7", "action": "terminal", "outcome": "CAP_REACHED"},
+    ]
+    text = build_summary("mytask", "CAP_REACHED", entries)
+    assert "Director resumes: 2×" in text
+    assert "second, sharper correction" in text  # latest reason
+    # the metadata event must NOT leak into the per-round trace as `-> ok`
+    rounds = text.split("## Rounds", 1)[1]
+    assert "`director_resume`" not in rounds
+    assert "first correction" not in rounds
+
+
+def test_handback_shows_director_resume_receipt(tmp_path: Path) -> None:
+    from orchestrator.handoff import build_handback
+
+    art = TaskArtifacts(tmp_path, "t1", now=lambda: "now")
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome="CAP_REACHED")
+    art.append_log(action="director_resume", outcome="ok", reason="added replay protection")
+    text = build_handback(art, "CAP_REACHED")
+    assert "Director resumes: 1×" in text
+    assert "added replay protection" in text
+    trace = text.split("## What was tried, per round", 1)[1]
+    assert "`director_resume`" not in trace  # not a round line
+
+
+def test_summary_no_resume_section_when_none() -> None:
+    entries = [{"ts": "t1", "action": "developer", "outcome": "ok", "round": 1}]
+    assert "Director resumes" not in build_summary("t", "PUSHED", entries)
+
+
 def test_ntfy_notifier_fires_neutral_message(tmp_path: Path) -> None:
     from orchestrator.handoff import NtfyNotifier
 

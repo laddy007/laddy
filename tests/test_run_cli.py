@@ -933,3 +933,108 @@ def test_loop_refuses_high_risk_without_design_approval(remote: Path, tmp_path: 
     _mark_clarified(env, "hr3")
     rc = main(["hr3", "--phase", "loop", "--skip-clarify"], env=env, deps=_deps([]))
     assert rc == 2  # refused: high-risk, no design/approved marker
+
+
+# --- director resume channel (--phase resume) --------------------------------
+
+
+def _seed_terminal(env: dict[str, str], task_id: str, state: str) -> None:
+    """Give a task a recorded terminal, as a finished run leaves it."""
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree(task_id)
+    art = TaskArtifacts(wt, task_id)
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome=state)
+
+
+def _resume_events(env: dict[str, str], task_id: str) -> list[dict[str, object]]:
+    return [e for e in _task_log(env, task_id) if e.get("action") == "director_resume"]
+
+
+def test_resume_empty_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume", "--reason", "   "], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_missing_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_path_guard_violation_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    rc = main(["t1", "--phase", "resume", "--reason", "fix it"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_task_with_no_terminal_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    # t1 exists on main but never ran (no terminal) -> refuse, nothing written
+    env = _env(remote, tmp_path)
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_unknown_task_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    rc = main(["nope", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "nope") == []
+
+
+def test_resume_happy_path_appends_one_event_and_starts_loop(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+
+    # stub the loop so the test asserts the append + that the loop is entered
+    # with clarify skipped, without running a full round.
+    from orchestrator import run as run_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_loop(config: object, task_id: str, deps: object, skip_clarify: bool) -> int:
+        calls.append((task_id, skip_clarify))
+        return 0
+
+    monkeypatch.setattr(run_mod, "_phase_loop", fake_loop)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    assert events[0]["reason"] == "added throttling"
+    assert events[0]["outcome"] == "ok"
+    assert events[0].get("spec_sha")  # a recorded receipt sha is present
+    assert calls == [("t1", True)]  # loop entered, clarify skipped
+
+
+def test_resume_path_does_not_push_or_merge_or_skip_review(remote: Path, tmp_path: Path) -> None:
+    # AC11 (trust): the resume CLI itself un-sticks + notes only. It never pushes
+    # to origin, decides a merge, or bypasses a reviewer - the resumed loop
+    # re-traverses every gate. Guard the source so a future edit can't sneak a
+    # push/merge onto this path.
+    import inspect
+
+    from orchestrator.run import _phase_resume
+
+    src = inspect.getsource(_phase_resume)
+    assert ".push(" not in src
+    assert "merge_decision" not in src and "MERGE_DECISION" not in src
+    assert "code_sha" not in src
+    # it delegates to the normal loop (which re-runs rw1/rw2/authoritative)
+    assert "_phase_loop(" in src
