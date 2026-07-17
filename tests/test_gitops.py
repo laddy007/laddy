@@ -91,6 +91,46 @@ def test_task_worktree_resumes_existing_remote_branch(
     assert (wt / "work.txt").is_file(), "worktree must resume the pushed branch"
 
 
+def test_sync_worktree_to_origin_fast_forwards_to_pushed_tip(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    # A worktree finishes and pushes t1; then a SEPARATE clone pushes a newer
+    # commit on top. sync must fast-forward the (reused, stale) worktree to it.
+    wt = gitops.task_worktree("t1")
+    (wt / "work.txt").write_text("v1\n", encoding="utf-8")
+    gitops.commit_all(wt, "v1")
+    gitops.push(wt, "t1")
+
+    clone = tmp_path / "other"
+    _git("clone", str(remote), str(clone))
+    _git("-C", str(clone), "checkout", "t1")
+    (clone / "work.txt").write_text("v2\n", encoding="utf-8")
+    _git("-C", str(clone), "add", "work.txt")
+    _git("-C", str(clone), *IDENTITY, "commit", "-m", "v2")
+    _git("-C", str(clone), "push", "origin", "t1")
+    tip = _git("-C", str(remote), "rev-parse", "t1")
+
+    assert (wt / "work.txt").read_text(encoding="utf-8") == "v1\n"  # stale before sync
+    assert gitops.sync_worktree_to_origin(wt, "t1") is True
+    assert (wt / "work.txt").read_text(encoding="utf-8") == "v2\n"  # synced
+    assert gitops.head_sha(wt) == tip
+
+
+def test_sync_worktree_to_origin_is_noop_when_branch_absent_on_origin(
+    gitops: GitOps,
+) -> None:
+    # a purely local task the branch of which was never pushed: nothing to sync
+    # onto, so the function does nothing (no crash, worktree untouched) and
+    # reports False.
+    wt = gitops.task_worktree("t1")  # branched off origin/main; t1 not on origin
+    (wt / "local.txt").write_text("local\n", encoding="utf-8")
+    gitops.commit_all(wt, "local only")
+    head_before = gitops.head_sha(wt)
+    assert gitops.sync_worktree_to_origin(wt, "t1") is False
+    assert gitops.head_sha(wt) == head_before  # untouched
+    assert (wt / "local.txt").is_file()
+
+
 def test_commit_all_returns_sha_and_skips_clean_tree(gitops: GitOps) -> None:
     wt = gitops.task_worktree("t1")
     assert gitops.commit_all(wt, "nothing to do") is None

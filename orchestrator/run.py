@@ -430,6 +430,15 @@ def _phase_resume(
                 file=sys.stderr,
             )
         return 2
+    # Only now that the task is a validated, resumable terminal (not still
+    # running, not poisoned) do we touch the tree: sync the persisted worktree to
+    # the branch tip on origin. The Director corrects the ask by editing + pushing
+    # the spec from a separate clone (USAGE.md §8), but task_worktree reuses this
+    # worktree WITHOUT fetching - skip this and the developer reads the stale
+    # pre-correction spec, spec_sha records the wrong blob, and the resumed run's
+    # final push is rejected non-fast-forward. Done AFTER validation so a resume
+    # of a still-running task (refused above) never hard-resets a live worktree.
+    gitops.sync_worktree_to_origin(wt, task_id)
     spec_sha = gitops.blob_sha(wt, _spec_rel(task_id))
     artifacts.append_log(
         action="director_resume", outcome="ok", reason=text, spec_sha=spec_sha

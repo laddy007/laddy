@@ -1009,6 +1009,25 @@ def test_resume_unknown_task_exits_2_writes_nothing(remote: Path, tmp_path: Path
     assert _resume_events(env, "nope") == []
 
 
+def test_resume_does_not_sync_worktree_when_validation_fails(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The origin sync (a hard reset of the worktree) must run ONLY after the
+    # terminal is confirmed resumable - never for a refused resume (e.g. a still-
+    # running or PATH_GUARD_VIOLATION task), so a live worktree is never reset.
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    synced: list[str] = []
+    monkeypatch.setattr(
+        GitOps, "sync_worktree_to_origin",
+        lambda self, wt, tid: synced.append(tid) or False,
+    )
+    rc = main(["t1", "--phase", "resume", "--reason", "x"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert synced == []  # tree untouched for a non-resumable terminal
+    assert _resume_events(env, "t1") == []
+
+
 def test_resume_happy_path_appends_one_event_and_starts_loop(
     monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
 ) -> None:
@@ -1035,6 +1054,56 @@ def test_resume_happy_path_appends_one_event_and_starts_loop(
     assert events[0]["outcome"] == "ok"
     assert events[0].get("spec_sha")  # a recorded receipt sha is present
     assert calls == [("t1", True)]  # loop entered, clarify skipped
+
+
+def test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The documented Director workflow (USAGE.md §8): correct the spec on the
+    # task branch from a SEPARATE clone and push it, then --resume on the VPS,
+    # whose persisted worktree is still at its pre-terminal commit. The resume
+    # must fetch that correction, or the developer reads the stale spec and the
+    # final push is rejected non-fast-forward (rw2 blocker).
+    env = _env(remote, tmp_path)
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    # 1. VPS worktree finishes a run at CAP_REACHED; branch pushed to origin/t1.
+    wt = gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome="CAP_REACHED")
+    gitops.commit_all(wt, "CAP_REACHED for t1")
+    gitops.push(wt, "t1")
+    stale_spec = (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8")
+
+    # 2. Director edits + pushes the spec correction from a separate clone.
+    clone = tmp_path / "director-clone"
+    _git("clone", str(remote), str(clone))
+    _git("-C", str(clone), "checkout", "t1")
+    corrected = "# t1\n\nNOW WITH THE THROTTLING REQUIREMENT THE SPEC OMITTED\n"
+    (clone / TARGET_DIR_NAME / "specs" / "t1.md").write_text(corrected, encoding="utf-8")
+    _git("-C", str(clone), *IDENTITY, "commit", "-am", "spec: add throttling")
+    _git("-C", str(clone), "push", "origin", "HEAD:t1")
+    director_tip = _git("-C", str(remote), "rev-parse", "t1")
+    # the VPS worktree is still stale before the resume
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == stale_spec
+
+    # 3. resume (loop stubbed): must sync the worktree to origin first.
+    from orchestrator import run as run_mod
+    monkeypatch.setattr(run_mod, "_phase_loop", lambda *a, **k: 0)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+
+    # the corrected spec is now in the worktree, and spec_sha reflects it
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == corrected
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    corrected_sha = _git("-C", str(clone), "hash-object", f"{TARGET_DIR_NAME}/specs/t1.md")
+    assert events[0]["spec_sha"] == corrected_sha
+    # the resume commit builds ON TOP of the Director's correction, so the
+    # eventual gitops.push fast-forwards instead of being rejected
+    assert _git("-C", str(wt), "merge-base", "HEAD", director_tip) == director_tip
 
 
 def test_resume_path_does_not_push_or_merge_or_skip_review(remote: Path, tmp_path: Path) -> None:

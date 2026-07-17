@@ -308,9 +308,12 @@ scripts/kickoff.sh <task> --resume \
   --reason "spec was missing throttling; added it + replay protection"
 ```
 
-The `--reason` note is prepended to the **next developer round** (on top of the
-reviewer verdict that stopped it, not instead of it), so the developer reads
-both the corrected ask and where it got stuck. One `--resume` buys exactly one
+`--resume` first syncs the VPS's task worktree to the branch tip on the hub, so
+the correction you pushed in step 1 is what the developer actually reads (and
+what the recorded `spec_sha` receipt hashes) — you edit and push from your own
+clone; the VPS picks it up. The `--reason` note is prepended to the **next
+developer round** (on top of the reviewer verdict that stopped it, not instead
+of it), so the developer reads both the corrected ask and where it got stuck. One `--resume` buys exactly one
 run to the next terminal; resume again to keep going (unbounded, but every
 resume is logged and the count + latest reason show up in the handback). A
 `PATH_GUARD_VIOLATION` is **not** resumable — that tree carries forbidden edits;
