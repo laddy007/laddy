@@ -1,0 +1,9 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: orchestrator/verdict.py",
+    "security_auth_paths: orchestrator/verdict.py",
+    "high_risk"
+  ]
+}
