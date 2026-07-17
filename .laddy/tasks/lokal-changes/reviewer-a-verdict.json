@@ -1,0 +1,89 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "scripts/merge-verified.sh",
+    "tests/test_local_merge.py",
+    "tests/test_merge_verified_launcher.py",
+    ".laddy/specs/lokal-changes.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Judged sha == merged sha, no re-resolution (TOCTOU pin) in --local",
+      "evidence": "local_merge.py:648 _local_worktree resolves ref->sha then _worktree_at_sha; gather_gates:678 verified_sha=_worktree_sha(wt); merge_branch(fetch=False) merges that sha. test_local_merge.py:906 asserts gates.head_sha==sha and merge lands it",
+      "verified": true
+    },
+    {
+      "claim": "No fetch in --local gate or merge",
+      "evidence": "_local_worktree omits the fetch that _branch_worktree does (local_merge.py:611 vs :648); merge_branch:760 `if fetch:` guards the fetch; main wires fetch=local_ref is None (:811)",
+      "verified": true
+    },
+    {
+      "claim": "Discovery bypassed in --local",
+      "evidence": "local_merge.py:796 list_ready returns args.task when local_ref set; test_cli_local_judges_local_sha_bypasses_discovery stubs discover_ready to raise, rc==0",
+      "verified": true
+    },
+    {
+      "claim": "Full gate identical; red suite / security blocker => hold, not merge",
+      "evidence": "gather_gates only branches on worktree source; test_local_gather_red_tests_holds & test_local_gather_security_blocker_holds assert decision=='hold'",
+      "verified": true
+    },
+    {
+      "claim": "Dirty-tree guard refuses before any gate",
+      "evidence": "local_merge.py:743-749 checks git status --porcelain, returns 1; test_cli_local_dirty_tree_refuses_before_any_gate stubs gather_gates to raise and asserts rc!=0, 'commit or stash' printed, nothing merged",
+      "verified": true
+    },
+    {
+      "claim": "Argument rules enforced",
+      "evidence": "local_merge.py:729-732 parser.error on task!=1 or blank ref; test_cli_local_arg_rules covers 0/2 tasks, blank, and no-value cases (SystemExit)",
+      "verified": true
+    },
+    {
+      "claim": "Tripwire softened only in --local",
+      "evidence": "local_merge.py:764-785 branches: --local fetch check=False (warn on failure, abort 2 if reachable+diverged); else-branch keeps check=True abort. Three tests plus existing test_main_aborts_whole_run_on_tripwire",
+      "verified": true
+    },
+    {
+      "claim": "Default path unchanged; existing tests green",
+      "evidence": "git numstat tests/test_local_merge.py = 323 additions / 0 deletions; verify_one passes local_ref kwarg only when set; full suite 713 passed",
+      "verified": true
+    },
+    {
+      "claim": "Digest adds local route to generic branch only",
+      "evidence": "local_merge.py:179-185 additions in the else block; test_local_broken_digest_points_at_the_local_route and test_local_route_absent_from_infra_override_digest both green",
+      "verified": true
+    },
+    {
+      "claim": "Launcher forwards --local and softens die to warn only under --local",
+      "evidence": "merge-verified.sh:826-846; test_merge_verified_launcher.py both tests pass (warn+forward with --local; die without)",
+      "verified": true
+    },
+    {
+      "claim": "No push / no hub write on --local path; fix-free preserved (engine only sources commit from a local ref)",
+      "evidence": "no push added in local path; test asserts pushed==[] and origin bare never written; no edit/patch/cherry-pick code added",
+      "verified": true
+    },
+    {
+      "claim": "Suite green, 0 type errors, ASCII preserved",
+      "evidence": "ruff 'All checks passed'; basedpyright '0 errors, 70 warnings'; pytest '713 passed'; added lines contain zero non-ASCII (pre-existing NÁLEZ/§ only)",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "scripts/merge-verified.sh",
+      "line": 828,
+      "summary": "Launcher detects only the space form `--local`; the argparse-accepted equals form `--local=<ref>` would not soften the missing-remote die (fails closed/loud, so the mode simply won't start in a no-hub setup). The documented recipe uses the space form, so AC#10 is met; worth matching `--local=*` too for robustness.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "Every acceptance criterion has a covering test I ran green. AC#1 test_local_gather_and_merge_uses_local_sha_no_fetch_no_push + test_cli_local_judges_local_sha_bypasses_discovery; AC#2 same (merge lands judged sha); AC#3 discover_ready-raises stub; AC#4 test_local_gather_red_tests_holds + test_local_gather_security_blocker_holds; AC#5 test_cli_local_dirty_tree_refuses_before_any_gate; AC#6 test_cli_local_arg_rules (4 cases); AC#7 three separate tests + existing default-path tripwire test; AC#8 existing file 323/0 additions and full 713-test suite green; AC#9 two digest tests (generic yes, infra-override no); AC#10 two launcher subprocess tests; AC#11 push-absent/origin-untouched assertions; AC#12 verified independently. New functions have failure-mode tests: _resolve_local_ref has test_resolve_local_ref_rejects_an_unresolvable_ref (clean raise); dirty-tree, arg-rules, and tripwire failure branches all exercised.",
+  "residual_risks": [
+    "Untested branch: a worktree-path ref whose HEAD sha is absent from the target object store falls through to a clean RuntimeError (fails closed, nothing merged) - safe but uncovered.",
+    "Path(ref).is_dir() in _resolve_local_ref resolves relative to CWD, not repo; the documented recipe runs from the repo dir so it is fine, but an unusual CWD would fail to resolve (again fails closed).",
+    "Blast radius is the merge authority itself (L3); mitigated by the full default-path suite passing (713) proving no regression."
+  ]
+}

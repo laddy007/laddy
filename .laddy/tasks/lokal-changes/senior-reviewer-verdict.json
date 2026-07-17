@@ -1,0 +1,90 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "scripts/merge-verified.sh",
+    "tests/test_local_merge.py",
+    "tests/test_merge_verified_launcher.py",
+    ".laddy/specs/lokal-changes.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Judged sha == merged sha with no re-resolution of a moving ref (TOCTOU pin holds in --local).",
+      "evidence": "gather_gates sets head_sha=verified_sha=_worktree_sha(wt) (local_merge.py:658,714); LocalMergeEngine.run merges gates.head_sha (:360); merge_branch(fetch=False) merges that exact sha (:761-773). In --local, _local_worktree->_resolve_local_ref resolves ref->sha once (:563-568), and no code re-resolves the ref between verify and merge.",
+      "verified": true
+    },
+    {
+      "claim": "Fix-free invariant preserved - the engine only sources the commit from a local ref, never edits/patches/authors it.",
+      "evidence": "grep of local_merge.py shows no cherry-pick/apply/add/commit-am/checkout -b in the --local path; _local_worktree and _resolve_local_ref only read (rev-parse/cat-file/worktree add --detach). Docstring updated to state this (:9-17).",
+      "verified": true
+    },
+    {
+      "claim": "Full gate identical in --local; a red suite or security/rw2 blocker holds, not merges.",
+      "evidence": "gather_gates branches only on worktree source (_local_worktree vs _branch_worktree, :652-656); merge_check, trial-merge, policy from trusted base_branch, binding gate, security panel, rw2 all unchanged. decide() unchanged. test_local_gather_red_tests_holds & test_local_gather_security_blocker_holds assert decision=='hold'.",
+      "verified": true
+    },
+    {
+      "claim": "Dirty-tree guard refuses before any gate; nothing merged.",
+      "evidence": "local_merge.py:907-913 checks git status --porcelain and returns 1 before engine construction; test_cli_local_dirty_tree_refuses_before_any_gate stubs gather_gates to raise and asserts rc!=0 with nothing merged.",
+      "verified": true
+    },
+    {
+      "claim": "Tripwire softened ONLY in --local, and still aborts when the remote is reachable and diverged.",
+      "evidence": "local_merge.py:920-933 (--local: fetch check=False; reachable+not-ancestor -> return 2; unreachable -> warn+proceed) vs :934-941 (default: unchanged hard abort). Three dedicated tests plus the pre-existing default-path tripwire test are green.",
+      "verified": true
+    },
+    {
+      "claim": "Discovery bypassed and no fetch in the --local gate/merge.",
+      "evidence": "list_ready returns args.task directly when local_ref set (:970-973); _local_worktree omits the fetch _branch_worktree performs; merge_branch guards the fetch behind `if fetch:` and main wires fetch=local_ref is None (:984).",
+      "verified": true
+    },
+    {
+      "claim": "Argument rules enforced (exactly one task, non-empty ref).",
+      "evidence": "local_merge.py:889-896 parser.error on len(task)!=1 or blank ref; test_cli_local_arg_rules covers the 0/2-task, blank, and no-value cases.",
+      "verified": true
+    },
+    {
+      "claim": "Default (discovery/batch) path unchanged and no existing test weakened.",
+      "evidence": "git numstat tests/test_local_merge.py = 323/0 (additions/deletions) - purely additive; verify_one/merge_one pass local kwargs only when local_ref set; full suite 713 passed with no regression.",
+      "verified": true
+    },
+    {
+      "claim": "No new push / no hub write on the --local path.",
+      "evidence": "The only push is the unchanged push_and_cleanup (:794-796), still gated behind the same explicit _ask_fn y/N (:995). No push added on the --local route.",
+      "verified": true
+    },
+    {
+      "claim": "Digest adds the local route to the generic BROKEN branch only, not the infra-override branch.",
+      "evidence": "local_merge.py:174-188 additions live in the else (generic) block; the infra_overridden branch (:160-173) is unchanged. test_local_broken_digest_points_at_the_local_route and test_local_route_absent_from_infra_override_digest both green.",
+      "verified": true
+    },
+    {
+      "claim": "Launcher forwards --local and softens the missing-remote die to a warning only under --local.",
+      "evidence": "merge-verified.sh:44-60; both launcher subprocess tests pass (warn+forward with --local; die without).",
+      "verified": true
+    },
+    {
+      "claim": "Suite green, 0 pyright errors, ruff clean, ASCII/LF preserved.",
+      "evidence": "Ran locally: ruff 'All checks passed'; basedpyright '0 errors'; pytest -n auto -q '713 passed'; touched-scope 62 passed.",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "scripts/merge-verified.sh",
+      "line": 46,
+      "summary": "LOCAL_MODE detection matches only the space form `--local`, not argparse's accepted `--local=<ref>` equals-form, so that form would hit the hard `die` instead of the warn path in a no-hub setup. Fails closed/loud (the mode simply won't start), and the documented recipe uses the space form, so AC#10 is met; matching `--local=*` too would be more robust.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "Every acceptance criterion has a directly covering test that I ran green (62 in the touched scope; 713 in the full suite). AC#1/#3 (bypass discovery, judge local sha), AC#2 (merge the judged sha), AC#4 (red/blocker holds, green merges), AC#5 (dirty-tree guard), AC#6 (arg rules, 4 cases), AC#7 (tripwire: reachable-diverged aborts, unreachable warns, default aborts), AC#8 (default path unchanged, 323/0 additive diff), AC#9 (digest local route in generic branch only), AC#10 (launcher forward+soften), AC#11 (no push/no gate skip). Test-weakening check: the invariant test file is purely additive (0 deletions) - no architecture-contract test was relaxed, which is the specific stop condition for my role, and it is clear.",
+  "residual_risks": [
+    "--local softens the tripwire on ANY non-zero fetch, so a transient network/auth failure (not just an absent remote) also warns-and-proceeds. This is spec-blessed (the mode is 'no VPS') and defense-in-depth only: the merged sha is a local Director-authored commit judged by the full gate, so the fail-open is bounded and acceptable.",
+    "Path(ref).is_dir() in _resolve_local_ref resolves relative to CWD, not --repo; harmless from the documented repo dir, fails closed otherwise.",
+    "Launcher equals-form (`--local=<ref>`) is not softened (advisory above) - fails closed/loud, not a merge-safety issue.",
+    "Blast radius is the merge authority itself (L3), mitigated by the full 713-test suite passing with no regression on the default path - the change is judged by exactly the gate it modifies."
+  ]
+}

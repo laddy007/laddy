@@ -38,12 +38,26 @@ else
   echo "      Run ./scripts/local-onboard.sh to generate it for this project (see local.conf.example)." >&2
 fi
 
+# --local judges a locally-committed revision with no VPS round trip, so it must
+# run with no hub configured at all. Detect it in the forwarded args to soften
+# the remote-required check below.
+LOCAL_MODE=0
+for arg in "$@"; do
+  if [ "$arg" = "--local" ]; then LOCAL_MODE=1; break; fi
+done
+
 # discover_ready fetches task branches from the AGENT_BRANCH_REMOTE remote
 # (default origin) - fail fast with the exact fix instead of a raw git error
-# if that remote isn't wired up yet.
+# if that remote isn't wired up yet. Under --local the remote is optional (the
+# mode is "no VPS"), so a missing one is a warning, not a die.
 BRANCH_REMOTE="${AGENT_BRANCH_REMOTE:-origin}"
-git -C "$REPO_DIR" remote get-url "$BRANCH_REMOTE" >/dev/null 2>&1 \
-  || die "git remote '$BRANCH_REMOTE' (AGENT_BRANCH_REMOTE) not found in $REPO_DIR - run ./scripts/local-onboard.sh to add it, or add it by hand: git -C $REPO_DIR remote add $BRANCH_REMOTE ssh://<alias><hub-path>"
+if ! git -C "$REPO_DIR" remote get-url "$BRANCH_REMOTE" >/dev/null 2>&1; then
+  if [ "$LOCAL_MODE" -eq 1 ]; then
+    echo "WARN: git remote '$BRANCH_REMOTE' (AGENT_BRANCH_REMOTE) not found in $REPO_DIR - --local proceeds with no hub." >&2
+  else
+    die "git remote '$BRANCH_REMOTE' (AGENT_BRANCH_REMOTE) not found in $REPO_DIR - run ./scripts/local-onboard.sh to add it, or add it by hand: git -C $REPO_DIR remote add $BRANCH_REMOTE ssh://<alias><hub-path>"
+  fi
+fi
 
 export PYTHONPATH="$ENGINE_DIR${PYTHONPATH:+:$PYTHONPATH}"
 PY="${PYTHON_BIN:-python3}"

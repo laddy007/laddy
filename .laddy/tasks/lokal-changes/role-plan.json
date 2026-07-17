@@ -1,0 +1,9 @@
+{
+  "task": "lokal-changes",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}
