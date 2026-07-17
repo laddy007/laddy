@@ -1,0 +1,64 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "tests/test_local_merge.py",
+    "orchestrator/artifacts.py",
+    ".laddy/specs/local-gate-advisory.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Deterministic gates are NEVER waivable under --advisory (constraint 1)",
+      "evidence": "local_merge.py:272 `blocking = deterministic + ([] if advisory_mode else judgment)` - deterministic (policy/tests/coverage/scan/infra, lines 242-260) is always in the blocking set; test_advisory_never_waives_deterministic_gates exercises all five gates -> BROKEN with advisory==()",
+      "verified": true
+    },
+    {
+      "claim": "Only security panel + rw2 are waivable and are carried on verdict.advisory",
+      "evidence": "local_merge.py:262-267 judgment list = security blockers + rw2 blockers; :285 `advisory = tuple(judgment) if advisory_mode else ()`; test_advisory_waives_security_panel_blocker / test_advisory_waives_rw2_blocker pass",
+      "verified": true
+    },
+    {
+      "claim": "Opt-in, default off; byte-identical without the flag (constraint 2)",
+      "evidence": "decide() advisory_mode default False (local_merge.py:226); engine field advisory_mode default False (:411); test_default_and_off_verdicts_carry_no_advisory + full pre-existing suite green",
+      "verified": true
+    },
+    {
+      "claim": "Durable record written to .laddy/tasks/<task>/merge-advisory.md AND committed into local main (constraint 3, AC3)",
+      "evidence": "_record_advisory local_merge.py:1056-1070 writes via TaskArtifacts (artifacts.py:184 _ensure mkdir) then `git add -- rel` + commit; test_cli_advisory_commits_merge_advisory_into_main asserts `git show main:...merge-advisory.md` contains the finding from a tree that never had the branch",
+      "verified": true
+    },
+    {
+      "claim": "Record fires on BOTH auto-merge and L3-confirm paths, keyed on verdict, not the branch (AC5)",
+      "evidence": "engine run() :462 `elif verdict.advisory: self.record_advisory(verdict)` after merge_one, reached by both AUTO_MERGE and the RISK_DECISION path; :440 `replace(verdict, decision='merge')` preserves advisory through confirm; test_engine_l3_advisory_confirm_preserves_and_records_advisory + test_cli_l3_advisory_confirmed_records_on_main pass",
+      "verified": true
+    },
+    {
+      "claim": "Regression guard: no --advisory -> security blocker still BROKEN, no record (AC4)",
+      "evidence": "test_cli_no_advisory_security_blocker_holds_writes_no_record asserts rc==1, no committed and no tree file",
+      "verified": true
+    },
+    {
+      "claim": "Honest labeling (constraint 5)",
+      "evidence": "render_advisory says 'NOT a fully-verified merge' / 'WAIVED' (:304-317); _report prints '[merge*] ... judgment gates WAIVED, NOT fully verified' (:1078); L3 digest names waived findings and drops 'All ... gates passed' (build_digest :151-166); tests test_render_advisory_* and test_l3_advisory_holds_risk_decision_with_honest_digest pass",
+      "verified": true
+    },
+    {
+      "claim": "No push / origin change from --advisory (constraint 4)",
+      "evidence": "record + merge are local-main only; push stays behind the separate _ask_fn Y/N (:1137); no push path touched by the flag",
+      "verified": true
+    },
+    {
+      "claim": "Gate green",
+      "evidence": "ruff clean; basedpyright 0 errors; pytest tests/test_local_merge.py 76 passed; broader merge/oracle/scope suite 209 passed",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "Every acceptance criterion has a covering test. AC1: test_advisory_waives_security_panel_blocker (both flag states) + test_advisory_waives_rw2_blocker. AC2: test_advisory_never_waives_deterministic_gates (tests/coverage/scan/policy/infra) + test_advisory_with_a_deterministic_failure_records_no_advisory. AC3: test_cli_advisory_commits_merge_advisory_into_main (inspects committed main tree). AC4: test_cli_no_advisory_security_blocker_holds_writes_no_record + test_engine_non_advisory_security_blocker_holds_records_nothing. AC5: test_engine_l3_advisory_confirm_preserves_and_records_advisory (the replace() trap) + test_cli_l3_advisory_confirmed_records_on_main. Each new/changed function has failure-mode coverage: decide() (deterministic+judgment combo, default-off, empty-waive), render_advisory (empty case), engine record path (green-no-record, hold-no-record, dry-run interaction implicit via existing dry-run tests). artifacts.write_text mkdirs parents so the record path is safe even when main lacks the task dir.",
+  "residual_risks": [
+    "--advisory + --local is untested as a combination, though it composes correctly (list_ready=[task], local_ref passthrough, fetch=False merge, record writes to main via _ensure mkdir) - no concrete failure identified.",
+    "If the post-merge advisory commit (_record_advisory) were to fail, main would hold the merge without the record; git commit of a freshly-staged new file is not expected to fail, so this is theoretical.",
+    "The change edits the merge gate itself and will classify L3; landing it is the intended bootstrap hand-merge per the spec notes - the trust invariant (deterministic gates still fail closed, only panel/rw2 waived) holds."
+  ]
+}
