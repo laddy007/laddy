@@ -7,3 +7,4 @@
 {"ts": "2026-07-17T16:47:49Z", "action": "rw1", "outcome": "approved", "round": 1, "session_id": "2ba79ffc-2bd8-45c9-ba78-1631bb7db0e1", "sha": "8f0b43996fa69ce441d9070dfdfeb997b447d3e2", "detail": ""}
 {"ts": "2026-07-17T16:53:26Z", "action": "rw2", "outcome": "go", "round": 1, "session_id": "b5f3dc5d-6b43-49fe-bff2-0dffba9c2426", "sha": "8f0b43996fa69ce441d9070dfdfeb997b447d3e2", "fingerprint": null, "detail": ""}
 {"ts": "2026-07-17T16:56:22Z", "action": "senior", "outcome": "approved", "round": 1, "session_id": "b6f6fd9b-a126-4cd8-89b0-62b9b42cc6c5", "sha": "8f0b43996fa69ce441d9070dfdfeb997b447d3e2", "detail": ""}
+{"ts": "2026-07-17T16:57:21Z", "action": "authoritative", "outcome": "pass", "round": 1, "sha": "8f0b43996fa69ce441d9070dfdfeb997b447d3e2", "flaky": false, "fingerprint": null, "detail": ""}
