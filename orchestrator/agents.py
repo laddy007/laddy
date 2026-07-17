@@ -145,6 +145,22 @@ DEFAULT_SENIOR_REVIEW_CMD: tuple[str, ...] = DEFAULT_CLAUDE_REVIEW_CMD + (
     "--model", "claude-opus-4-8",
 )
 
+def set_model_flag(base_cmd: Sequence[str], model: str) -> tuple[str, ...]:
+    """Return ``base_cmd`` carrying ``--model <model>``.
+
+    Replaces an existing ``--model`` value in place (rw2's Claude default
+    carries ``--model sonnet``; a role's MODEL override must supersede it, not
+    append a duplicate ``--model`` where last-wins is CLI-dependent), otherwise
+    appends. Both ``claude -p`` and ``codex exec`` accept ``--model``.
+    """
+    parts = list(base_cmd)
+    for i, part in enumerate(parts):
+        if part == "--model" and i + 1 < len(parts):
+            parts[i + 1] = model
+            return tuple(parts)
+    return (*parts, "--model", model)
+
+
 # (cmd, cwd, stdin) -> (returncode, stdout, stderr)
 ExecFn = Callable[[Sequence[str], Path, str], tuple[int, str, str]]
 

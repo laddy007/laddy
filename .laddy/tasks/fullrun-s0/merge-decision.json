@@ -1,0 +1,8 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: orchestrator/agents.py, orchestrator/config.py, orchestrator/run.py, pyproject.toml",
+    "high_risk"
+  ]
+}

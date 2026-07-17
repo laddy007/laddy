@@ -1,0 +1,9 @@
+{
+  "task": "fullrun-s0",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

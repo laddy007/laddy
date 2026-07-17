@@ -17,4 +17,53 @@
 
 odlogovat z roota
 
+přidat nějaké pořadí tasků (čísla v názvu?)
+až dojedu tab local claude - zjistit jak je to s mcp (je nová spec?)
+dva specy merge-hold.md
+!     0local creating spec openhabds
+
+## From the 2026-07-17 session (mcp + fullrun-s2 hand-merged, bypassing the gate)
+
+- **mcp secret: RESOLVED in code (fix/mcp-secret-out-of-source).** The TOTP secret is
+  gone from `note_server/` source and read from `NOTE_SERVER_TOTP_SECRET` (base32, no
+  default); the `# gitleaks:allow` line is dropped with it, and `.laddy/specs/mcp.md`
+  no longer instructs hardcoding. The secret was ROTATED, so the old value is dead
+  everywhere it still literally appears (branch history commit 44670ac1,
+  `.laddy/tasks/mcp/*` run artifacts). Before `git push origin` (Tier 3,
+  `https://github.com/laddy007/laddy.git`), the Director decides whether a dead but
+  real-looking secret string in public history is acceptable or whether to scrub
+  branch history first. Merge into LOCAL main is safe.
+- **mcp's two real defects need a NEW task once mcp merges** (not a `--resume`): a
+  6-digit network factor with no throttling / replay protection (brute-forceable if
+  the server is ever exposed), and saved notes defaulting to group/other-readable.
+  Its spec asked for neither, so no reviewer would ever have caught them - see the
+  `decide()` item below.
+- `requirements-dev.txt` pins nothing (pytest/ruff/basedpyright/mcp all floating)
+  and the gate image installs it on the TRUSTED machine. Pin them.
+- **fullrun-s2 is the safe hand-merge, but it now owns the gate.** Its red suite was
+  only the branch-vs-restore mismatch and goes green once the ruleset IS main's. But
+  both new rules are trivially bypassable (Rule A by precomputed flags, Rule B by any
+  unrelated or late `st_nlink`) and they are now the TRUSTED rules every future task
+  is measured by. Tighten them in a follow-up; verify main's suite is green first.
+- **`decide()` cannot tell a defect from a declared risk.** Every security-panel
+  blocker becomes BROKEN ("needs a fix, not a risk call"), but a finding against a
+  risk the SPEC declared is a risk call - `mcp`'s hardcoded secret is exactly that,
+  and no developer following that spec could fix it. Route declared-risk findings to
+  RISK_DECISION; keep out-of-spec findings BROKEN.
+- **Decide: infra-override - BROKEN or RISK_DECISION?** A branch changing
+  `.laddy/docker` / `.laddy/security` currently holds BROKEN (chosen fail-closed).
+  Consider routing it to RISK_DECISION so the Director can accept it after reading
+  the diff - `fullrun-s2` had to be hand-merged precisely because it cannot.
+- **`request_payload` (verdict.py) burns retries on failures no retry can fix.** An
+  expired CLI login abstained the whole panel three times over. Classify
+  non-retryable failures - deliberate follow-up to `agent-error-visibility`.
+- `scripts/local-task.sh` defaults pre-date the engine/target split:
+  `LOCAL_SOURCE_REPO=/mnt/c/myapp`, `LOCAL_BASE_BRANCH=fix/agent-loop-hardening`.
+  Untruthful config - fix or document.
+
+
+proč merge-verified.sh nevypisuje co se děje?
 merger-verified funguje asi jen na vps branche ... ale co když něco neprojde, já to upravím ručně a budu to chtít merger-verified (jen pokud to nedoáže sám před vrácení devu)
+
+
+kod pro ntfy vytáhout mimo git a odrotovat

@@ -16,6 +16,7 @@ from orchestrator.agents import (
     ClaudeRunner,
     CodexRunner,
     detect_quota,
+    set_model_flag,
 )
 from tests.fakes import FakeRunner
 
@@ -117,6 +118,30 @@ def test_codex_runner_nonzero_rc_is_error(tmp_path: Path) -> None:
     result = CodexRunner(exec_fn=exec_fn).run("p", tmp_path)
     assert result.exit_reason == "error"
     assert result.text == "rate limited"
+
+
+def test_set_model_flag_appends_when_absent() -> None:
+    assert set_model_flag(("claude", "-p"), "opus") == ("claude", "-p", "--model", "opus")
+
+
+def test_set_model_flag_replaces_existing_value() -> None:
+    # rw2's default carries `--model sonnet`; an override replaces the value in
+    # place rather than appending a second (CLI-dependent last-wins) --model.
+    out = set_model_flag(("claude", "-p", "--model", "sonnet"), "opus")
+    assert out == ("claude", "-p", "--model", "opus")
+    assert out.count("--model") == 1
+
+
+def test_set_model_flag_empty_command_appends() -> None:
+    assert set_model_flag((), "opus") == ("--model", "opus")
+
+
+def test_set_model_flag_trailing_model_without_value_appends() -> None:
+    # a malformed base command ending in a bare `--model` (no value to replace)
+    # must not index past the end; it appends a fresh pair instead of raising.
+    assert set_model_flag(("claude", "--model"), "opus") == (
+        "claude", "--model", "--model", "opus",
+    )
 
 
 _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)

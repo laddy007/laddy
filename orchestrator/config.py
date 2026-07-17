@@ -6,14 +6,24 @@ Mirrors the knobs of the legacy agent-flow.sh where they still apply.
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 DEFAULT_FAST_COMMANDS = (
     ". .venv/bin/activate && ruff check . && basedpyright && pytest -n auto -q"
 )
+
+# Recognised runner vendors for a role binding (ROLE_<NAME>_VENDOR).
+ROLE_VENDORS = ("claude", "codex")
+
+# ROLE_<NAME>_{VENDOR,MODEL,THINKING}: per-role runner binding, parsed
+# generically so a new role (rw3, ...) needs no code change. The role name is
+# [A-Za-z0-9]+ (no underscores) so the trailing knob segment is unambiguous.
+_ROLE_ENV_RE = re.compile(r"^ROLE_([A-Za-z0-9]+)_(VENDOR|MODEL|THINKING)$")
 
 
 def _claude_cmd(raw: str | None) -> tuple[str, ...]:
@@ -57,6 +67,55 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class RoleBinding:
+    """A role's resolved {vendor, model, thinking} triple from ROLE_* env.
+
+    Every field is optional: an unset field falls back to the legacy per-role
+    default (vendor -> claude, model/thinking -> the vendor's own default), so a
+    binding is purely additive over today's behaviour.
+    """
+
+    vendor: str | None = None
+    model: str | None = None
+    thinking: str | None = None
+
+
+def _parse_role_bindings(env: Mapping[str, str]) -> Mapping[str, RoleBinding]:
+    """Collect ROLE_<NAME>_{VENDOR,MODEL,THINKING} into role -> RoleBinding.
+
+    Generic on purpose (no hardcoded role list): future roles are configured
+    with no code change. Blank values are ignored (treated as unset). An
+    unrecognised vendor is fail-closed -> ConfigError, never a silent fallback.
+    """
+    collected: dict[str, dict[str, str]] = {}
+    for key, raw in env.items():
+        match = _ROLE_ENV_RE.match(key)
+        if match is None:
+            continue
+        value = raw.strip()
+        if not value:
+            continue
+        role = match.group(1).lower()
+        knob = match.group(2).lower()  # vendor | model | thinking
+        collected.setdefault(role, {})[knob] = value
+
+    bindings: dict[str, RoleBinding] = {}
+    for role, knobs in collected.items():
+        vendor = knobs.get("vendor")
+        if vendor is not None:
+            vendor = vendor.lower()
+            if vendor not in ROLE_VENDORS:
+                raise ConfigError(
+                    f"ROLE_{role.upper()}_VENDOR must be one of "
+                    f"{', '.join(ROLE_VENDORS)} (got {knobs['vendor']!r})"
+                )
+        bindings[role] = RoleBinding(
+            vendor=vendor, model=knobs.get("model"), thinking=knobs.get("thinking")
+        )
+    return MappingProxyType(bindings)
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     repo_url: str
     work_root: Path
@@ -81,6 +140,10 @@ class OrchestratorConfig:
     review_claude_cmd: tuple[str, ...] = field(default_factory=tuple)
     review_codex_cmd: tuple[str, ...] = field(default_factory=tuple)
     review_senior_cmd: tuple[str, ...] = field(default_factory=tuple)
+    # Per-role runner bindings from ROLE_<NAME>_{VENDOR,MODEL,THINKING}. Empty
+    # by default -> every role resolves to its legacy Claude command; the
+    # *_cmd knobs above remain the backward-compat fallbacks.
+    role_bindings: Mapping[str, RoleBinding] = field(default_factory=dict)
     ntfy_topic: str | None = None
     # --- Quota-window handling (spec: quota-resume-queue) --------------------
     quota_reset_buffer_s: int = 120
@@ -148,6 +211,7 @@ class OrchestratorConfig:
             review_senior_cmd=_review_cmd(
                 env.get("REVIEW_SENIOR_CMD"), DEFAULT_SENIOR_REVIEW_CMD, claude=True
             ),
+            role_bindings=_parse_role_bindings(env),
             ntfy_topic=env.get("NTFY_TOPIC") or None,
             quota_reset_buffer_s=_positive_int("QUOTA_RESET_BUFFER_SECONDS", "120"),
             quota_backoff_minutes=quota_backoff,

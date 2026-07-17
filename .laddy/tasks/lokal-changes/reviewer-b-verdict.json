@@ -1,0 +1,64 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "scripts/merge-verified.sh",
+    "tests/test_local_merge.py",
+    "tests/test_merge_verified_launcher.py",
+    ".laddy/specs/lokal-changes.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "judged sha == merged sha, no re-resolution of a moving ref",
+      "evidence": "local_merge.py:658 verified_sha=_worktree_sha(wt); LocalMergeEngine.run merges gates.head_sha, never re-resolves local_ref; test_cli_local_judges_local_sha_bypasses_discovery asserts captured sha == the sha landed in main",
+      "verified": true
+    },
+    {
+      "claim": "no fetch in --local gather/merge, discovery bypassed",
+      "evidence": "_local_worktree (local_merge.py:563) has no fetch call vs _branch_worktree:530; merge_branch fetch=False guard at :763; main() list_ready returns args.task directly when local_ref set (:970-973), discover_ready stubbed to raise in test and rc==0",
+      "verified": true
+    },
+    {
+      "claim": "dirty-tree guard runs before any gate and blocks nothing-merged",
+      "evidence": "local_merge.py:907-913 checks porcelain before engine construction; test stubs gather_gates to assert-raise and confirms rc!=0, message, nothing merged",
+      "verified": true
+    },
+    {
+      "claim": "tripwire softened only when remote unreachable, still aborts when reachable+diverged",
+      "evidence": "local_merge.py:920-933 branches on fetch return code; two dedicated tests (tripwire-still-fires / absent-remote-warns) both green; default path (:934-941) unchanged",
+      "verified": true
+    },
+    {
+      "claim": "full suite green, 0 pyright errors, ruff clean",
+      "evidence": "ran locally: pytest -n auto -q -> 713 passed; ruff check -> All checks passed; basedpyright -> 0 errors, 70 warnings",
+      "verified": true
+    },
+    {
+      "claim": "no push/hub-write added on the --local path itself",
+      "evidence": "push_and_cleanup unchanged; tests assert pushed==[] unless _ask_fn confirms, and origin bare untouched after merge",
+      "verified": true
+    },
+    {
+      "claim": "worktree cleanup risk is not newly introduced by --local",
+      "evidence": "gather_gates:652-656 builds wt (via _local_worktree or _branch_worktree) BEFORE the try/finally in both the pre-diff and post-diff code, so an exception during worktree creation itself is an equal, pre-existing gap in both modes, not a regression",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "scripts/merge-verified.sh",
+      "line": 45,
+      "summary": "LOCAL_MODE detection only matches the literal token `--local`, not argparse's accepted `--local=<ref>` equals-form, so that form would hit the hard `die` instead of the warn path in a no-hub setup.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "AC1-11 each have a directly corresponding green test (verified by running tests/test_local_merge.py + tests/test_merge_verified_launcher.py: 62 passed; full suite: 713 passed). Failure-mode angles checked and found equivalent to the pre-existing remote path: crash-mid-worktree-creation risk is unchanged (same code shape as before), malformed ref fails cleanly via _resolve_local_ref (tested), no shell/command injection (git invoked via argv list, not shell), typo'd task/ref ordering is a user-facing usage contract already exercised by the argparse ordering tests, and no gate is skipped/stubbed in --local mode (real gather_gates path exercised in test_local_gather_and_merge_uses_local_sha_no_fetch_no_push).",
+  "residual_risks": [
+    "scripts/merge-verified.sh does not soften on `--local=<ref>` (equals form); only the documented space-separated form is detected, so it fails closed/loud (mode simply won't start with no hub) rather than silently misbehaving - low impact, advisory only.",
+    "Path(ref).is_dir() in _resolve_local_ref resolves relative to CWD, not --repo; harmless when run from the repo dir as documented, fails closed otherwise (pre-existing note from prior review, unchanged).",
+    "Blast radius is the merge authority itself (L3); mitigated by full 713-test suite green with no regression in the default (non---local) path."
+  ]
+}

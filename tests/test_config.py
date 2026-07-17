@@ -87,8 +87,8 @@ def test_rw2_defaults_to_claude_sonnet_and_env_overrides() -> None:
     from orchestrator.run import Deps
 
     cfg = OrchestratorConfig.from_env({"AGENT_REPO_URL": "file:///tmp/hub.git"})
-    assert cfg.rw2_cmd == ()  # empty -> factory uses the default
-    rw2 = Deps().make_rw2_runner(cfg)
+    assert cfg.rw2_cmd == ()  # empty -> resolver uses the default
+    rw2 = Deps().make_runner(cfg, "rw2")
     assert rw2.name == "claude"
 
     cfg2 = OrchestratorConfig.from_env(
@@ -123,6 +123,70 @@ def test_review_cmd_env_override_still_drops_dangerous_flags() -> None:
     )
     assert "--dangerously-skip-permissions" not in config.review_claude_cmd
     assert "--full-auto" not in config.review_codex_cmd
+
+
+# --- role bindings (spec fullrun-s0) -----------------------------------------
+
+
+def test_role_bindings_empty_by_default() -> None:
+    cfg = OrchestratorConfig.from_env({"AGENT_REPO_URL": "file:///tmp/hub.git"})
+    assert dict(cfg.role_bindings) == {}
+
+
+def test_role_bindings_parsed_generically() -> None:
+    # role name is lowercased; a role never named in code (rw3) still parses.
+    cfg = OrchestratorConfig.from_env(
+        {
+            "AGENT_REPO_URL": "file:///tmp/hub.git",
+            "ROLE_RW3_VENDOR": "codex",
+            "ROLE_RW3_MODEL": "gpt-5",
+            "ROLE_RW3_THINKING": "high",
+        }
+    )
+    b = cfg.role_bindings["rw3"]
+    assert (b.vendor, b.model, b.thinking) == ("codex", "gpt-5", "high")
+
+
+def test_role_binding_partial_fields_are_none() -> None:
+    cfg = OrchestratorConfig.from_env(
+        {"AGENT_REPO_URL": "file:///tmp/hub.git", "ROLE_DEVELOPER_MODEL": "opus"}
+    )
+    b = cfg.role_bindings["developer"]
+    assert b.model == "opus"
+    assert b.vendor is None and b.thinking is None
+
+
+def test_role_binding_blank_value_is_ignored() -> None:
+    # a blank/whitespace env value is treated as unset, not an empty override.
+    cfg = OrchestratorConfig.from_env(
+        {
+            "AGENT_REPO_URL": "file:///tmp/hub.git",
+            "ROLE_RW2_VENDOR": "   ",
+            "ROLE_RW2_MODEL": "opus",
+        }
+    )
+    b = cfg.role_bindings["rw2"]
+    assert b.vendor is None and b.model == "opus"
+
+
+def test_unrelated_env_does_not_create_bindings() -> None:
+    # near-misses must not be swallowed as bindings (no ROLE_ prefix, or an
+    # unknown trailing knob).
+    cfg = OrchestratorConfig.from_env(
+        {
+            "AGENT_REPO_URL": "file:///tmp/hub.git",
+            "ROLE_RW2_FOO": "bar",  # unknown knob
+            "MY_ROLE_RW2_VENDOR": "codex",  # not ROLE_-anchored
+        }
+    )
+    assert dict(cfg.role_bindings) == {}
+
+
+def test_role_binding_invalid_vendor_raises() -> None:
+    with pytest.raises(ConfigError, match="ROLE_RW2_VENDOR"):
+        OrchestratorConfig.from_env(
+            {"AGENT_REPO_URL": "file:///tmp/hub.git", "ROLE_RW2_VENDOR": "gemini"}
+        )
 
 
 def test_bad_max_loops_raises() -> None:

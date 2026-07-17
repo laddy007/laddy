@@ -66,9 +66,11 @@ def _deps(
     senior = FakeRunner([])
     the_shell = shell or FakeShell()
     return Deps(
-        make_runner=lambda c: runners,
-        make_rw2_runner=lambda c: rw2,
-        make_senior_runner=lambda c: senior,
+        # one role-keyed resolver now: rw2 -> rw2 fake, senior -> senior fake,
+        # everything else (developer/rw1/clarify) -> the shared runners fake.
+        make_runner=lambda c, role: (
+            rw2 if role == "rw2" else senior if role == "senior" else runners
+        ),
         ask=ask or (lambda q: "ANSWER"),
         shell=the_shell,
         # gate_shell defaults to the real containerized shell; in tests the
@@ -192,7 +194,7 @@ def test_clarify_is_idempotent_on_re_kickoff(remote: Path, tmp_path: Path) -> No
 
     # re-kickoff (e.g. resume) must NOT re-run the gate or append a 2nd block
     deps2 = Deps(
-        make_runner=lambda c: FakeRunner([]),  # would raise if the gate re-ran
+        make_runner=lambda c, role: FakeRunner([]),  # would raise if the gate re-ran
         ask=lambda q: (_ for _ in ()).throw(AssertionError("ask re-invoked")),
         shell=FakeShell(),
     )
@@ -212,7 +214,7 @@ def test_new_mode_authors_spec_and_pushes(remote: Path, tmp_path: Path) -> None:
         (wt / spec_rel).write_text("---\ntype: feature\n---\n# Authored\n", encoding="utf-8")
 
     deps = Deps(
-        make_runner=lambda c: FakeRunner([]),
+        make_runner=lambda c, role: FakeRunner([]),
         author_spec=author,
         ask=lambda q: "ANSWER",
         shell=FakeShell(),
@@ -240,7 +242,7 @@ def test_new_mode_refuses_when_spec_already_exists(remote: Path, tmp_path: Path)
         nonlocal called
         called = True
 
-    deps = Deps(make_runner=lambda c: FakeRunner([]), author_spec=author)
+    deps = Deps(make_runner=lambda c, role: FakeRunner([]), author_spec=author)
     rc = main(["t1", "--phase", "new"], env=_env(remote, tmp_path), deps=deps)
     assert rc == 2
     assert called is False  # never overwrites an existing spec
@@ -248,7 +250,7 @@ def test_new_mode_refuses_when_spec_already_exists(remote: Path, tmp_path: Path)
 
 def test_new_mode_errors_if_no_spec_produced(remote: Path, tmp_path: Path) -> None:
     deps = Deps(
-        make_runner=lambda c: FakeRunner([]),
+        make_runner=lambda c, role: FakeRunner([]),
         author_spec=lambda wt, task, spec_rel: None,  # produces nothing
     )
     rc = main(["freshtask", "--phase", "new"], env=_env(remote, tmp_path), deps=deps)

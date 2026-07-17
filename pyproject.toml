@@ -21,6 +21,13 @@ include = ["orchestrator", "note_server", "tests"]
 # stay visible but non-blocking. failOnWarnings only affects exit-code
 # gating, not which diagnostics are reported - no rule category is disabled.
 failOnWarnings = false
+# Honor `# type: ignore[...]` suppressions the code already relies on (e.g.
+# the fcntl=None Windows fallback in artifacts.py, and os.fspath(object) test
+# fakes in loop_monitor). This matches pyright's own default; some basedpyright
+# builds default it off, which turns those intentional, hand-vetted
+# suppressions into hard gate errors. Set it explicitly so the gate is
+# reproducible across environments.
+enableTypeIgnoreComments = true
 
 [[tool.basedpyright.executionEnvironments]]
 root = "tests/loop_monitor"

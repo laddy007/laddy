@@ -25,6 +25,7 @@ def _gates(
     rw2_blockers: list[dict[str, object]] | None = None,
     security_blockers: list[dict[str, object]] | None = None,
     sensitive_files: tuple[str, ...] = (),
+    infra_overridden: tuple[str, ...] = (),
 ) -> GateResults:
     rw2 = parse_verdict(verdict_json("CHANGES_REQUESTED", rw2_blockers)) if rw2_blockers else (
         parse_verdict(verdict_json("APPROVED"))
@@ -46,6 +47,7 @@ def _gates(
         rw2=rw2,
         security_verdicts=sec,
         sensitive_files=sensitive_files or (("myapp/models.py",) if blast == L3 else ()),
+        infra_overridden=infra_overridden,
     )
 
 
@@ -83,6 +85,75 @@ def test_failed_gate_is_broken_even_on_sensitive_surface() -> None:
     # broken digest diagnoses + says what is needed, offers NO merge
     assert "What is needed" in v.digest
     assert "Merge `t1` into main? (y/N)" not in v.digest
+
+
+def test_broken_hold_on_l3_never_claims_a_risk_decision_is_required() -> None:
+    # decide() returns BROKEN before it can ever offer the L3 y/N prompt, so a
+    # broken hold must not tell the Director a risk call is pending: there is
+    # no code path that would take it. `reasons` is printed verbatim by the CLI
+    # ("[broken] <task>: <reasons>"), so the claim must be absent from both.
+    v = decide("t1", _gates(blast=L3, tests_passed=False))
+    assert not any("human risk decision" in r for r in v.reasons)
+    assert "human risk decision" not in v.digest
+    # the blast level itself is still reported - only the false claim is gone
+    assert "blast L3" in v.digest
+    assert any("test suite is red" in r for r in v.reasons)
+
+
+def test_infra_override_holds_even_when_every_gate_is_green() -> None:
+    # The gate restores .laddy/docker + .laddy/security from trusted main over
+    # the branch (NÁLEZ 1), so for a branch that CHANGES those paths a green run
+    # is a verdict on main's infra, not on the branch's. Offering that as
+    # "all gates passed, your risk call" would be a false claim - it is a hold.
+    from orchestrator.local_merge import BROKEN
+
+    v = decide(
+        "t1",
+        _gates(blast=L3, infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",)),
+    )
+    assert v.decision == "hold"
+    assert v.kind == BROKEN
+    assert any("NOT verified" in r for r in v.reasons)
+    assert any(f"{TARGET_DIR_NAME}/security/semgrep.yml" in r for r in v.reasons)
+
+
+def test_infra_override_reason_explains_a_red_suite_it_caused() -> None:
+    # fullrun-s2's real shape: the restore reverted the branch's own ruleset, so
+    # its tests scanned main's rules and failed. Both facts must reach the
+    # digest - "tests are red" alone blames the branch for the engine's doing.
+    v = decide(
+        "t1",
+        _gates(
+            blast=L3,
+            tests_passed=False,
+            infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",),
+        ),
+    )
+    assert any("test suite is red" in r for r in v.reasons)
+    assert any("NOT verified" in r for r in v.reasons)
+    assert "NOT verified" in v.digest
+
+
+def test_no_infra_override_reason_when_the_branch_leaves_infra_alone() -> None:
+    v = decide("t1", _gates(blast=L2, tests_passed=False))
+    assert not any("NOT verified" in r for r in v.reasons)
+
+
+def test_infra_override_digest_does_not_advise_a_rerun_that_cannot_help() -> None:
+    # The generic broken advice ("re-run the task on the VPS to fix the failing
+    # gate(s)") is false here: the next run restores the same paths and lands in
+    # the same place. Telling the Director to re-run would burn a VPS cycle to
+    # reproduce the identical hold.
+    v = decide(
+        "t1", _gates(blast=L3, infra_overridden=(f"{TARGET_DIR_NAME}/docker/compose.test.yml",))
+    )
+    assert "Re-run the task on the VPS" not in v.digest
+    assert "re-running does not clear it" in v.digest
+
+
+def test_ordinary_broken_digest_still_advises_the_rerun() -> None:
+    v = decide("t1", _gates(blast=L2, tests_passed=False))
+    assert "Re-run the task on the VPS" in v.digest
 
 
 def test_failed_tests_hold() -> None:
@@ -152,6 +223,40 @@ def test_panel_malformed_member_becomes_blocking_abstention(tmp_path: Path) -> N
     verdicts = run_security_panel([p1, p2], "review", tmp_path)
     blockers = [f for v in verdicts for f in v.blockers]
     assert any("did not return a valid verdict" in f.summary for f in blockers)
+
+
+def test_panel_abstention_carries_the_reason_it_abstained(tmp_path: Path) -> None:
+    # An abstention that only says "no valid verdict" is undiagnosable: the
+    # Director cannot tell a quota'd run from a broken model flag from a schema
+    # violation, and the engine ALREADY knows which - request_verdict says so in
+    # the VerdictError it raises. Dropping it sends everyone guessing.
+    p1 = FakeRunner([verdict_json("APPROVED")])
+    p2 = FakeRunner(["not json at all", "still not json", "nope"])
+    p1.name, p2.name = "opus", "codex"
+    verdicts = run_security_panel([p1, p2], "review", tmp_path)
+    blockers = [f for v in verdicts for f in v.blockers]
+    assert any("no JSON object found" in f.summary for f in blockers)
+
+
+def test_panel_abstention_reason_is_bounded(tmp_path: Path) -> None:
+    # The reason quotes agent-controlled text into a report a human reads; a
+    # runaway blob must not bury the rest of the digest.
+    runner = FakeRunner([f"{'x' * 5000} no json", f"{'x' * 5000} no json", "nope"])
+    runner.name = "chatty"
+    (verdict,) = run_security_panel([runner], "review", tmp_path)
+    assert len(verdict.blockers[0].summary) < 500
+
+
+def test_rw2_abstention_carries_the_reason_it_abstained(tmp_path: Path) -> None:
+    from orchestrator.local_merge import _rw2
+
+    runner = FakeRunner(["garbage", "garbage", "garbage"])
+    roles = tmp_path / "roles"
+    roles.mkdir()
+    _ = (roles / "rw2.md").write_text("role", encoding="utf-8")
+    verdict = _rw2(runner, "t1", tmp_path, roles)
+    assert verdict is not None
+    assert any("no JSON object found" in f.summary for f in verdict.blockers)
 
 
 # --- engine: sequential, hold-does-not-block-others, never-fix ---------------
@@ -833,3 +938,326 @@ def test_main_aborts_whole_run_on_tripwire(
     # no "N merged, M held" summary line
     assert "[merge]" not in out
     assert "held." not in out
+
+
+# --- --local: judge a Director-authored local fix through the full gate -------
+#
+# The Director fixes a held task by hand with ordinary git and re-judges the
+# LOCAL commit (no fetch, no VPS) through the identical gate. These tests build
+# the local fix commit as the recipe does (a worktree on top of local main) and
+# never push it, so the judged sha lives only in the local object store.
+
+
+def _local_fix_commit(
+    local_repo: Path, tmp_path: Path, *, sensitive: bool = False
+) -> tuple[Path, str]:
+    """Author a local fix commit on a worktree ON TOP of local main, exactly as
+    the Behaviour recipe (`git worktree add ../fix`). Nothing is pushed; returns
+    (worktree_path, sha). The sha exists only in the shared local object store."""
+    fix = tmp_path / "fix"
+    _g("-C", str(local_repo), "worktree", "add", "-b", "fix", str(fix), "main")
+    target = "myapp/models.py" if sensitive else "myapp/api_helper.py"
+    (fix / "myapp").mkdir(exist_ok=True)
+    (fix / target).write_text("x = 1\n", encoding="utf-8")
+    _g("-C", str(fix), "add", "-A")
+    _g("-C", str(fix), *_ID, "commit", "-m", "fix: local edit")
+    sha = _g("-C", str(fix), "rev-parse", "HEAD")
+    return fix, sha
+
+
+def test_local_gather_and_merge_uses_local_sha_no_fetch_no_push(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#1/#2/#11: the gate judges the LOCAL sha (never fetched, never on origin),
+    # and the SAME sha is merged into local main with no fetch and no push.
+    fix, sha = _local_fix_commit(local_repo, tmp_path)
+    # the fix commit is NOT on origin - a fetch could not find it
+    rc = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "origin/main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert rc != 0
+
+    tools = _tools(
+        local_repo, _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    # pass the worktree PATH as <ref> (the recipe's own form), not a rev
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref=str(fix))
+    assert gates.head_sha == sha  # judged exactly the local sha
+    assert gates.blast == L2 and gates.tests_passed
+    assert decide("t1", gates).decision == "merge"
+
+    # merge the judged sha with NO fetch; it must still land in local main
+    assert merge_branch(local_repo, "t1", gates.head_sha, fetch=False) is True
+    assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
+    # origin was never written (no push)
+    origin_bare = str(tmp_path / "remote.git")
+    rc = subprocess.run(
+        ["git", "-C", origin_bare, "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert rc != 0
+
+
+def test_local_gather_resolves_a_branch_ref(local_repo: Path, tmp_path: Path) -> None:
+    # AC#1: <ref> may also be a plain branch name (not only a worktree path).
+    _fix, sha = _local_fix_commit(local_repo, tmp_path)
+    tools = _tools(
+        local_repo, _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref="fix")
+    assert gates.head_sha == sha
+
+
+def test_local_gather_red_tests_holds(local_repo: Path, tmp_path: Path) -> None:
+    # AC#4: --local runs the IDENTICAL gate - a red suite is a BROKEN hold, no merge.
+    fix, _sha = _local_fix_commit(local_repo, tmp_path)
+    from tests.fakes import FakeSplitShell
+
+    shell = FakeSplitShell(
+        echo_sentinel="lint=0 types=0 tests=1 coverage=0 semgrep=0 gitleaks=0",
+        stdout_prefix="FAILED test_local_boom",
+    )
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref=str(fix))
+    assert gates.tests_passed is False
+    v = decide("t1", gates)
+    assert v.decision == "hold"
+    assert "FAILED test_local_boom" in v.digest
+
+
+def test_local_gather_security_blocker_holds(local_repo: Path, tmp_path: Path) -> None:
+    # AC#4: a security-panel blocker on the local path holds BROKEN (same gate).
+    fix, _sha = _local_fix_commit(local_repo, tmp_path)
+    tools = _tools(
+        local_repo, _green_shell(),
+        security_outputs=[verdict_json("CHANGES_REQUESTED", [blocker(category="security", summary="IDOR local")])],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref=str(fix))
+    v = decide("t1", gates)
+    assert v.decision == "hold"
+    assert any("security panel blocker" in r for r in v.reasons)
+
+
+def test_resolve_local_ref_rejects_an_unresolvable_ref(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#1 (failure mode): an unresolvable ref must fail cleanly, not merge nothing.
+    from orchestrator.local_merge import _resolve_local_ref
+
+    with pytest.raises(RuntimeError, match="does not resolve"):
+        _resolve_local_ref(local_repo, "no-such-ref-xyz")
+
+
+def _fake_local_gather(captured: dict[str, object], blast=L2, **over):  # noqa: ANN001,ANN202
+    import dataclasses
+
+    from orchestrator.local_merge import GateResults, _resolve_local_ref
+
+    default = GateResults(
+        blast=blast, policy_ok=True, policy_reason="", tests_passed=True,
+        tests_tail="", coverage_ok=True, coverage_detail="", scan_findings=(),
+        rw2=None, security_verdicts=(parse_verdict(verdict_json("APPROVED")),),
+        sensitive_files=(("myapp/models.py",) if blast == L3 else ()),
+    )
+    default = dataclasses.replace(default, **over)
+
+    def _gather(task, repo, work_root, tools, branch_remote="origin", base_branch="main", local_ref=None):  # noqa: ANN001,ANN202
+        # capture what the CLI asked us to judge; resolve the local sha the SAME
+        # way the real gate does (no fetch) so merge_branch gets a real sha
+        captured["task"] = task
+        captured["local_ref"] = local_ref
+        assert local_ref is not None, "CLI must pass local_ref in --local mode"
+        sha = _resolve_local_ref(repo, local_ref)
+        captured["sha"] = sha
+        return dataclasses.replace(default, head_sha=sha)
+
+    return _gather
+
+
+def test_cli_local_judges_local_sha_bypasses_discovery(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#1/#3: --local judges the local sha and NEVER consults discover_ready.
+    from orchestrator import local_merge
+
+    fix, sha = _local_fix_commit(local_repo, tmp_path)
+    captured: dict[str, object] = {}
+    orig_gather = local_merge.gather_gates
+    orig_disc = local_merge.discover_ready
+    local_merge.gather_gates = _fake_local_gather(captured, blast=L2)
+    local_merge.discover_ready = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[assignment]
+        AssertionError("discover_ready must not run in --local mode")
+    )
+    pushed: list[list[str]] = []
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--local", str(fix), "t1"],
+            env=env,
+            ask=lambda p: False,  # do not push
+            pusher=lambda repo, tasks: pushed.append(list(tasks)),
+        )
+    finally:
+        local_merge.gather_gates = orig_gather
+        local_merge.discover_ready = orig_disc
+    assert rc == 0  # green -> merged, nothing held
+    assert captured["local_ref"] == str(fix)
+    assert captured["sha"] == sha
+    # AC#2: the judged sha landed in local main
+    assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
+    assert pushed == []  # AC#11: no push unless asked
+
+
+def test_cli_local_dirty_tree_refuses_before_any_gate(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#5: uncommitted changes in the target tree -> non-zero, nothing merged,
+    # message names commit/stash, and NO gate runs.
+    from orchestrator import local_merge
+
+    fix, _sha = _local_fix_commit(local_repo, tmp_path)
+    # dirty the Director's main checkout
+    (local_repo / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[assignment]
+        AssertionError("no gate may run on a dirty tree")
+    )
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = local_merge.main(
+                ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+                 "--local", str(fix), "t1"],
+                env=env,
+            )
+    finally:
+        local_merge.gather_gates = orig
+    assert rc != 0
+    out = buf.getvalue()
+    assert "commit or stash" in out
+    # nothing merged
+    rc2 = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert rc2 != 0
+
+
+def test_cli_local_arg_rules(local_repo: Path, tmp_path: Path) -> None:
+    # AC#6: --local requires exactly one task and a non-empty <ref>.
+    from orchestrator.local_merge import main
+
+    env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+    base = ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw")]
+    with pytest.raises(SystemExit):  # zero tasks
+        main([*base, "--local", "someref"], env=env)
+    with pytest.raises(SystemExit):  # two tasks
+        main([*base, "--local", "someref", "a", "b"], env=env)
+    with pytest.raises(SystemExit):  # blank ref
+        main([*base, "--local", "   ", "t1"], env=env)
+    with pytest.raises(SystemExit):  # --local with no value at all
+        main([*base, "t1", "--local"], env=env)
+
+
+def test_cli_local_tripwire_still_fires_when_hub_reachable(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    # AC#7 (case 1): reachable hub + diverged hub main + --local -> still aborts (2).
+    from orchestrator import local_merge
+
+    fix, _sha = _local_fix_commit(local_repo, tmp_path)
+    # unauthorized write to hub main (same setup as the default tripwire test)
+    wt = tmp_path / "rogue"
+    bare = str(tmp_path / "remote.git")
+    _g("clone", bare, str(wt))
+    (wt / "rogue.txt").write_text("x\n", encoding="utf-8")
+    _g("-C", str(wt), "add", "-A")
+    _g("-C", str(wt), *_ID, "commit", "-m", "unauthorized main write")
+    _g("-C", str(wt), "push", "origin", "HEAD:main")
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[assignment]
+        AssertionError("tripwire must abort before any gate")
+    )
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--local", str(fix), "t1"],
+            env=env,
+            pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "TRIPWIRE" in out
+
+
+def test_cli_local_absent_remote_warns_and_judges(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    # AC#7 (case 2): an absent/unreachable branch remote warns and proceeds to
+    # judge - the mode is designed to run with no hub.
+    from orchestrator import local_merge
+
+    fix, sha = _local_fix_commit(local_repo, tmp_path)
+    captured: dict[str, object] = {}
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_local_gather(captured, blast=L2)
+    try:
+        # AGENT_BRANCH_REMOTE points at a remote that does not exist -> fetch fails
+        env = {
+            "AGENT_REPO_URL": "unused",
+            "AGENT_WORK_ROOT": str(tmp_path / "wr"),
+            "AGENT_BRANCH_REMOTE": "ghost",
+        }
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--local", str(fix), "t1"],
+            env=env,
+            ask=lambda p: False,
+            pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert "WARN" in out and "unreachable" in out
+    assert captured["sha"] == sha  # it still judged the local commit
+    assert rc == 0  # green -> merged
+
+
+def test_local_broken_digest_points_at_the_local_route() -> None:
+    # AC#9: a generic BROKEN digest carries the --local guidance AND the existing
+    # VPS-rerun line, so the digest no longer points only at an unbuilt path.
+    v = decide("t1", _gates(blast=L2, tests_passed=False))
+    assert "Re-run the task on the VPS" in v.digest  # existing line kept
+    assert "--local" in v.digest  # new local-fix route
+    assert "trusts the route" in v.digest  # trust framing stated
+
+
+def test_local_route_absent_from_infra_override_digest() -> None:
+    # AC#9 guard: the infra-override branch must NOT gain the --local advice (its
+    # re-run-cannot-help contract stays intact).
+    v = decide(
+        "t1",
+        _gates(blast=L3, infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",)),
+    )
+    assert "--local" not in v.digest
+    assert "Re-run the task on the VPS" not in v.digest
