@@ -31,7 +31,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
@@ -59,6 +59,7 @@ __all__ = [
     "decide",
     "merge_subject",
     "parse_merge_subject",
+    "render_advisory",
     "run_security_panel",
 ]
 
@@ -108,6 +109,10 @@ class MergeVerdict:
     kind: str = AUTO_MERGE  # AUTO_MERGE | RISK_DECISION | BROKEN
     reasons: tuple[str, ...] = ()
     digest: str = ""
+    # Judgment-gate findings (security panel / rw2) WAIVED by --advisory: empty
+    # unless the branch merged under advisory. A non-empty advisory on a merged
+    # verdict is the trigger to write the durable merge-advisory.md record.
+    advisory: tuple[str, ...] = ()
 
     @property
     def merged(self) -> bool:
@@ -124,26 +129,53 @@ def _security_blockers(gates: GateResults) -> list[str]:
 _L3_REASON = "sensitive surface (L3) - human risk decision required"
 
 
-def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[str]) -> str:
+def build_digest(
+    task_id: str,
+    gates: GateResults,
+    kind: str,
+    reasons: Sequence[str],
+    advisory: Sequence[str] = (),
+) -> str:
     """One-screen summary. For a RISK_DECISION it names what is sensitive and
     asks Y/N; for a BROKEN hold it diagnoses what failed, why, and what is
-    needed - and does NOT offer a merge (you fix broken code, not merge it)."""
+    needed - and does NOT offer a merge (you fix broken code, not merge it).
+
+    ``advisory`` (non-empty only on an --advisory RISK_DECISION) lists the
+    judgment-gate findings being WAIVED, so the Y/N prompt is honest: it never
+    claims "all gates passed" for a change the panel objected to."""
     lines = [f"# Merge hold: {task_id}  (blast {gates.blast}, {kind})", ""]
 
     if kind == RISK_DECISION:
         lines += ["## Sensitive surface touched", ""]
         lines += [f"- `{p}`" for p in gates.sensitive_files] or ["- (sensitive path)"]
-        lines += [
-            "",
-            "All correctness/security gates passed; this only needs your risk",
-            "call because it touches a policy-sensitive surface.",
-            "",
-            "## Your decision",
-            "",
-            f"Merge `{task_id}` into main? (y/N) - you decide on this",
-            "summary, not by reading the diff.",
-            "",
-        ]
+        if advisory:
+            lines += ["", "## Waived judgment-gate findings (--advisory)", ""]
+            lines += [f"- {r}" for r in advisory]
+            lines += [
+                "",
+                "The deterministic gates passed, but the security panel / rw2",
+                "flagged the above and they are being WAIVED by --advisory: this",
+                "is a risk call on a change that is NOT fully verified. The waived",
+                "findings are recorded durably in merge-advisory.md.",
+                "",
+                "## Your decision",
+                "",
+                f"Merge `{task_id}` into main under --advisory? (y/N) - you decide",
+                "on this summary, not by reading the diff.",
+                "",
+            ]
+        else:
+            lines += [
+                "",
+                "All correctness/security gates passed; this only needs your risk",
+                "call because it touches a policy-sensitive surface.",
+                "",
+                "## Your decision",
+                "",
+                f"Merge `{task_id}` into main? (y/N) - you decide on this",
+                "summary, not by reading the diff.",
+                "",
+            ]
         return "\n".join(lines)
 
     # BROKEN: diagnostic, no merge offer
@@ -190,19 +222,31 @@ def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[
     return "\n".join(lines)
 
 
-def decide(task_id: str, gates: GateResults) -> MergeVerdict:
-    """Pure decision (trust-model S8). merge | hold(risk_decision|broken)."""
-    broken: list[str] = []
+def decide(
+    task_id: str, gates: GateResults, *, advisory_mode: bool = False
+) -> MergeVerdict:
+    """Pure decision (trust-model S8). merge | hold(risk_decision|broken).
 
-    # deterministic hard gates - any red is BROKEN
+    ``advisory_mode`` (--advisory) waives ONLY the judgment gates (the security
+    panel and the rw2 re-run): when a judgment finding is the sole thing keeping
+    a branch from merging, the branch merges and the waived findings are carried
+    on the verdict's ``advisory`` tuple for a durable record. The deterministic
+    gates (policy recompute, local test suite, diff-coverage, secret/FS scan,
+    and the infra-override guard) are NEVER waivable - any red one still forces
+    a BROKEN hold, even under advisory. ``decide`` stays pure: it writes nothing.
+    """
+    deterministic: list[str] = []
+    judgment: list[str] = []
+
+    # deterministic hard gates - any red is BROKEN and can NEVER be waived
     if not gates.policy_ok:
-        broken.append(f"policy recompute failed/mismatch: {gates.policy_reason}")
+        deterministic.append(f"policy recompute failed/mismatch: {gates.policy_reason}")
     if not gates.tests_passed:
-        broken.append("local full test suite is red")
+        deterministic.append("local full test suite is red")
     if not gates.coverage_ok:
-        broken.append(f"diff-coverage below threshold: {gates.coverage_detail}")
+        deterministic.append(f"diff-coverage below threshold: {gates.coverage_detail}")
     if gates.scan_findings:
-        broken.append(
+        deterministic.append(
             f"security scan flagged {len(gates.scan_findings)} item(s): "
             + "; ".join(gates.scan_findings[:5])
         )
@@ -210,35 +254,69 @@ def decide(task_id: str, gates: GateResults) -> MergeVerdict:
     # It still blocks: the alternative is merging a gate-infra change no gate
     # ever ran, or blaming the branch for a red suite the restore caused.
     if gates.infra_overridden:
-        broken.append(
+        deterministic.append(
             "gate infra changed by this branch was NOT verified - the gate ran "
             "trusted main's copy of: " + ", ".join(gates.infra_overridden)
         )
-    # judgment gates - a blocker is BROKEN (needs a fix, not a risk call)
+    # judgment gates - waivable under --advisory (recorded, never silently lost)
     if sec := _security_blockers(gates):
-        broken.append(f"security panel blocker(s): {'; '.join(sec[:5])}")
+        judgment.append(f"security panel blocker(s): {'; '.join(sec[:5])}")
     if gates.rw2 is not None and gates.rw2.blockers:
-        broken.append(
+        judgment.append(
             "rw2 blocker(s): " + "; ".join(f.summary for f in gates.rw2.blockers[:5])
         )
 
-    if broken:
+    # The blocking set is the deterministic reasons ALWAYS, plus the judgment
+    # reasons only when advisory is off. --advisory may remove judgment from
+    # blocking; it may never touch deterministic (the trust invariant).
+    blocking = deterministic + ([] if advisory_mode else judgment)
+    if blocking:
         # No _L3_REASON here: this branch returns before the L3 y/N prompt can
         # ever be offered, so naming a "human risk decision" would advertise a
         # decision the Director is not being given. The blast level still
         # reaches them through the digest header.
-        reasons = tuple(broken)
+        reasons = tuple(blocking)
         return MergeVerdict(
             task_id, "hold", BROKEN, reasons,
             build_digest(task_id, gates, BROKEN, reasons),
         )
+    # From here the branch merges: any judgment findings are waived (only
+    # non-empty in advisory mode) and ride along as the advisory record.
+    advisory = tuple(judgment) if advisory_mode else ()
     if gates.blast == L3:
         reasons = (_L3_REASON,)
         return MergeVerdict(
             task_id, "hold", RISK_DECISION, reasons,
-            build_digest(task_id, gates, RISK_DECISION, reasons),
+            build_digest(task_id, gates, RISK_DECISION, reasons, advisory),
+            advisory=advisory,
         )
-    return MergeVerdict(task_id, "merge", AUTO_MERGE)
+    return MergeVerdict(task_id, "merge", AUTO_MERGE, advisory=advisory)
+
+
+def render_advisory(task_id: str, advisory: Sequence[str]) -> str:
+    """The durable record of the judgment-gate findings an --advisory merge
+    WAIVED. Written to .laddy/tasks/<task>/merge-advisory.md and committed into
+    local main so it survives deletion of the task branch (for later cleanup).
+
+    Honest labeling (constraint 5): this is NOT a clean bill of health. The
+    deterministic gates passed, but the security panel / rw2 flagged the
+    findings below and they were waived by an explicit --advisory merge - the
+    file says so plainly so it is never mistaken for a fully-verified merge."""
+    lines = [
+        f"# Advisory merge: {task_id}",
+        "",
+        "This branch was merged under `--advisory`. The deterministic gates",
+        "(policy recompute, local test suite, diff-coverage, secret/FS scan, and",
+        "the infra-override guard) all passed, but the JUDGMENT gates below were",
+        "WAIVED, not cleared. This is NOT a fully-verified merge: the findings",
+        "were recorded and the branch merged anyway, for later cleanup.",
+        "",
+        "## Waived judgment-gate findings (security panel / rw2)",
+        "",
+    ]
+    lines += [f"- {r}" for r in advisory] or ["- (none recorded)"]
+    lines += [""]
+    return "\n".join(lines)
 
 
 # --- security panel ----------------------------------------------------------
@@ -326,6 +404,17 @@ class LocalMergeEngine:
     # change into local main - contradicting its "dry run" contract (and the
     # "merge into local main only on request" rule).
     dry_run: bool = field(default=False)
+    # --advisory: waive the judgment gates (security panel + rw2), recording
+    # their findings on the verdict instead of holding BROKEN. Deterministic
+    # gates still fail closed (decide() enforces this - the engine only forwards
+    # the flag). Default off: behavior is byte-identical to today without it.
+    advisory_mode: bool = field(default=False)
+    # Called AFTER a successful merge whose verdict carries a non-empty advisory,
+    # on BOTH the auto-merge and the RISK_DECISION->confirmed paths - the durable
+    # write of merge-advisory.md lives here (injected), never in the pure
+    # decide(). Default is a no-op so tests/fakes that ignore advisory are
+    # unaffected.
+    record_advisory: Callable[[MergeVerdict], None] = field(default=lambda v: None)
 
     def run(self) -> list[MergeVerdict]:
         """Process every ready branch sequentially.
@@ -342,10 +431,13 @@ class LocalMergeEngine:
         results: list[MergeVerdict] = []
         for task_id in self.list_ready():
             gates = self.verify_one(task_id)
-            verdict = decide(task_id, gates)
+            verdict = decide(task_id, gates, advisory_mode=self.advisory_mode)
             if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
                 if self.confirm(verdict):
-                    verdict = MergeVerdict(task_id, "merge", RISK_DECISION)
+                    # replace() (not a fresh 3-arg construct) so verdict.advisory
+                    # survives the L3 confirm - else an advisory L3 merge would
+                    # silently drop its record (AC5). kind stays RISK_DECISION.
+                    verdict = replace(verdict, decision="merge")
             if verdict.merged and self.dry_run:
                 # dry run: record what WOULD auto-merge, but touch nothing.
                 verdict = MergeVerdict(
@@ -367,6 +459,12 @@ class LocalMergeEngine:
                         f"# Merge hold: {task_id}\n\nBranch no longer applies "
                         "cleanly to main. Re-run the task on the VPS.\n",
                     )
+                elif verdict.advisory:
+                    # Merge landed AND judgment gates were waived: write the
+                    # durable record. On main after merge_branch, so it commits
+                    # to main. Fires on both merge paths (keyed on the verdict,
+                    # not on which branch above produced it).
+                    self.record_advisory(verdict)
             self.on_verdict(verdict)
             results.append(verdict)
         return results
@@ -882,6 +980,14 @@ def main(
         help="judge a locally-committed <REF> (sha/branch/worktree path) of ONE "
         "task with the full gate, no fetch - the Director-authored fix path",
     )
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help="waive the JUDGMENT gates (security panel + rw2): record their "
+        "findings to merge-advisory.md (committed into local main) and merge "
+        "anyway. Deterministic gates (policy/tests/coverage/scan/infra) still "
+        "fail closed. Opt-in; off by default.",
+    )
     parser.add_argument("task", nargs="*", help="task ids; default = all ready")
     args = parser.parse_args(argv)
 
@@ -947,10 +1053,38 @@ def main(
     )
     merged: list[str] = []
 
+    def _record_advisory(v: MergeVerdict) -> None:
+        # Post-merge, on the trusted machine: the repo is on main (merge_branch
+        # checked it out), so this file + follow-up commit land ON main and
+        # survive task-branch deletion (constraint 3). Add ONLY the one path
+        # (never `add -A`), so an unrelated dirty tree is not swept into main.
+        art = TaskArtifacts(repo, v.task_id)
+        rel = f"{TARGET_DIR_NAME}/tasks/{v.task_id}/merge-advisory.md"
+        art.write_text("merge-advisory.md", render_advisory(v.task_id, v.advisory))
+        _git(repo, "add", "--", rel)
+        _git(
+            repo,
+            "-c", "user.name=myapp-merge",
+            "-c", "user.email=merge@myapp.local",
+            "commit", "-m", f"advisory record: {v.task_id} (judgment gates waived)",
+        )
+
     def _report(v: MergeVerdict) -> None:
         if v.merged:
             merged.append(v.task_id)
-            print(f"[merge] {v.task_id}: MERGED into local main")
+            if v.advisory:
+                # Honest labeling (constraint 5): an advisory merge is visibly
+                # distinct and never presented as a fully-verified merge.
+                print(
+                    f"[merge*] {v.task_id}: MERGED under --advisory - judgment "
+                    "gates WAIVED, NOT fully verified"
+                )
+                print(
+                    f"         waived findings recorded in {TARGET_DIR_NAME}/tasks/"
+                    f"{v.task_id}/merge-advisory.md"
+                )
+            else:
+                print(f"[merge] {v.task_id}: MERGED into local main")
             return
         art = TaskArtifacts(repo, v.task_id)
         art.write_text("merge-hold.md", v.digest)
@@ -962,6 +1096,12 @@ def main(
             print(f"[dry-run] {v.task_id}: WOULD auto-merge (nothing changed)")
         else:
             print(f"[hold]  {v.task_id}: declined / not confirmed")
+
+    if args.advisory:
+        print("[ADVISORY] --advisory is ON. The security panel and rw2 judgment")
+        print("gates are WAIVED: their findings are recorded to merge-advisory.md")
+        print("(committed into local main) and the branch merges anyway. The")
+        print("deterministic gates (policy/tests/coverage/scan/infra) STILL block.")
 
     engine = LocalMergeEngine(
         # --local processes only the one named task (discovery bypassed): the
@@ -986,6 +1126,8 @@ def main(
         on_verdict=_report,
         confirm=_confirm,
         dry_run=args.no_input,
+        advisory_mode=args.advisory,
+        record_advisory=_record_advisory,
     )
     results = engine.run()
     held = [v for v in results if not v.merged]

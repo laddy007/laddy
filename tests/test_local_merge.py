@@ -8,6 +8,7 @@ from orchestrator import TARGET_DIR_NAME
 from orchestrator.local_merge import (
     GateResults,
     LocalMergeEngine,
+    MergeVerdict,
     decide,
     run_security_panel,
 )
@@ -192,6 +193,216 @@ def test_rw2_blocker_holds() -> None:
     v = decide("t1", _gates(rw2_blockers=[blocker(summary="drops rows")]))
     assert v.decision == "hold"
     assert any("rw2 blocker" in r for r in v.reasons)
+
+
+# --- --advisory: waive judgment gates, record + merge ------------------------
+
+
+def test_advisory_waives_security_panel_blocker() -> None:
+    # AC1: a security-panel blocker + everything else green merges under
+    # --advisory (recording the waived finding); OFF it is a BROKEN hold.
+    from orchestrator.local_merge import AUTO_MERGE, BROKEN
+
+    gates = _gates(
+        blast=L2,
+        security_blockers=[blocker(category="security", summary="IDOR on order")],
+    )
+    off = decide("t1", gates)
+    assert off.decision == "hold" and off.kind == BROKEN
+    assert off.advisory == ()
+
+    on = decide("t1", gates, advisory_mode=True)
+    assert on.decision == "merge" and on.kind == AUTO_MERGE
+    assert any("IDOR on order" in a for a in on.advisory)
+    assert any("security panel blocker" in a for a in on.advisory)
+
+
+def test_advisory_waives_rw2_blocker() -> None:
+    # AC1 (the other judgment gate): rw2 blockers are equally waivable.
+    on = decide("t1", _gates(blast=L2, rw2_blockers=[blocker(summary="drops rows")]),
+                advisory_mode=True)
+    assert on.decision == "merge"
+    assert any("rw2 blocker" in a for a in on.advisory)
+    assert any("drops rows" in a for a in on.advisory)
+
+
+def test_advisory_never_waives_deterministic_gates() -> None:
+    # AC2: the deterministic gates fail closed even under --advisory, and no
+    # deterministic reason ever leaks into the advisory record.
+    from orchestrator.local_merge import BROKEN
+
+    cases = {
+        "tests": _gates(tests_passed=False),
+        "coverage": _gates(coverage_ok=False),
+        "scan": _gates(scan_findings=("gitleaks: aws key in config.py",)),
+        "policy": _gates(policy_ok=False),
+        "infra": _gates(infra_overridden=(f"{TARGET_DIR_NAME}/security/semgrep.yml",)),
+    }
+    for name, gates in cases.items():
+        v = decide("t1", gates, advisory_mode=True)
+        assert v.decision == "hold" and v.kind == BROKEN, name
+        assert v.advisory == (), name
+
+
+def test_advisory_with_a_deterministic_failure_records_no_advisory() -> None:
+    # A deterministic red + a judgment finding under --advisory is STILL BROKEN,
+    # and the judgment finding is NOT promoted to advisory - nothing merged, so
+    # there is nothing to record.
+    from orchestrator.local_merge import BROKEN
+
+    v = decide(
+        "t1",
+        _gates(
+            tests_passed=False,
+            security_blockers=[blocker(category="security", summary="IDOR")],
+        ),
+        advisory_mode=True,
+    )
+    assert v.decision == "hold" and v.kind == BROKEN
+    assert v.advisory == ()
+
+
+def test_default_and_off_verdicts_carry_no_advisory() -> None:
+    # AC (opt-in, default off): the advisory field is empty unless a branch
+    # actually merged under --advisory.
+    assert decide("t1", _gates(blast=L2)).advisory == ()
+    assert decide("t1", _gates(blast=L2), advisory_mode=True).advisory == ()  # nothing to waive
+    assert decide(
+        "t1",
+        _gates(security_blockers=[blocker(category="security", summary="x")]),
+    ).advisory == ()  # off: BROKEN, no advisory
+
+
+def test_l3_advisory_holds_risk_decision_with_honest_digest() -> None:
+    # AC5 (decide level): an L3 branch whose only finding is a judgment finding,
+    # under --advisory, still holds for the human RISK_DECISION - but carries the
+    # waived finding, and the Y/N digest names it honestly (never "all passed").
+    from orchestrator.local_merge import RISK_DECISION
+
+    v = decide(
+        "t1",
+        _gates(
+            blast=L3,
+            sensitive_files=("myapp/models.py",),
+            security_blockers=[blocker(category="security", summary="IDOR on order")],
+        ),
+        advisory_mode=True,
+    )
+    assert v.decision == "hold" and v.kind == RISK_DECISION
+    assert any("IDOR on order" in a for a in v.advisory)
+    assert "y/N" in v.digest
+    assert "WAIVED" in v.digest
+    assert "IDOR on order" in v.digest
+    assert "All correctness/security gates passed" not in v.digest
+
+
+def test_l3_advisory_with_no_findings_keeps_the_plain_risk_digest() -> None:
+    # A clean L3 under --advisory has nothing to waive: it must read exactly like
+    # today's RISK_DECISION (no false "waived findings" section).
+    v = decide("t1", _gates(blast=L3, sensitive_files=("myapp/models.py",)),
+               advisory_mode=True)
+    assert v.advisory == ()
+    assert "All correctness/security gates passed" in v.digest
+    assert "WAIVED" not in v.digest
+
+
+def test_render_advisory_labels_honestly_and_lists_findings() -> None:
+    from orchestrator.local_merge import render_advisory
+
+    md = render_advisory("t1", ("security panel blocker(s): IDOR on order",))
+    assert "t1" in md
+    assert "IDOR on order" in md
+    assert "WAIVED" in md
+    assert "NOT a fully-verified merge" in md
+
+
+def test_render_advisory_empty_is_still_honest() -> None:
+    from orchestrator.local_merge import render_advisory
+
+    assert "none recorded" in render_advisory("t1", ())
+
+
+# --- engine: advisory records on both merge paths, never on a hold -----------
+
+
+def _sec_blocker_gates(blast: str = L2, summary: str = "IDOR on order") -> GateResults:
+    return _gates(
+        blast=blast,
+        security_blockers=[blocker(category="security", summary=summary)],
+    )
+
+
+def test_engine_advisory_merge_records_advisory() -> None:
+    # AC (engine, auto-merge path): an L2 advisory merge invokes record_advisory
+    # with the merged verdict; the merge still happens.
+    recorded: list[MergeVerdict] = []
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _sec_blocker_gates(blast=L2),
+        merge_one=lambda t, sha: (merged.append(t) or True),
+        advisory_mode=True,
+        record_advisory=lambda v: recorded.append(v),
+    )
+    [v] = engine.run()
+    assert v.decision == "merge"
+    assert merged == ["a"]
+    assert len(recorded) == 1 and recorded[0].advisory
+
+
+def test_engine_non_advisory_security_blocker_holds_records_nothing() -> None:
+    # AC4 (regression): without advisory a security blocker holds BROKEN and
+    # record_advisory is NEVER consulted (nothing to record).
+    from orchestrator.local_merge import BROKEN
+
+    recorded: list[MergeVerdict] = []
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _sec_blocker_gates(blast=L2),
+        merge_one=lambda t, sha: (merged.append(t) or True),
+        advisory_mode=False,
+        record_advisory=lambda v: recorded.append(v),
+    )
+    [v] = engine.run()
+    assert v.decision == "hold" and v.kind == BROKEN
+    assert merged == [] and recorded == []
+
+
+def test_engine_advisory_green_merge_records_nothing() -> None:
+    # advisory ON but nothing to waive: a plain green merge, no record written.
+    recorded: list[MergeVerdict] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _gates(blast=L2),
+        merge_one=lambda t, sha: True,
+        advisory_mode=True,
+        record_advisory=lambda v: recorded.append(v),
+    )
+    [v] = engine.run()
+    assert v.decision == "merge" and v.advisory == ()
+    assert recorded == []
+
+
+def test_engine_l3_advisory_confirm_preserves_and_records_advisory() -> None:
+    # AC5 (the trap): an L3 advisory branch goes through the RISK_DECISION Y/N;
+    # on confirm the verdict is turned into a merge WITHOUT dropping advisory,
+    # and record_advisory fires on this (non-auto) merge path too.
+    from orchestrator.local_merge import RISK_DECISION
+
+    recorded: list[MergeVerdict] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["s"],
+        verify_one=lambda t: _sec_blocker_gates(blast=L3),
+        merge_one=lambda t, sha: True,
+        confirm=lambda v: True,  # Director approves the advisory L3 merge
+        advisory_mode=True,
+        record_advisory=lambda v: recorded.append(v),
+    )
+    [v] = engine.run()
+    assert v.decision == "merge" and v.kind == RISK_DECISION
+    assert v.advisory  # survived the confirm replace() - AC5 guard
+    assert len(recorded) == 1 and recorded[0].advisory
 
 
 # --- security panel ----------------------------------------------------------
@@ -657,6 +868,109 @@ def test_cli_l3_confirmed_merges_and_pushes_and_deletes(local_repo: Path, tmp_pa
     assert pushed == [["t1"]]  # push+cleanup called with the merged task
     # the sensitive change is now in local main
     assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/models.py") == ""
+
+
+def _sec_blocker_verdicts(summary: str = "IDOR on order") -> tuple[object, ...]:
+    return (
+        parse_verdict(
+            verdict_json("CHANGES_REQUESTED", [blocker(category="security", summary=summary)])
+        ),
+    )
+
+
+def test_cli_advisory_commits_merge_advisory_into_main(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC3: an --advisory merge writes .laddy/tasks/t1/merge-advisory.md AND
+    # commits it into local main - visible from the committed main tree, which
+    # never needed the task branch (git show main:<path> reads the ref's tree).
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # L2 (api_helper.py)
+    from orchestrator import local_merge
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2, security_verdicts=_sec_blocker_verdicts())
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--advisory", "t1"],
+            env=env,
+            ask=lambda p: False,  # do not push
+            pusher=lambda repo, tasks: None,
+        )
+    finally:
+        local_merge.gather_gates = orig
+    assert rc == 0  # merged under advisory, nothing held
+    # the api change landed AND the advisory record is committed on main
+    assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
+    rel = f"{TARGET_DIR_NAME}/tasks/t1/merge-advisory.md"
+    content = _g("-C", str(local_repo), "show", f"main:{rel}")
+    assert "IDOR on order" in content
+    assert "WAIVED" in content
+
+
+def test_cli_no_advisory_security_blocker_holds_writes_no_record(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC4: without --advisory the SAME security blocker holds BROKEN and no
+    # merge-advisory.md is written to the tree or committed to main.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    from orchestrator import local_merge
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2, security_verdicts=_sec_blocker_verdicts())
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"), "t1"],
+            env=env,
+            ask=lambda p: False,
+            pusher=lambda repo, tasks: None,
+        )
+    finally:
+        local_merge.gather_gates = orig
+    assert rc == 1  # held BROKEN
+    rel = f"{TARGET_DIR_NAME}/tasks/t1/merge-advisory.md"
+    committed = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", f"main:{rel}"],
+        capture_output=True,
+    ).returncode
+    assert committed != 0  # nothing committed to main
+    assert not (local_repo / rel).exists()  # nothing written to the tree either
+
+
+def test_cli_l3_advisory_confirmed_records_on_main(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC5 (CLI): an L3 branch whose only finding is a judgment finding, under
+    # --advisory + a confirmed risk decision, merges AND records the waived
+    # findings on main - the record is written on the confirm path, not only the
+    # auto-merge path.
+    _push_ready_branch(local_repo, tmp_path, sensitive=True)  # L3 (models.py)
+    from orchestrator import local_merge
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L3, security_verdicts=_sec_blocker_verdicts())
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--advisory", "t1"],
+            env=env,
+            confirm=lambda v: True,  # Director approves the advisory L3 merge
+            ask=lambda p: False,
+            pusher=lambda repo, tasks: None,
+        )
+    finally:
+        local_merge.gather_gates = orig
+    assert rc == 0
+    # the sensitive change landed AND the advisory record is committed on main
+    assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/models.py") == ""
+    content = _g(
+        "-C", str(local_repo), "show",
+        f"main:{TARGET_DIR_NAME}/tasks/t1/merge-advisory.md",
+    )
+    assert "IDOR on order" in content
 
 
 def test_engine_risk_decision_confirmed_merges() -> None:
