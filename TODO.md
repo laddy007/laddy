@@ -16,3 +16,9 @@
 - kickoff/fullrun interactive gates die on a dropped/closed terminal - auto-wrap in tmux. `scripts/kickoff.sh` runs the `clarify` and `design` (approve) gates in the FOREGROUND - only the loop is `nohup`'d - so an SSH drop (`client_loop: send disconnect: Broken pipe`) kills them before the loop ever detaches, and the task silently never starts. Seen live on `fullrun-s0`: policy classified it high-risk despite `risk: medium` frontmatter (it edits `orchestrator/run.py`), the design gate engaged, ran the explorer (~4 min), then blocked on "Approve this approach?" while SSH was already gone -> design exited on EOF -> kickoff bailed "not detaching" -> no loop, no log, no lock. Fix: a shared `scripts/lib/tmux_wrap.sh` self-wrap that both `kickoff.sh` (VPS) and the future `fullrun.sh` (local driver, fullrun slice S3) source at the very top: `exec tmux new-session -A -s <name> -- "$0" "$@"` (attach-or-create) only when interactive (`$TMUX` unset, `[ -t 1 ]`, tmux present), with a `*_NO_TMUX` escape hatch for CI/headless. The `[ -t 1 ]` guard self-corrects at the boundary: when `fullrun` drives `kickoff` over SSH (no TTY) the kickoff wrap is a no-op, so the two never nest. Wire the `fullrun` half as an acceptance criterion in the fullrun S3 (driver) slice so it is built in, not bolted on afterwards.
 
 odlogovat z roota
+
+přidat nějaké pořadí tasků (čísla v názvu?)
+až dojedu tab local claude - zjistit jak je to s mcp (je nová spec?)
+dva specy merge-hold.md
+!     0local creating spec openhabds
+
