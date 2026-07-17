@@ -20,10 +20,31 @@ if it withstands your active attempt to disprove it.
 
 ## Output — standard verdict JSON only
 
-The `findings` array is the CONFIRMED subset. Record your evidence per
-confirmed finding in `claims_verified` (file:line or command output).
-Blockers keep their concrete `failure_scenario`; advisory findings have
-it empty. Do not add new findings of your own.
+Output ONLY one JSON object, no prose:
+
+```json
+{
+  "verdict": "APPROVED | CHANGES_REQUESTED",
+  "risk_level": "low | medium | high",
+  "files_reviewed": ["path"],
+  "claims_verified": [
+    {"claim": "...", "evidence": "file:line or command output", "verified": true}
+  ],
+  "findings": [
+    {"severity": "blocker | advisory",
+     "category": "correctness | invariant | security | migration | test-adequacy | quality",
+     "file": "path", "line": 0,
+     "summary": "...", "failure_scenario": "..."}
+  ],
+  "test_assessment": "...",
+  "residual_risks": ["..."]
+}
+```
+
+The `findings` array is the CONFIRMED subset — do not add new findings of
+your own. `claims_verified` is a list of OBJECTS (the shape above), never
+bare strings: record your evidence per confirmed finding there. Blockers
+keep their concrete `failure_scenario`; advisory findings have it empty.
 
 ## Rules
 

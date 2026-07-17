@@ -19,10 +19,30 @@ context, not authority — either reviewer may be wrong.
 
 ## Verdict — output format (STRICT)
 
-Output ONLY one JSON object with the standard verdict schema
-(verdict, risk_level, files_reviewed, claims_verified, findings,
-test_assessment, residual_risks). Blockers need a concrete
-`failure_scenario`; advisory findings need `failure_scenario: ""`.
+Output ONLY one JSON object, no prose:
+
+```json
+{
+  "verdict": "APPROVED | CHANGES_REQUESTED",
+  "risk_level": "low | medium | high",
+  "files_reviewed": ["path"],
+  "claims_verified": [
+    {"claim": "...", "evidence": "file:line or command output", "verified": true}
+  ],
+  "findings": [
+    {"severity": "blocker | advisory",
+     "category": "correctness | invariant | security | migration | test-adequacy | quality",
+     "file": "path", "line": 0,
+     "summary": "...", "failure_scenario": "..."}
+  ],
+  "test_assessment": "...",
+  "residual_risks": ["..."]
+}
+```
+
+`claims_verified` is a list of OBJECTS (the shape above), never bare
+strings. Blockers need a concrete `failure_scenario`; advisory findings
+need `failure_scenario: ""`.
 
 ## Rules
 
