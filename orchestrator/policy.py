@@ -143,17 +143,27 @@ def nondraft_report_specs(
 # READ); the binding gate's exit-code authority (testgate.py) already closes the
 # forge-the-result vector.
 
-# path-like tokens in free spec text: bare or backtick-quoted paths with a "/"
-_PATH_TOKEN_RE = re.compile(r"[\w.\-*/]*/[\w.\-*/]+")
+# Path-like tokens in free spec text: bare or backtick-quoted paths with a
+# "/", plus SLASHLESS dotted filenames (pyproject.toml, .env, CLAUDE.md) so a
+# bare sensitive filename cannot dodge the sensitive-glob check. The bare
+# alternatives stay filename-shaped - a dot INSIDE the token, never sentence
+# punctuation - so prose ("etc.", "e.g.", "3.11") yields only tokens that no
+# sensitive glob matches.
+_PATH_TOKEN_RE = re.compile(
+    r"[\w.\-*/]*/[\w.\-*/]+"  # contains a "/"
+    r"|\.?[\w\-*]+(?:\.[\w\-*]+)+"  # dotted filename (pyproject.toml, CLAUDE.md)
+    r"|\.[\w\-*]+"  # leading-dot filename (.env)
+)
 
 
 def spec_is_high_risk(
     policy: TargetPolicy, spec_text: str, risk: str | None
 ) -> bool:
-    """A task is high-risk if its spec declares ``risk: high`` or references a
-    path matching a sensitive glob (the same list merge-decision applies to
+    """A task is high-risk if its spec declares ``risk: high`` (any unknown
+    declared level fails safe to high via :func:`normalize_risk`) or references
+    a path matching a sensitive glob (the same list merge-decision applies to
     changed files, so there is one definition of 'sensitive')."""
-    if (risk or "").strip().lower() == "high":
+    if normalize_risk(risk) == "high":
         return True
     globs = policy.all_sensitive_globs
     for token in _PATH_TOKEN_RE.findall(spec_text):
@@ -163,6 +173,22 @@ def spec_is_high_risk(
 
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def normalize_risk(declared: str | None) -> str:
+    """Fold a DECLARED risk level onto the RISK_ORDER enum (single home, M8).
+
+    Case/whitespace variants fold to their enum value; any other non-empty
+    level ("critical", junk) fails SAFE to "high" - consumers compare the
+    result against enum literals, so an out-of-enum string must never leak
+    past this boundary (it used to rank as high yet dodge every ``== "high"``
+    check). An absent declaration (None/empty) is "low": absence is the
+    callers' legitimate default, not a malformed value.
+    """
+    level = (declared or "").strip().lower()
+    if not level:
+        return "low"
+    return level if level in RISK_ORDER else "high"
 
 # Mechanical size thresholds for computed risk (S13: max(declared, computed)).
 _MEDIUM_FILES = 15
@@ -189,7 +215,10 @@ def computed_risk(
 
 
 def effective_risk(declared: str, computed: str) -> str:
-    return declared if RISK_ORDER.get(declared, 2) >= RISK_ORDER.get(computed, 2) else computed
+    """max(declared, computed), both folded onto the enum first (M8): the
+    result is always a RISK_ORDER key, never a raw declared string."""
+    d, c = normalize_risk(declared), normalize_risk(computed)
+    return d if RISK_ORDER[d] >= RISK_ORDER[c] else c
 
 
 def user_visible(policy: TargetPolicy, changed_files: Sequence[str]) -> bool:

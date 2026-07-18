@@ -47,6 +47,7 @@ from orchestrator.policy import (
     MergeDecision,
     merge_decision,
     nondraft_report_specs,
+    normalize_risk,
     path_guard,
     report_only_decision,
     touches_invariant_tests,
@@ -238,15 +239,16 @@ def declared_risk_from_verdicts(artifacts: TaskArtifacts) -> str:
     Both the VPS decision and the off-VPS merge check derive declared risk
     this way - never from the (untrusted) merge-decision.json - so a
     fabricated decision cannot launder a reviewer-declared high risk.
-    Uses policy.RISK_ORDER; an unknown level is treated as high (fail
-    safe), matching policy.effective_risk's default.
+    Each raw level is folded onto the RISK_ORDER enum by
+    policy.normalize_risk (unknown -> high, fail safe; M8), so consumers
+    comparing against enum literals never see an out-of-enum string.
     """
     risk = "low"
     for name in (RW1_VERDICT, RW2_VERDICT):
         verdict = artifacts.read_json(name)
         if isinstance(verdict, dict):
-            level = str(verdict.get("risk_level", "low"))
-            if RISK_ORDER.get(level, 2) > RISK_ORDER.get(risk, 2):
+            level = normalize_risk(str(verdict.get("risk_level", "low")))
+            if RISK_ORDER[level] > RISK_ORDER[risk]:
                 risk = level
     return risk
 

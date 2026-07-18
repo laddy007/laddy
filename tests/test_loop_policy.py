@@ -8,10 +8,16 @@ from pathlib import Path
 import pytest
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.artifacts import MERGE_DECISION, STATE, TaskArtifacts
+from orchestrator.artifacts import (
+    MERGE_DECISION,
+    RW1_VERDICT,
+    RW2_VERDICT,
+    STATE,
+    TaskArtifacts,
+)
 from orchestrator.gitops import GitOps
 from orchestrator.handoff import NtfyNotifier
-from orchestrator.loop import Orchestrator
+from orchestrator.loop import Orchestrator, declared_risk_from_verdicts
 from tests.fakes import FakeRunner, FakeShell, blocker, verdict_json, write_policy_toml
 
 
@@ -154,6 +160,27 @@ def test_artifact_commits_do_not_invalidate_approvals(
     wt = orch.gitops.task_worktree("t1")
     # HEAD (with artifact commits) differs from the code SHA the gates keyed on
     assert orch.gitops.head_sha(wt) != orch.gitops.code_sha(wt, "t1")
+
+
+def test_declared_risk_from_verdicts_normalizes_out_of_enum_to_high(
+    tmp_path: Path,
+) -> None:
+    # M8: a raw out-of-enum risk_level ("CRITICAL", "HIGH") ranked as high but
+    # was RETURNED raw, so == "high" consumers (loop escalation, merge
+    # decision) never saw it. It must come back as the enum value "high".
+    art = TaskArtifacts(tmp_path, "t1")
+    art.write_json(RW1_VERDICT, {"risk_level": "CRITICAL"})
+    art.write_json(RW2_VERDICT, {"risk_level": "low"})
+    assert declared_risk_from_verdicts(art) == "high"
+
+
+def test_declared_risk_from_verdicts_takes_the_max_enum_level(
+    tmp_path: Path,
+) -> None:
+    art = TaskArtifacts(tmp_path, "t1")
+    art.write_json(RW1_VERDICT, {"risk_level": "medium"})
+    art.write_json(RW2_VERDICT, {"risk_level": "low"})
+    assert declared_risk_from_verdicts(art) == "medium"
 
 
 def test_cap_reached_writes_handback_and_notifies(

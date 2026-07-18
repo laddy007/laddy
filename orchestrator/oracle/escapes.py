@@ -82,6 +82,9 @@ def raise_oracle_escape(
         summary,
         detail=json.dumps(payload, ensure_ascii=False),
         needs_director=True,
+        # this wrapper IS the validated Director/oracle channel; raise_flag
+        # refuses an oracle-escape from any other caller (library boundary)
+        allow_oracle_escape=True,
     )
 
 

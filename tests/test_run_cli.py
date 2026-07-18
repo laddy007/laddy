@@ -776,7 +776,7 @@ def test_flag_resolve_oracle_escape_refused_at_loop_cli(
     from orchestrator.flags import ORACLE_ESCAPE, raise_flag
 
     fid = raise_flag(TaskArtifacts(wt, "t1"), ORACLE_ESCAPE, "esc",
-                     needs_director=True)
+                     needs_director=True, allow_oracle_escape=True)
     rc = main(["t1", "--phase", "flag", "--resolve", fid,
                "--resolution", "dismissed"], env=env, deps=_deps([]))
     assert rc == 2

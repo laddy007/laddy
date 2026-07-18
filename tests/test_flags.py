@@ -172,6 +172,27 @@ def test_raise_flag_rejects_bad_kind_and_empty_summary(tmp_path: Path) -> None:
     assert art.read_log() == []  # nothing written on rejection
 
 
+def test_raise_flag_refuses_oracle_escape_outside_director_channel(tmp_path: Path) -> None:
+    # LOW: the LIBRARY boundary must refuse a forged oracle-escape itself -
+    # argparse's LOOP_FLAG_KINDS choices only guard the CLI layer, and the
+    # system under measurement must never write to the measuring instrument's
+    # data series through a direct raise_flag call.
+    art = _art(tmp_path)
+    with pytest.raises(ValueError, match="oracle"):
+        raise_flag(art, ORACLE_ESCAPE, "forged escape")
+    assert art.read_log() == []  # nothing written on rejection
+
+
+def test_raise_flag_oracle_escape_via_director_channel(tmp_path: Path) -> None:
+    # the validated oracle channel (escapes.raise_oracle_escape) opts in
+    art = _art(tmp_path)
+    fid = raise_flag(
+        art, ORACLE_ESCAPE, "escape", needs_director=True, allow_oracle_escape=True
+    )
+    [flag] = derive_flags(art.read_log())
+    assert fid == "mytask#1" and flag.kind == ORACLE_ESCAPE
+
+
 def test_resolve_flag_open_writes_event_and_returns_true(tmp_path: Path) -> None:
     art = _art(tmp_path)
     fid = raise_flag(art, "question", "why?")
@@ -225,7 +246,9 @@ def test_resolve_flag_refuses_oracle_escape_outside_director_channel(tmp_path: P
     # escape ledger (derive_ledger skips dismissed) with no Director
     # adjudication - the default path must refuse, loudly.
     art = _art(tmp_path)
-    fid = raise_flag(art, ORACLE_ESCAPE, "escape", needs_director=True)
+    fid = raise_flag(
+        art, ORACLE_ESCAPE, "escape", needs_director=True, allow_oracle_escape=True
+    )
     with pytest.raises(ValueError, match="oracle"):
         resolve_flag(art, fid, resolution="dismissed")
     [flag] = derive_flags(art.read_log())
@@ -234,7 +257,9 @@ def test_resolve_flag_refuses_oracle_escape_outside_director_channel(tmp_path: P
 
 def test_resolve_flag_oracle_escape_via_director_channel(tmp_path: Path) -> None:
     art = _art(tmp_path)
-    fid = raise_flag(art, ORACLE_ESCAPE, "escape", needs_director=True)
+    fid = raise_flag(
+        art, ORACLE_ESCAPE, "escape", needs_director=True, allow_oracle_escape=True
+    )
     assert resolve_flag(
         art, fid, resolution="dismissed", allow_oracle_escape=True
     )

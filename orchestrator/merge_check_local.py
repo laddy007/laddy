@@ -118,7 +118,9 @@ def check_local_fix(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     if destructive := destructive_migrations(policy, changed, _read):
         reasons.append(f"destructive_migrations: {', '.join(destructive[:5])}")
     declared = declared_risk_from_verdicts(artifacts)
-    # Unknown levels count as high (fail safe), matching effective_risk.
+    # declared is folded onto the RISK_ORDER enum at its single home
+    # (declared_risk_from_verdicts -> policy.normalize_risk, unknown -> high);
+    # the .get default stays as a fail-safe backstop (M8).
     if RISK_ORDER.get(declared, 2) >= RISK_ORDER["high"]:
         reasons.append(f"high_risk: declared={declared}")
     if any(

@@ -235,6 +235,31 @@ def test_effective_risk_is_max() -> None:
     assert effective_risk("low", "low") == "low"
 
 
+def test_effective_risk_normalizes_out_of_enum_declared_to_high() -> None:
+    # M8: an out-of-enum declared risk was ORDERED as high (rank 2) but
+    # returned as the RAW string, and the only consumer compares == "high" -
+    # fail-safe inverted. It must come back as the enum value "high".
+    assert effective_risk("HIGH", "low") == "high"
+    assert effective_risk("critical", "low") == "high"
+    assert effective_risk("unknown-nonsense", "medium") == "high"
+    # an absent declaration is the caller's legitimate default, not junk
+    assert effective_risk("", "low") == "low"
+
+
+def test_merge_decision_stops_on_out_of_enum_declared_risk() -> None:
+    # M8 acceptance: declared "HIGH" / "critical" produce the high_risk stop.
+    for declared in ("HIGH", "critical"):
+        d = merge_decision(
+            changed_files=["a.py"],
+            diff_lines=5,
+            declared_risk=declared,
+            gates=_gates(),
+        )
+        assert d.decision == "stop_before_merge", declared
+        assert "high_risk" in d.reasons
+        assert d.risk_level == "high"
+
+
 def test_user_visible() -> None:
     assert user_visible(["frontend/src/App.tsx"]) is True
     assert user_visible(["apps/public/src/index.astro"]) is True
@@ -404,6 +429,15 @@ def test_spec_is_high_risk_by_front_matter():
     assert spec_is_high_risk("# t\nchange play SPA copy\n", "high") is True
 
 
+def test_spec_is_high_risk_by_out_of_enum_declared_risk():
+    # M8: an unknown declared level fails SAFE to high - "critical" must not
+    # slip past a literal == "high" comparison.
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", "HIGH") is True
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", "critical") is True
+    # absence stays a non-declaration, not junk
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", None) is False
+
+
 def test_spec_is_high_risk_by_sensitive_path_in_text():
     # orchestrator/run.py is a root-level engine surface post-split (spec
     # 2026-07-13 S3 step 0), not TARGET_DIR_NAME/orchestrator/run.py (dead).
@@ -420,6 +454,22 @@ def test_spec_is_high_risk_by_bare_sensitive_path():
     assert spec_is_high_risk(
         "Update orchestrator/run.py to add a phase.\n", None
     ) is True
+
+
+def test_spec_is_high_risk_by_slashless_sensitive_filename():
+    # LOW: a bare sensitive filename (no "/") must still hit the sensitive
+    # globs - naming pyproject.toml / .env / CLAUDE.md is the same surface
+    # whether or not the spec spells a directory prefix.
+    assert spec_is_high_risk("Bump the pinned deps in pyproject.toml\n", None) is True
+    assert spec_is_high_risk("Load settings from `.env` at startup.\n", None) is True
+    assert spec_is_high_risk("Refresh the CLAUDE.md agent rules.\n", None) is True
+
+
+def test_spec_is_high_risk_ignores_dotted_prose_tokens():
+    # calibration: dotted prose (abbreviations, versions, bare filenames that
+    # match no sensitive glob) must not explode into false positives.
+    body = "Target python 3.11, e.g. tweak games.py validation, etc.\n"
+    assert spec_is_high_risk(body, None) is False
 
 
 # --- blast-radius classification (trust-model doc S8) -------------------------

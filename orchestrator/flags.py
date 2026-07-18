@@ -134,6 +134,7 @@ def raise_flag(
     detail: str | None = None,
     round: int | None = None,
     needs_director: bool = False,
+    allow_oracle_escape: bool = False,
 ) -> str:
     """Append a ``flag`` event and return its assigned ``id``.
 
@@ -141,7 +142,18 @@ def raise_flag(
     already in the log - deterministic (no random/uuid) and resume-safe.
     The count-then-append runs under ``TaskArtifacts.log_lock`` so concurrent
     raises on the same task cannot collide on ``id``.
+
+    An oracle-escape is refused unless ``allow_oracle_escape`` (the validated
+    Director/oracle channel, ``oracle.escapes.raise_oracle_escape``): the
+    system under measurement must never write to the measuring instrument's
+    data series, and the CLI's narrower ``--kind`` choices only guard the
+    argparse layer - the library boundary enforces it itself.
     """
+    if kind == ORACLE_ESCAPE and not allow_oracle_escape:
+        raise ValueError(
+            f"{ORACLE_ESCAPE} is raised only through the validated oracle "
+            "channel (oracle.escapes.raise_oracle_escape), never directly"
+        )
     if kind not in FLAG_KINDS:
         raise ValueError(f"unknown flag kind {kind!r}; expected one of {FLAG_KINDS}")
     if not summary or not summary.strip():
