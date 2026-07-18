@@ -136,12 +136,22 @@ def nondraft_report_specs(
 # The glob LISTS are per-target (target_policy.TargetPolicy, from
 # <target>/.laddy/policy.toml); the engine-generic set (secrets, agent config,
 # supply chain, engine surfaces, gate infra, the policy file itself) and the
-# invariant tests are merged in by TargetPolicy.all_sensitive_globs. NOT
-# sensitive by design: pytest config (conftest.py / pytest.ini) - routing it to
-# L3 would drop the rw2 cross-vendor review (L2 only) for a summary-only human
-# gate, weaker for spotting a malicious collection hook (which needs the diff
-# READ); the binding gate's exit-code authority (testgate.py) already closes the
-# forge-the-result vector.
+# invariant tests are merged in by TargetPolicy.all_sensitive_globs.
+#
+# pytest config (conftest.py / pytest.ini / tox.ini / setup.cfg) IS sensitive
+# (ENGINE_SENSITIVE_GLOBS). An earlier design kept conftest.py at L2, reasoning
+# that "the binding gate's exit-code authority already closes the forge-the-
+# result vector" - that was WRONG (H-D2-1). The exit-code authority only guards
+# the tail's `exit $(( L || T || ... ))` ARITHMETIC; pytest's own exit code is
+# an INPUT to it, and a committed conftest.py `pytest_sessionfinish` hook that
+# sets `session.exitstatus = 0` forges that input from inside the container (the
+# suite ran, so real coverage.xml exists too). No pytest flag disables conftest
+# autoload, and restoring conftest from trusted main would break legit fixture
+# conftests - so the deterministic gate cannot distinguish a malicious hook from
+# a benign one. L3 IS the boundary: a config change never rides the L2 auto-
+# merge lane; a human reviews the collection-hook diff. The cost, taken
+# knowingly, is that this drops the rw2 cross-vendor READ of the diff for a
+# summary-only human gate.
 
 # Path-like tokens in free spec text: bare or backtick-quoted paths with a
 # "/", plus SLASHLESS dotted filenames (pyproject.toml, .env, CLAUDE.md) so a

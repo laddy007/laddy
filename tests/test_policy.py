@@ -509,14 +509,70 @@ def test_spec_files_are_never_l1_even_as_pure_markdown() -> None:
 
 
 def test_added_test_files_are_not_safe_by_construction() -> None:
-    from orchestrator.policy import L2
+    from orchestrator.policy import L2, L3
 
-    # FINDING 3: a test file is executable Python, not data. An added conftest.py
-    # can neutralize the gate via collection hooks, and every merged test then
-    # runs on the host at each `pytest -n auto`. So added tests are L2 (the
-    # agents review them cheaply), never L1 safe-by-construction.
+    # FINDING 3: a test file is executable Python, not data - every merged test
+    # runs on the host at each `pytest -n auto`. An added ordinary test is L2
+    # (the agents review it cheaply), never L1 safe-by-construction.
     assert classify_blast_radius(["tests/test_new.py"], {"tests/test_new.py": "A"}) == L2
-    assert classify_blast_radius(["tests/conftest.py"], {"tests/conftest.py": "A"}) == L2
+    # H-D2-1: conftest.py can neutralize the gate via a collection hook
+    # (pytest_sessionfinish -> exitstatus 0), so it is engine-sensitive -> L3, a
+    # strictly stronger lane than the old L2 (a human reviews the hook diff; it
+    # never auto-merges).
+    assert classify_blast_radius(["tests/conftest.py"], {"tests/conftest.py": "A"}) == L3
+
+
+def test_env_dot_config_files_are_sensitive() -> None:
+    # H-D7-1: env.local / env.vps (no leading dot, so `.env*` missed them) are
+    # `set -a; source`d on the trusted machine. They must classify L3 so an
+    # untracked-turned-tracked env.* never rides the L2 auto-merge lane. The
+    # only tracked matches are the harmless *.example files (also L3, fine).
+    from orchestrator.policy import L3
+
+    for path in ("env.local", "env.vps", "sub/env.local", "env.local.example"):
+        assert sensitive_paths([path]) == [path], path
+        assert classify_blast_radius([path]) == L3, path
+
+
+def test_pytest_and_scanner_config_files_are_sensitive() -> None:
+    # H-D2-1/2/3: config auto-discovered by a tool the gate runs (pytest,
+    # semgrep, gitleaks). Each escaped the sensitive set and rode L2; a branch
+    # could forge a gate step green through it. Classify L3 so a human sees it.
+    from orchestrator.policy import L3
+
+    for path in (
+        "conftest.py",
+        "tests/conftest.py",
+        "deep/nested/conftest.py",
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "src/setup.cfg",
+        ".semgrepignore",
+        ".semgrep/rules.yml",
+        ".gitleaks.toml",
+        ".gitleaksignore",
+    ):
+        assert sensitive_paths([path]) == [path], path
+        assert classify_blast_radius([path]) == L3, path
+
+
+def test_conftest_sessionfinish_forge_is_closed_by_l3_classification() -> None:
+    # H-D2-1 acceptance: a committed `tests/conftest.py` with a
+    # `pytest_sessionfinish` hook forcing `session.exitstatus = 0` forges a green
+    # binding gate (real coverage.xml, container exit 0). The deterministic gate
+    # cannot tell that hook from a benign conftest (no flag disables conftest
+    # autoload). The close is CLASSIFICATION: the diff carries conftest.py, which
+    # is engine-sensitive, so the merge routes L3 and never auto-merges - a human
+    # reviews the collection-hook diff before it can land.
+    from orchestrator.policy import L2, L3
+
+    diff = ["myapp/api/routers/games.py", "tests/conftest.py"]
+    # without conftest the same product change would be ordinary L2 (auto-merge);
+    # the presence of conftest.py is what pulls the whole diff to L3.
+    assert classify_blast_radius(["myapp/api/routers/games.py"]) == L2
+    assert classify_blast_radius(diff) == L3
+    assert sensitive_paths(diff) == ["tests/conftest.py"]
 
 
 def test_blast_radius_l2_ordinary_logic() -> None:

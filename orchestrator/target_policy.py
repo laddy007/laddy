@@ -43,6 +43,15 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     # Deploy / secret config.
     ".env*",
     "**/.env*",
+    # Per-node engine config (H-D7-1): env.local / env.vps carry PYTHON_BIN,
+    # *_COMMANDS, CLAUDE_CMD, ... and are `set -a; source`d on the TRUSTED
+    # machine (merge-verified.sh / push-hub.sh) - i.e. any shell in them runs as
+    # the Director. Their names have NO leading dot, so `.env*` above misses
+    # them; classify them sensitive so an untracked-turned-tracked env.* routes
+    # L3 (human sees it) instead of L2 auto-merge. The only tracked matches are
+    # the harmless env.local.example / env.vps.example (also L3, fine).
+    "env.*",
+    "**/env.*",
     # Agent-config surface: hooks / MCP servers / steering (C2). Executes host
     # commands when the local review panel's claude/codex loads them. Nested
     # variants are flagged too (H7): the CLIs auto-ingest steering/MCP config
@@ -92,6 +101,38 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "**/pnpm-lock.yaml",
     "yarn.lock",
     "**/yarn.lock",
+    # Trusted-tool config a branch can plant to make a gate step lie (D2). Each
+    # is AUTO-DISCOVERED and honored by a tool the gate runs, yet escaped the
+    # sensitive set, so it rode L2 auto-merge unclassified:
+    #   - conftest.py: pytest auto-loads it and a collection hook
+    #     (pytest_sessionfinish -> session.exitstatus = 0) forges a green suite.
+    #     Classified L3 so a human reviews the collection-hook diff; the gate
+    #     itself cannot restore it (legit fixture conftests) nor tell a malicious
+    #     hook from a benign one, so L3 IS the boundary (H-D2-1).
+    #   - pytest.ini / tox.ini / setup.cfg: pytest config that can re-home the
+    #     runner / rewrite addopts (H-D2-1).
+    #   - .semgrepignore / .gitleaks.toml / .gitleaksignore: scanner ignore/allow
+    #     config the scan step honors; the LOAD-BEARING fix is stripping them in
+    #     the gate (testgate._containerized) so the scan cannot run vacuously -
+    #     classification here is the SECOND layer (H-D2-2, H-D2-3).
+    "conftest.py",
+    "**/conftest.py",
+    "pytest.ini",
+    "**/pytest.ini",
+    "tox.ini",
+    "**/tox.ini",
+    "setup.cfg",
+    "**/setup.cfg",
+    ".semgrepignore",
+    "**/.semgrepignore",
+    ".semgrep/*",
+    ".semgrep/**/*",
+    "**/.semgrep/*",
+    "**/.semgrep/**/*",
+    ".gitleaks.toml",
+    "**/.gitleaks.toml",
+    ".gitleaksignore",
+    "**/.gitleaksignore",
     # Engine surfaces when laddy itself is the target branch (repo_laddy):
     # post-split the engine's own code lives at the branch REPO ROOT.
     "orchestrator/*",

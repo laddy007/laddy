@@ -174,6 +174,58 @@ def test_binding_gate_command_runs_everything_in_container_offline() -> None:
     assert "exit $(( L || T || P || C || S || G ))" in cmd
 
 
+def test_binding_gate_passes_gitleaks_an_explicit_trusted_config() -> None:
+    # H-D2-3: gitleaks auto-discovers a branch `.gitleaks.toml` (allowlist) if no
+    # --config is given, so a branch could suppress its own secret. The gate must
+    # pass an EXPLICIT trusted config (restored under <agent-dir>/security) to
+    # disable auto-discovery.
+    from orchestrator.testgate import GITLEAKS_CONFIG, BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert f"gitleaks detect --no-banner --config {GITLEAKS_CONFIG}" in cmd
+    assert GITLEAKS_CONFIG == f"{TARGET_DIR_NAME}/security/gitleaks.toml"
+
+
+def test_binding_gate_pins_pytest_cache_plugin_off() -> None:
+    # H-D2-1 (defense-in-depth): the branch-writable .pytest_cache must not steer
+    # collection. (conftest autoload is NOT closable at the gate - that is closed
+    # by L3 classification; see test_policy.)
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert "pytest -p no:cacheprovider -n auto" in cmd
+
+
+def test_binding_gate_neutralizes_branch_scanner_config_with_trusted_ref() -> None:
+    # H-D2-2 / H-D2-3 (LOAD-BEARING): a branch `.semgrepignore` / `.semgrep/` /
+    # `.gitleaks.toml` / `.gitleaksignore` is auto-honored and makes the scan pass
+    # vacuously. Before the scan the gate restores trusted main's copy over the
+    # clone, or deletes the branch's when trusted main ships none.
+    from orchestrator.testgate import NEUTRALIZED_SCAN_CONFIGS, BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command(
+        "branchsha", "myapp", trusted_ref="trustedsha"
+    )
+    for p in NEUTRALIZED_SCAN_CONFIGS:
+        assert p in cmd, p
+    # restore-from-trusted, else delete the branch's copy
+    assert 'git -C "$tmp/repo" checkout trustedsha -- "$p" 2>/dev/null' in cmd
+    assert '|| rm -rf "$tmp/repo/$p"' in cmd
+    # runs AFTER the branch sha checkout and BEFORE cd + docker compose
+    assert cmd.index("checkout -q branchsha") < cmd.index("for p in")
+    assert cmd.index("for p in") < cmd.index("docker compose")
+
+
+def test_binding_gate_scanner_neutralization_absent_without_trusted_ref() -> None:
+    # the VPS pre-filter (DockerGate/no trusted ref) is not a trust boundary; the
+    # neutralization loop must be absent there, not empty/broken.
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp")
+    assert "for p in" not in cmd
+    assert '|| rm -rf "$tmp/repo/$p"' not in cmd
+
+
 def test_binding_gate_command_uses_custom_compare_ref() -> None:
     # #11: the local gate baselines the scanners to the current local-main sha
     # (the trial-merge parent), not the stale origin/main remote-tracking ref.

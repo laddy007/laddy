@@ -190,6 +190,22 @@ RESTORED_INFRA_PATHS: tuple[str, ...] = (
     f"{TARGET_DIR_NAME}/security",
 )
 
+# Scanner ignore/allow config a branch can plant in the scan root so a gate step
+# passes VACUOUSLY (H-D2-2, H-D2-3): semgrep auto-honors a `.semgrepignore` /
+# `.semgrep/` in cwd and gitleaks auto-reads a `.gitleaks.toml` (allowlist) plus
+# `.gitleaksignore` (fingerprint suppression) from the source path. Classifying
+# them sensitive is only the SECOND layer - by the time a merge is classified
+# the scan already ran. The LOAD-BEARING fix is to neutralize them BEFORE the
+# scan: restore trusted main's copy over the branch clone, or (the normal case,
+# trusted main ships none) delete the branch's. Only applied with a trusted_ref
+# (the local binding gate); the untrusted VPS pre-filter is not a trust boundary.
+NEUTRALIZED_SCAN_CONFIGS: tuple[str, ...] = (
+    ".semgrepignore",
+    ".semgrep",
+    ".gitleaks.toml",
+    ".gitleaksignore",
+)
+
 
 def restored_infra_paths(changed: Iterable[str]) -> tuple[str, ...]:
     """Which of ``changed`` the restore silently replaces with trusted main's copy.
@@ -243,10 +259,22 @@ def _containerized(
         if trusted_ref
         else ""
     )
+    # Restore trusted main's scanner ignore/allow config over the branch clone,
+    # or delete the branch's when trusted main ships none (the normal case), so
+    # the scan cannot be silenced by a planted config (H-D2-2, H-D2-3). Same
+    # trust-boundary gate as restore_infra: only with a trusted_ref.
+    neutralize_scan = (
+        "&& for p in " + " ".join(NEUTRALIZED_SCAN_CONFIGS) + "; do "
+        f'git -C "$tmp/repo" checkout {trusted_ref} -- "$p" 2>/dev/null '
+        f'|| rm -rf "$tmp/repo/$p"; done '
+        if trusted_ref
+        else ""
+    )
     return (
         f'tmp="$(mktemp -d)" && git clone --no-local . "$tmp/repo" '
         f'&& git -C "$tmp/repo" checkout -q {sha} '
         f"{restore_infra}"
+        f"{neutralize_scan}"
         f'&& cd "$tmp/repo" '
         f"&& GATE_COMMAND='{gate_command}' TARGET_DIR_NAME='{TARGET_DIR_NAME}' "
         f"docker compose -p {project} -f {compose_rel} "
@@ -271,6 +299,12 @@ def _containerized(
 _COVERAGE_COMPARE = "origin/main"
 _COVERAGE_MIN = 90
 SEMGREP_CONFIG = f"{TARGET_DIR_NAME}/security/semgrep.yml"
+# gitleaks auto-discovers a `.gitleaks.toml` in the source path if no --config is
+# given (H-D2-3): a branch could ship one with a broad [allowlist] and suppress
+# its own secret. Pass an EXPLICIT trusted config (restored under
+# <agent-dir>/security, RESTORED_INFRA_PATHS) so auto-discovery is disabled; it
+# `[extend] useDefault = true` so the full default ruleset still runs.
+GITLEAKS_CONFIG = f"{TARGET_DIR_NAME}/security/gitleaks.toml"
 
 # All three scanners are DIFF-SCOPED to origin/main: the gate judges THE
 # CHANGE, not the repo's legacy. Otherwise every task re-flags pre-existing
@@ -298,15 +332,24 @@ def _binding_gate(coverage_package: str, compare_ref: str = _COVERAGE_COMPARE) -
     # ref; the VPS DockerGate keeps the default. The trailing `exit` makes the
     # container status the authoritative signal: non-zero iff any gate failed -
     # unforgeable by code that ran earlier.
+    # -p no:cacheprovider: don't read/write the branch-writable `.pytest_cache`
+    # (a re-homed cache can steer collection). NOTE: this does NOT disable
+    # conftest.py autoload - there is no pytest flag that does, and a committed
+    # conftest is loaded regardless of -c/--rootdir. A `pytest_sessionfinish`
+    # hook that forces exitstatus=0 (H-D2-1) is therefore NOT closable at the
+    # gate; the close is CLASSIFICATION: conftest.py is engine-sensitive (L3), so
+    # it never rides the L2 auto-merge lane and a human reviews the hook diff.
     return (
         "set +e; "
         "ruff check .; L=$?; "
         "basedpyright; T=$?; "
-        f"pytest -n auto --cov={coverage_package} --cov-report=xml -q; P=$?; "
+        f"pytest -p no:cacheprovider -n auto --cov={coverage_package} "
+        "--cov-report=xml -q; P=$?; "
         f"diff-cover coverage.xml --compare-branch={compare_ref} "
         f"--fail-under={_COVERAGE_MIN}; C=$?; "
         f"semgrep --error --config {SEMGREP_CONFIG} --baseline-commit {compare_ref} .; S=$?; "
-        f"gitleaks detect --no-banner --log-opts={compare_ref}..HEAD; G=$?; "
+        f"gitleaks detect --no-banner --config {GITLEAKS_CONFIG} "
+        f"--log-opts={compare_ref}..HEAD; G=$?; "
         f"echo {_SENTINEL_PREFIX} lint=$L types=$T tests=$P coverage=$C semgrep=$S gitleaks=$G; "
         "exit $(( L || T || P || C || S || G ))"
     )

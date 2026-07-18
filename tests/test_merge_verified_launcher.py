@@ -82,6 +82,74 @@ def test_launcher_local_forwards_ref_and_warns_on_missing_remote(
     assert argv[argv.index("--local") + 1] == "../fix"
 
 
+def _engine_git_repo_with_lib(tmp_path: Path) -> Path:
+    """Copy merge-verified.sh + its lib into a git-initialized engine dir."""
+    engine = tmp_path / "engine"
+    (engine / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(_LAUNCHER, engine / "scripts" / "merge-verified.sh")
+    (engine / "scripts" / "merge-verified.sh").chmod(0o755)
+    lib_src = _LAUNCHER.parent / "lib" / "env_guard.sh"
+    shutil.copy(lib_src, engine / "scripts" / "lib" / "env_guard.sh")
+    subprocess.run(
+        ["git", "init", "-b", "main", str(engine)], check=True, capture_output=True
+    )
+    return engine
+
+
+def test_launcher_refuses_to_source_a_git_tracked_env_local(tmp_path: Path) -> None:
+    # H-D7-1 defense-in-depth: env.local is `set -a; source`d on the trusted
+    # machine, so a git-TRACKED one is a code-execution injection vector (the
+    # legit file is always gitignored/untracked). The launcher must hard-error
+    # before sourcing it - and never reach the python module.
+    engine = _engine_git_repo_with_lib(tmp_path)
+    launcher = engine / "scripts" / "merge-verified.sh"
+    stub, argv_file = _recording_stub(tmp_path)
+    repo = _repo_without_branch_remote(tmp_path)
+
+    # a TRACKED env.local carrying a payload marker
+    env_local = engine / "env.local"
+    env_local.write_text("PYTHON_BIN=/bin/true\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(engine), "add", "env.local"], check=True, capture_output=True
+    )
+
+    env = {**os.environ, "PYTHON_BIN": str(stub), "AGENT_BRANCH_REMOTE": "ghost"}
+    proc = subprocess.run(
+        [str(launcher), "t1"], cwd=str(repo), env=env, capture_output=True, text=True
+    )
+    assert proc.returncode != 0
+    assert "refusing to source git-tracked env file" in proc.stderr
+    # fail-closed: the python module (stub) is never reached
+    assert not argv_file.exists()
+
+
+def test_launcher_sources_an_untracked_env_local_quietly(tmp_path: Path) -> None:
+    # the normal path: an untracked env.local sources as before (no refusal),
+    # and the launcher proceeds. The env.local itself wires PYTHON_BIN to the
+    # recording stub, so a recorded argv proves sourcing happened past the guard.
+    engine = _engine_git_repo_with_lib(tmp_path)
+    launcher = engine / "scripts" / "merge-verified.sh"
+    stub, argv_file = _recording_stub(tmp_path)
+    repo = _repo_without_branch_remote(tmp_path)
+
+    # an UNTRACKED env.local (present, but not `git add`ed) that exports the stub
+    (engine / "env.local").write_text(f"PYTHON_BIN={stub}\n", encoding="utf-8")
+
+    env = {**os.environ, "AGENT_BRANCH_REMOTE": "ghost"}
+    proc = subprocess.run(
+        [str(launcher), "t1", "--local", "../fix"],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "refusing to source" not in proc.stderr
+    # env.local was sourced (PYTHON_BIN reached the exec) and the guard let it
+    argv = argv_file.read_text(encoding="utf-8").splitlines()
+    assert "t1" in argv and "--local" in argv
+
+
 def test_launcher_without_local_still_dies_on_missing_remote(
     tmp_path: Path,
 ) -> None:
