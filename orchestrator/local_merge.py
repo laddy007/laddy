@@ -46,6 +46,17 @@ from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
 from orchestrator.agents import AgentRunner
+
+# Hub-main tripwire (spec S5, audit M3) - deletion / rewind / divergence
+# detection lives in orchestrator.hub_tripwire (a leaf module, like
+# merge_subject); the boolean wrapper stays re-exported for existing call
+# sites and tests.
+from orchestrator.hub_tripwire import (
+    HubMainCheck,
+    HubMainState,
+    check_hub_main,
+    hub_main_ancestor_of_local,
+)
 from orchestrator.human_text import untrusted_inline
 
 # Re-exported for backward-compat call sites (tests/fakes.py, historical
@@ -66,12 +77,16 @@ __all__ = [
     "ArtifactAttestation",
     "ArtifactAttestationState",
     "GateResults",
+    "HubMainCheck",
+    "HubMainState",
     "LocalMergeEngine",
     "MergePreparationError",
     "MergeRequest",
     "MergeVerdict",
     "_MERGE_SUBJECT",
+    "check_hub_main",
     "decide",
+    "hub_main_ancestor_of_local",
     "merge_subject",
     "parse_merge_subject",
     "render_advisory",
@@ -661,8 +676,19 @@ def discover_ready(
     The hub is a closed namespace (spec: discovery selector): every branch
     except ``base_branch`` IS a task. The readiness filter is unchanged -
     the selector widened, the bar did not move.
+
+    --prune drops the tracking refs of deleted TASK branches (push_and_cleanup
+    deletes merged ones), but it must never touch the base branch's tracking
+    ref: that ref is the tripwire's memory of the last verified hub main (M3),
+    and pruning it would make a hub whose main was deleted look like a benign
+    fresh hub on the next run. The negative refspec excludes the base branch
+    from both fetching and pruning; check_hub_main alone advances that ref.
     """
-    _git(repo, "fetch", branch_remote, "--prune")
+    _git(
+        repo, "fetch", "--prune", branch_remote,
+        f"+refs/heads/*:refs/remotes/{branch_remote}/*",
+        f"^refs/heads/{base_branch}",
+    )
     _, out = _git(
         repo, "for-each-ref", "--format=%(refname:strip=3)",
         f"refs/remotes/{branch_remote}",
@@ -678,31 +704,6 @@ def discover_ready(
         if code == 0:
             ready.append(task)
     return ready
-
-
-def hub_main_ancestor_of_local(
-    repo: Path, branch_remote: str, base_branch: str = "main"
-) -> bool:
-    """False = the hub's main moved where only local may write (spec S5).
-
-    The VPS never writes main; a diverged hub main is suspicion of an
-    unauthorized write (possibly including ~/laddy itself), so the CALLER
-    must abort the entire run - no branch from that hub is trustworthy.
-
-    A hub that has never seeded a main ref at all (fresh/never-pushed hub)
-    is explicitly NOT a tripwire: there is nothing to compare against, and
-    discover_ready would find no branches there either - a missing remote
-    ref is benign, not suspicious, so it is checked for and short-circuited
-    BEFORE the merge-base call (which would otherwise just fail).
-    """
-    remote_main = f"refs/remotes/{branch_remote}/{base_branch}"
-    exists, _ = _git(repo, "rev-parse", "--verify", "--quiet", remote_main, check=False)
-    if exists != 0:
-        return True
-    code, _ = _git(
-        repo, "merge-base", "--is-ancestor", remote_main, base_branch, check=False,
-    )
-    return code == 0
 
 
 @dataclass
@@ -1252,6 +1253,30 @@ def _ask(prompt: str) -> bool:
     return input(prompt).strip().lower() == "y"
 
 
+# One headline per tamper shape (M3) so the Director knows WHAT happened, not
+# just that something did; check_hub_main's detail then names the shas.
+_TRIPWIRE_HEADLINES: Mapping[HubMainState, str] = {
+    HubMainState.DELETED: (
+        "[TRIPWIRE] hub main DISAPPEARED: the hub had a main and now has none."
+    ),
+    HubMainState.REWOUND: (
+        "[TRIPWIRE] hub main was REWOUND: force-pushed off the fast-forward path."
+    ),
+    HubMainState.DIVERGED: (
+        "[TRIPWIRE] hub main is NOT an ancestor of local main."
+    ),
+}
+
+
+def _print_tripwire(check: HubMainCheck, branch_remote: str) -> None:
+    print(_TRIPWIRE_HEADLINES[check.state])
+    if check.detail:
+        print(f"[TRIPWIRE] {check.detail}")
+    print("The VPS must never write main - this is suspicion of an")
+    print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
+    print(f"hub ({branch_remote}) and ~/laddy on the VPS, then decide.")
+
+
 def main(
     argv: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -1318,33 +1343,27 @@ def main(
             print("commit or stash your changes first. NOTHING was merged.")
             return 1
 
-    # Tripwire (spec S5) - before the engine runs, and discover_ready also
-    # fetches inside list_ready, so fetch explicitly here first. In --local mode
-    # the tripwire is honoured when the remote is REACHABLE (a diverged hub main
-    # is a real tamper signal regardless of mode), but an absent/unreachable
-    # remote only warns and proceeds - the whole point of --local is "no VPS".
-    if local_ref is not None:
-        code, _ = _git(repo, "fetch", config.branch_remote, "--prune", check=False)
-        if code == 0:
-            if not hub_main_ancestor_of_local(
-                repo, config.branch_remote, config.default_branch
-            ):
-                print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
-                print("The VPS must never write main - this is suspicion of an")
-                print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
-                print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
-                return 2
-        else:
-            print(f"[WARN] branch remote '{config.branch_remote}' is absent/unreachable;")
-            print("--local proceeds with no hub to consult (the 'no VPS' case).")
-    else:
-        _git(repo, "fetch", config.branch_remote, "--prune")
-        if not hub_main_ancestor_of_local(repo, config.branch_remote, config.default_branch):
-            print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
-            print("The VPS must never write main - this is suspicion of an")
-            print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
-            print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
+    # Tripwire (spec S5, M3) - before the engine runs, and deliberately with NO
+    # fetch first: check_hub_main consults the hub via ls-remote and compares
+    # against the remote-tracking ref, git's own record of the last verified
+    # hub main. The old pre-check `fetch --prune` erased exactly that evidence,
+    # so a deleted hub main read as a benign fresh hub (M3a). In --local mode
+    # an absent/unreachable remote only warns and proceeds - the whole point of
+    # --local is "no VPS"; in the default mode a hub that cannot be consulted
+    # cannot be tripwire-checked either, so the run fails closed.
+    check = check_hub_main(repo, config.branch_remote, config.default_branch)
+    if check.state is HubMainState.UNREACHABLE:
+        if local_ref is None:
+            print(f"[TRIPWIRE] branch remote '{config.branch_remote}' is "
+                  "absent/unreachable;")
+            print("the hub-main tripwire cannot be verified, so NOTHING is")
+            print("merged (fail closed). Fix the remote and re-run.")
             return 2
+        print(f"[WARN] branch remote '{config.branch_remote}' is absent/unreachable;")
+        print("--local proceeds with no hub to consult (the 'no VPS' case).")
+    elif not check.ok:
+        _print_tripwire(check, config.branch_remote)
+        return 2
 
     _confirm = confirm or ((lambda v: False) if args.no_input else _interactive_confirm)
     _ask_fn = ask or ((lambda p: False) if args.no_input else _ask)

@@ -1826,6 +1826,11 @@ def test_hub_main_ancestor_of_local_true_when_hub_never_seeded(
         ["git", "clone", str(empty_bare), str(clone)], check=True, capture_output=True
     )
     assert hub_main_ancestor_of_local(clone, "origin", "main") is True
+    # M3 (criterion 3): the typed state says WHY it passed - a genuinely fresh
+    # hub (no main, none ever seen), never a deletion misread as fresh.
+    from orchestrator.hub_tripwire import HubMainState, check_hub_main
+
+    assert check_hub_main(clone, "origin", "main").state is HubMainState.FRESH
 
 
 def test_tripwire_detects_moved_hub_main(
@@ -1875,6 +1880,179 @@ def test_main_aborts_whole_run_on_tripwire(
     # the engine never ran at all: no per-branch [merge]/[hold] report line,
     # no "N merged, M held" summary line
     assert "[merge]" not in out
+    assert "held." not in out
+
+
+# --- hub-main tripwire: deletion / rewind must trip; fresh hub must not (M3) --
+
+
+def _advance_and_rewind_hub_main(local_repo: Path, tmp_path: Path) -> None:
+    """Advance local main by one pushed commit, then force-rewind the hub's
+    main to the OLDER commit - which is still an ancestor of local main, so a
+    bare ancestor check alone cannot see the force-push."""
+    (local_repo / "advance.txt").write_text("x\n", encoding="utf-8")
+    _g("-C", str(local_repo), "add", "-A")
+    _g("-C", str(local_repo), *_ID, "commit", "-m", "advance main")
+    _g("-C", str(local_repo), "push", "origin", "main")  # records the new tip
+    older = _g("-C", str(local_repo), "rev-parse", "main~1")
+    _g("-C", str(tmp_path / "remote.git"), "update-ref", "refs/heads/main", older)
+
+
+def test_tripwire_detects_deleted_hub_main(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    """M3a: a hub whose main DISAPPEARED is an alarm, not a fresh hub. Local
+    remembers having seen the hub's main (the remote-tracking ref written at
+    clone/fetch/push time), so "the hub has no main" must read as deletion,
+    never as never-seeded."""
+    from orchestrator.local_merge import hub_main_ancestor_of_local
+
+    _g("-C", str(tmp_path / "remote.git"), "update-ref", "-d", "refs/heads/main")
+    assert hub_main_ancestor_of_local(local_repo, "origin", "main") is False
+
+
+def test_tripwire_detects_rewound_hub_main(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    """M3b: a force-push of hub main to an OLDER commit satisfies a bare
+    ancestor check; the tripwire must catch the non-fast-forward move."""
+    from orchestrator.local_merge import hub_main_ancestor_of_local
+
+    _advance_and_rewind_hub_main(local_repo, tmp_path)
+    assert hub_main_ancestor_of_local(local_repo, "origin", "main") is False
+
+
+def test_main_aborts_on_deleted_hub_main(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    """M3a end-to-end: main() trips on a deleted hub main - and KEEPS tripping
+    on a re-run. (The old pre-check `fetch --prune` erased the remote-tracking
+    ref, so the very first run already read as a benign fresh hub.)"""
+    from orchestrator.local_merge import main
+
+    _g("-C", str(tmp_path / "remote.git"), "update-ref", "-d", "refs/heads/main")
+    env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+    argv = ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw")]
+    for attempt in ("first run", "re-run"):
+        rc = main(
+            argv,
+            env=env,
+            confirm=lambda v: False,
+            ask=lambda p: False,
+            pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+        )
+        out = capsys.readouterr().out
+        assert rc == 2, attempt
+        assert "TRIPWIRE" in out and "DISAPPEARED" in out, attempt
+        assert "unauthorized write" in out, attempt
+        # the engine never ran: no per-branch report, no summary line
+        assert "held." not in out, attempt
+
+
+def test_main_aborts_on_rewound_hub_main(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    """M3b end-to-end: main() trips on a hub main force-rewound to an older
+    commit, and the message names the REWIND (not a generic divergence)."""
+    from orchestrator.local_merge import main
+
+    _advance_and_rewind_hub_main(local_repo, tmp_path)
+    env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+    rc = main(
+        ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw")],
+        env=env,
+        confirm=lambda v: False,
+        ask=lambda p: False,
+        pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+    )
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "TRIPWIRE" in out and "REWOUND" in out
+    assert "unauthorized write" in out
+    assert "held." not in out
+
+
+def test_tripwire_records_verified_hub_main(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    """The mechanism that arms rewind detection: a PASSED check advances the
+    remote-tracking ref to the verified hub tip, so a later rewind back past
+    that tip trips even though this clone never fetched it."""
+    from orchestrator.hub_tripwire import HubMainState, check_hub_main
+
+    bare = str(tmp_path / "remote.git")
+    old = _g("-C", str(local_repo), "rev-parse", "refs/remotes/origin/main")
+    # local main advances by one commit; the hub's main is moved forward to it
+    # OUT OF BAND (as if the Director pushed from another clone), so this
+    # clone's tracking ref still remembers only the old tip
+    (local_repo / "advance.txt").write_text("x\n", encoding="utf-8")
+    _g("-C", str(local_repo), "add", "-A")
+    _g("-C", str(local_repo), *_ID, "commit", "-m", "advance main")
+    new = _g("-C", str(local_repo), "rev-parse", "main")
+    _g("-C", str(local_repo), "push", "origin", "main")
+    # the push updated this clone's tracking ref; wind it back so the state is
+    # "hub main advanced, but this clone last saw the old tip"
+    _g("-C", str(local_repo), "update-ref", "refs/remotes/origin/main", old)
+
+    assert check_hub_main(local_repo, "origin", "main").state is HubMainState.OK
+    recorded = _g("-C", str(local_repo), "rev-parse", "refs/remotes/origin/main")
+    assert recorded == new  # the verified tip is now the tripwire's memory
+    # ...which is exactly what makes the subsequent rewind detectable:
+    _g("-C", bare, "update-ref", "refs/heads/main", old)
+    assert check_hub_main(local_repo, "origin", "main").state is (
+        HubMainState.REWOUND
+    )
+
+
+def test_discover_ready_prune_spares_base_tracking_ref(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    """discover_ready still prunes deleted TASK branches, but never the base
+    branch's tracking ref - that ref is the tripwire's memory, and pruning it
+    would turn a deleted hub main into a benign-looking fresh hub (M3a)."""
+    from orchestrator.local_merge import hub_main_ancestor_of_local
+
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    _g("-C", str(local_repo), "fetch", "origin")  # track t1 and main
+    bare = str(tmp_path / "remote.git")
+    _g("-C", bare, "update-ref", "-d", "refs/heads/t1")
+    _g("-C", bare, "update-ref", "-d", "refs/heads/main")
+
+    assert discover_ready(local_repo) == []
+    # the deleted task branch's tracking ref was pruned...
+    code = subprocess.run(
+        ["git", "-C", str(local_repo), "rev-parse", "--verify", "--quiet",
+         "refs/remotes/origin/t1"],
+        capture_output=True,
+    ).returncode
+    assert code != 0
+    # ...but the base tracking ref survived, so the tripwire still trips
+    assert _g("-C", str(local_repo), "rev-parse", "refs/remotes/origin/main")
+    assert hub_main_ancestor_of_local(local_repo, "origin", "main") is False
+
+
+def test_main_fails_closed_when_hub_unreachable(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    """Default (non --local) mode: a hub that cannot be consulted cannot be
+    tripwire-checked either, so the run aborts and merges nothing."""
+    from orchestrator.local_merge import main
+
+    env = {
+        "AGENT_REPO_URL": "unused",
+        "AGENT_WORK_ROOT": str(tmp_path / "wr"),
+        "AGENT_BRANCH_REMOTE": "ghost",  # no such remote
+    }
+    rc = main(
+        ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw")],
+        env=env,
+        confirm=lambda v: False,
+        ask=lambda p: False,
+        pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+    )
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "TRIPWIRE" in out and "unreachable" in out
     assert "held." not in out
 
 
