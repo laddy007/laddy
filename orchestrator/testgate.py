@@ -370,7 +370,11 @@ def _binding_gate(
         exit_expr += " || F"
     return (
         "set +e; "
-        "ruff check .; L=$?; "
+        # --no-cache: parity with the pytest cache-plugin pin - don't read a
+        # branch-writable .ruff_cache. A cache hit never hides a real error
+        # (the cache is keyed on content+settings), but disabling it keeps the
+        # lint step's inputs fully trusted.
+        "ruff check . --no-cache; L=$?; "
         "basedpyright; T=$?; "
         f"pytest -p no:cacheprovider -n auto --cov={coverage_package} "
         "--cov-report=xml -q; P=$?; "
