@@ -6,17 +6,25 @@ and fails on any mismatch. local_merge calls `check()` with an explicit
 task_id (spec sec. 3) as one of the trial-merge gates before a local merge is
 allowed to proceed.
 
-Returns (exit_code, message): 0 = a MERGEABLE decision echoed in the message
-("decision=<...>"), 1 = check failed (mismatch / missing artifacts / stale
-SHAs) OR the recomputed decision is stop_before_merge. An honestly-committed
-stop is consistent, but consistency is not a pass: the decision VALUE is part
-of the verdict, so a stop must never exit 0 and launder itself into the local
-authority's policy gate (H1).
+Returns (exit_code, message): 0 = the recomputed decision echoed in the
+message ("decision=<...>"), 1 = check failed (mismatch / missing artifacts /
+stale SHAs) OR the recomputed decision is a stop_before_merge with at least
+one LEAKING reason. An honestly-committed stop is consistent, but consistency
+alone is not a pass: the decision VALUE is part of the verdict (H1). The stop
+is scoped to LEAKING reasons only, though: sensitive/security paths (plus the
+computed high_risk they imply) manifest locally by construction - the local
+authority re-derives them from the diff, classifies the branch L3, and routes
+it to a typed human RISK_DECISION, never an auto-merge - so a consistent stop
+carrying ONLY those reasons attests PASSED (same scoping merge_check_local
+applies on the --local route). Every other reason (deleted tests, destructive
+migrations, senior deadlock, a DECLARED high risk on non-sensitive paths, the
+report-only guards) has no local manifestation and keeps exiting 1.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,8 +85,42 @@ class CommittedState:
         return cls(head_sha=head_sha if isinstance(head_sha, str) else None)
 
 
+# Stop reasons whose local manifestation is the L3 RISK_DECISION route (see
+# _leaking_stop_reasons); matched by prefix because policy.merge_decision
+# suffixes them with the offending paths.
+_SENSITIVE_REASON_PREFIXES = ("policy_sensitive_paths", "security_auth_paths")
+
+
+def _leaking_stop_reasons(reasons: Sequence[str]) -> list[str]:
+    """The stop reasons with NO local manifestation in the caller's own gates.
+
+    Sensitive/security paths DO manifest locally: gather_gates re-derives them
+    from the diff, classifies the branch L3, and decide() holds it as a
+    RISK_DECISION - the digest plus typed exact-task-id confirmation is
+    precisely the human decision the stop asks for (merge_check_local encodes
+    the same scoping for --local). The COMPUTED ``high_risk`` those paths
+    imply rides with them. Everything else (deleted tests, destructive
+    migrations, senior deadlock, ``high_risk`` on non-sensitive paths - i.e.
+    reviewer-declared - and stale gate approvals) would leak: nothing
+    downstream re-surfaces it, so it must fail the check (H1).
+    """
+    sensitive_present = any(r.startswith(_SENSITIVE_REASON_PREFIXES) for r in reasons)
+    return [
+        r
+        for r in reasons
+        if not r.startswith(_SENSITIVE_REASON_PREFIXES)
+        and not (r == "high_risk" and sensitive_present)
+    ]
+
+
 def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
-    """Returns (exit_code, message). Pure enough to unit-test on a temp repo."""
+    """Returns (exit_code, message). Pure enough to unit-test on a temp repo.
+
+    A consistent stop_before_merge exits 1 only for LEAKING reasons (see
+    _leaking_stop_reasons); a stop whose every reason manifests locally as
+    the L3 RISK_DECISION route exits 0 echoing the decision. Report-only
+    stops are always leaking: path_guard / nondraft / verify reasons have no
+    local manifestation."""
     task = task_id
     artifacts = TaskArtifacts(repo, task_id)
 
@@ -164,12 +206,22 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
         )
     if recomputed.decision == "stop_before_merge":
         # Consistent stop == stop: the chain is honest, but the verdict says
-        # STOP. The caller reads only the exit code, so exit 0 here would turn
-        # an honestly-computed stop into a green policy gate whenever its
-        # reasons (test_files_deleted, high_risk, senior deadlock, ...) have no
-        # independent local manifestation (H1). Honor the decision value.
-        return 1, (
-            "reason=recomputed_stop_before_merge "
-            f"recomputed_reasons={list(recomputed.reasons)}"
+        # STOP. The caller reads only the exit code, so exit 0 would turn an
+        # honestly-computed stop into a green policy gate whenever a reason
+        # (test_files_deleted, declared high_risk, senior deadlock, ...) has
+        # no independent local manifestation (H1). Scoped, not unconditional:
+        # sensitive/security-path reasons (and the computed high_risk they
+        # imply) ARE re-derived locally as blast L3 -> RISK_DECISION, so a
+        # stop carrying only those must not read as BROKEN - exit 1 only for
+        # the LEAKING reasons. Report-only stops stay unconditional: their
+        # reasons never manifest locally.
+        leaking = (
+            list(recomputed.reasons)
+            if spec.report_only
+            else _leaking_stop_reasons(recomputed.reasons)
         )
+        if leaking:
+            return 1, (
+                f"reason=recomputed_stop_before_merge recomputed_reasons={leaking}"
+            )
     return 0, f"decision={recomputed.decision}"

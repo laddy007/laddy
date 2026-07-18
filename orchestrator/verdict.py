@@ -67,13 +67,19 @@ class Verdict:
 
 
 def _last_json_object(text: str) -> str | None:
-    """Return the LAST balanced top-level ``{...}`` object in ``text``.
+    """Return the LAST valid top-level ``{...}`` JSON object in ``text``.
 
-    A brace-depth scan that ignores braces inside strings. This replaces the
-    old non-greedy ``\\{.*?\\}`` fence regex, which stopped at the FIRST ``}``
-    and so truncated any verdict whose findings/claims arrays contain objects
-    (i.e. every non-trivial review) into invalid JSON. Fence-agnostic: the
-    payload is a complete object whether or not it is ```json-fenced.
+    A greedy ``raw_decode`` walk: try the JSON parser at each ``{`` not
+    already consumed by a previous successful decode, and keep the last
+    success. Only ``{`` anchors are tried, so every success is an object
+    (asserted for safety), and a success skips PAST its end - a nested object
+    inside a findings/claims array can never be returned as the payload.
+    Letting the parser decide validity replaces a brace-depth scan that
+    tracked in-string state by quote parity: a lone ``"`` in surrounding
+    prose desynced that scan, making the real final verdict's braces read as
+    string content so an earlier planted object won (H6 bypass). Prose, an
+    unbalanced ``{``/``"``, or a ```json fence between objects simply fails
+    to decode at that anchor and is stepped over.
 
     LAST, not first (H6): agent output is untrusted-input-adjacent - a
     reviewer routinely QUOTES branch content before concluding, so a
@@ -81,34 +87,20 @@ def _last_json_object(text: str) -> str | None:
     the transcript must never be mistaken for the verdict. Every payload
     prompt ends with "output ONLY the JSON object", so the model's actual
     answer is the final object in the text; anything before it is narration
-    or quotation. A trailing unbalanced ``{`` cannot mask it (only complete
-    objects count).
+    or quotation.
     """
-    depth = 0
-    start = -1
-    in_str = False
-    escaped = False
+    decoder = json.JSONDecoder()
+    pos = 0
     last: str | None = None
-    for i, ch in enumerate(text):
-        if in_str:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_str = False
+    while (idx := text.find("{", pos)) != -1:
+        try:
+            value, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            pos = idx + 1
             continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start != -1:
-                    last = text[start : i + 1]
+        assert isinstance(value, dict)  # anchored at "{" - always an object
+        last = text[idx:end]
+        pos = end
     return last
 
 

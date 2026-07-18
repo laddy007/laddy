@@ -239,6 +239,69 @@ def test_check_fails_on_honest_deleted_test_stop(
     assert "test_files_deleted" in message
 
 
+@pytest.fixture()
+def sensitive_stopped_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
+    """An HONEST stop whose EVERY reason manifests locally: a clean, fully
+    approved change touching ONLY a sensitive path, so the committed stop
+    carries exactly policy_sensitive_paths + the computed high_risk."""
+    dev = TouchingRunner(["done"], "myapp/models.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2)
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    return _ci_clone(remote, tmp_path, "ci-sensitive")
+
+
+def test_check_passes_on_honest_sensitive_only_stop(
+    sensitive_stopped_task: Path,
+) -> None:
+    # H1 scoping: sensitive-path reasons (and the computed high_risk they
+    # imply) manifest locally as blast L3 -> RISK_DECISION, so a consistent
+    # stop carrying only them attests PASSED (exit 0). Exiting 1 here would
+    # turn every clean, fully-approved sensitive branch into a deterministic
+    # BROKEN hold and kill the normal L3 flow (digest -> typed task id).
+    code, message = check(sensitive_stopped_task, base="origin/main", task_id="t1")
+    assert (code, message) == (0, "decision=stop_before_merge")
+
+
+def test_check_sensitive_stop_with_deleted_test_still_fails(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # Boundary guard: a sensitive path does NOT waive a co-occurring LEAKING
+    # reason - deleting a test alongside the sensitive change still exits 1,
+    # and the message names only the leaking reason (the sensitive reason and
+    # its high_risk are carried to the human by the L3 route instead).
+    seed = tmp_path / "seed-sens-del"
+    _git("clone", str(remote), str(seed))
+    (seed / "tests").mkdir()
+    (seed / "tests" / "test_sample.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "add test")
+    _git("-C", str(seed), "push", "origin", "HEAD:main")
+
+    dev = DeletingRunner(
+        ["done"], "tests/test_sample.py", "myapp/models.py", "x = 1\n"
+    )
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2, work="work-sd")
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    ci = _ci_clone(remote, tmp_path, "ci-sens-del")
+
+    code, message = check(ci, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "recomputed_stop_before_merge" in message
+    assert "test_files_deleted" in message
+    # only the LEAKING reasons are listed - the sensitive reason is not one
+    assert "policy_sensitive_paths" not in message
+
+
 def test_check_fails_cleanly_on_truncated_merge_decision(
     remote: Path, tmp_path: Path
 ) -> None:

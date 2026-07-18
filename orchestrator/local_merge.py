@@ -117,9 +117,15 @@ class ArtifactAttestation:
 
     The check is applicable to a fetched VPS task tip: its committed artifacts
     must describe that exact code history AND the recomputed policy decision
-    must be mergeable - merge_check exits non-zero for a consistent
-    stop_before_merge too, so an honestly-committed stop holds here instead of
-    laundering into a green policy gate (H1). It is deliberately not applicable
+    must carry no LEAKING stop reason - merge_check exits non-zero for a
+    consistent stop_before_merge whose reasons have no local manifestation
+    (deleted tests, declared high risk, senior deadlock, ...), so an
+    honestly-committed stop holds here instead of laundering into a green
+    policy gate (H1). A consistent stop carrying ONLY sensitive/security-path
+    reasons (plus the computed high_risk they imply) attests PASSED instead:
+    those reasons are re-derived locally as blast L3 and decide() routes the
+    branch to RISK_DECISION - the typed human confirmation the stop asks for,
+    never an auto-merge. It is deliberately not applicable
     to ``--local`` because a Director-authored code commit makes those inherited
     artifacts stale by construction; the fresh trusted-local gates judge that
     commit instead. The --local route still runs the fail-closed policy

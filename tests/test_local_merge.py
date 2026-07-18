@@ -2346,6 +2346,49 @@ def test_remote_gather_holds_an_honest_stop_decision(
     assert merged == []  # the honest stop never reaches the mutating boundary
 
 
+def test_remote_gather_honest_sensitive_stop_is_risk_decision(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # H1 scoping (end-to-end, REAL merge_check - not a fake): a clean, fully
+    # approved VPS-authored branch touching only a sensitive path honestly
+    # commits stop_before_merge (policy.merge_decision always appends the
+    # sensitive reason + high_risk). Every one of those reasons manifests
+    # locally as blast L3, so the attestation must PASS and decide() must
+    # hold the branch as RISK_DECISION (typed human confirmation via the
+    # normal L3 flow), never as a deterministic BROKEN.
+    from orchestrator.local_merge import RISK_DECISION
+    from orchestrator.merge_check import check as real_check
+    from tests.test_loop_policy import TouchingRunner
+    from tests.test_merge_check import _run_policy_loop
+
+    roles = tmp_path / "loop-roles"
+    roles.mkdir()
+    for name in ("developer", "rw1", "rw2"):
+        (roles / f"{name}.md").write_text(f"{name.upper()} ROLE\n", encoding="utf-8")
+    dev = TouchingRunner(["done"], "myapp/models.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(tmp_path / "remote.git", tmp_path, roles, dev, rw1, rw2)
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+
+    tools = _tools(
+        local_repo,
+        _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[],  # L3 runs the security panel, not rw2
+    )
+    tools.merge_check_fn = real_check  # the REAL attestation
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+
+    assert gates.blast == L3 and "myapp/models.py" in gates.sensitive_files
+    assert gates.artifact_attestation.state is ArtifactAttestationState.PASSED
+    assert "stop_before_merge" in gates.artifact_attestation.detail
+    v = decide("t1", gates)
+    assert v.decision == "hold" and v.kind == RISK_DECISION
+
+
 def test_local_gather_resolves_a_branch_ref(local_repo: Path, tmp_path: Path) -> None:
     # AC#1: <ref> may also be a plain branch name (not only a worktree path).
     _fix, sha = _local_fix_commit(local_repo, tmp_path)
