@@ -69,19 +69,29 @@ class Verdict:
         return tuple(f for f in self.findings if f.severity == "blocker")
 
 
-def _first_json_object(text: str) -> str | None:
-    """Return the first BALANCED top-level ``{...}`` object in ``text``.
+def _last_json_object(text: str) -> str | None:
+    """Return the LAST balanced top-level ``{...}`` object in ``text``.
 
     A brace-depth scan that ignores braces inside strings. This replaces the
     old non-greedy ``\\{.*?\\}`` fence regex, which stopped at the FIRST ``}``
     and so truncated any verdict whose findings/claims arrays contain objects
     (i.e. every non-trivial review) into invalid JSON. Fence-agnostic: the
-    verdict is the first complete object whether or not it is ```json-fenced.
+    payload is a complete object whether or not it is ```json-fenced.
+
+    LAST, not first (H6): agent output is untrusted-input-adjacent - a
+    reviewer routinely QUOTES branch content before concluding, so a
+    schema-valid APPROVED object planted in the branch and echoed early in
+    the transcript must never be mistaken for the verdict. Every payload
+    prompt ends with "output ONLY the JSON object", so the model's actual
+    answer is the final object in the text; anything before it is narration
+    or quotation. A trailing unbalanced ``{`` cannot mask it (only complete
+    objects count).
     """
     depth = 0
     start = -1
     in_str = False
     escaped = False
+    last: str | None = None
     for i, ch in enumerate(text):
         if in_str:
             if escaped:
@@ -101,13 +111,19 @@ def _first_json_object(text: str) -> str | None:
             if depth > 0:
                 depth -= 1
                 if depth == 0 and start != -1:
-                    return text[start : i + 1]
-    return None
+                    last = text[start : i + 1]
+    return last
 
 
 def extract_json(text: str) -> str:
-    """Pull the verdict JSON object out of agent output (fenced or raw)."""
-    obj = _first_json_object(text)
+    """Pull the payload JSON object out of agent output (fenced or raw).
+
+    Takes the LAST balanced object - see :func:`_last_json_object` for why
+    (H6: quoted/planted objects earlier in the output must not win). Shared
+    by every untrusted-output parser (verdicts, investigator, clarify), so
+    the anti-spoofing rule is uniform across retry and non-retry paths.
+    """
+    obj = _last_json_object(text)
     if obj is None:
         raise VerdictError("no JSON object found in reviewer output")
     return obj

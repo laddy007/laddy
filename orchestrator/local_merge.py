@@ -35,6 +35,7 @@ security panel.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -719,31 +720,54 @@ class GateTools:
 # does, not the CLI's own startup config loading. Stripped from the review
 # worktree before any CLI runs; a code reviewer reviews the diff (agent-config
 # changes are also L3 by policy), it never honors the branch's agent config.
-_UNTRUSTED_AGENT_CONFIG: tuple[str, ...] = (
-    ".claude",
-    ".codex",
-    ".mcp.json",
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
+#
+# Matched by NAME at every depth (H7), not just the repo root: the CLIs
+# auto-ingest steering/MCP config from subdirectories they descend into, and
+# ENGINE_SENSITIVE_GLOBS flags **/CLAUDE.md etc. for the same reason. Names
+# compare casefolded: on a case-insensitive filesystem (WSL DrvFs) the CLI
+# opening "CLAUDE.md" finds a branch-shipped "Claude.md" just the same.
+_UNTRUSTED_CONFIG_DIR_NAMES: frozenset[str] = frozenset({".claude", ".codex"})
+_UNTRUSTED_CONFIG_FILE_NAMES: frozenset[str] = frozenset(
+    {"claude.md", "agents.md", "gemini.md", ".mcp.json"}
 )
 
 
 def _neutralize_agent_config(wt: Path) -> None:
-    """Remove branch-shipped agent config from a review worktree (C2).
+    """Remove branch-shipped agent config from a review worktree (C2), at any
+    depth (H7): nested ``pkg/CLAUDE.md`` / ``pkg/.mcp.json`` / ``pkg/.claude/``
+    steer or execute exactly like their root counterparts.
 
     Only the working tree is touched (never a commit), so the commit-range diffs
     that drive classification and merge_check are unaffected - a malicious
-    agent-config change still shows in the diff and routes to L3.
+    agent-config change still shows in the diff and routes to L3. Removing the
+    checkout's own root CLAUDE.md/AGENTS.md (e.g. laddy dogfooding itself as
+    the target) has always been this function's contract - reviewers read the
+    diff, never the branch's steering files - and the recursion just extends
+    that same contract to nested paths.
     """
-    for rel in _UNTRUSTED_AGENT_CONFIG:
-        target = wt / rel
+
+    def _remove(target: Path) -> None:
         if target.is_symlink():
             target.unlink(missing_ok=True)  # unlink the link, never follow it
         elif target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
-        elif target.exists():
+        else:
             target.unlink(missing_ok=True)
+
+    for root, dirs, files in os.walk(wt, topdown=True):
+        descend: list[str] = []
+        for name in dirs:
+            folded = name.casefold()
+            if folded == ".git":
+                continue  # git metadata: keep, never descend
+            if folded in _UNTRUSTED_CONFIG_DIR_NAMES:
+                _remove(Path(root) / name)
+                continue  # removed: nothing left to descend into
+            descend.append(name)
+        dirs[:] = descend
+        for name in files:
+            if name.casefold() in _UNTRUSTED_CONFIG_FILE_NAMES:
+                _remove(Path(root) / name)
 
 
 def _worktree_at_sha(repo: Path, task_id: str, work_root: Path, sha: str) -> Path:

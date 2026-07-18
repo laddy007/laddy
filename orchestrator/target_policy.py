@@ -44,12 +44,19 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     ".env*",
     "**/.env*",
     # Agent-config surface: hooks / MCP servers / steering (C2). Executes host
-    # commands when the local review panel's claude/codex loads them.
+    # commands when the local review panel's claude/codex loads them. Nested
+    # variants are flagged too (H7): the CLIs auto-ingest steering/MCP config
+    # from subdirectories they descend into, not just the repo root.
     ".claude/*",
     ".claude/**/*",
+    "**/.claude/*",
+    "**/.claude/**/*",
     ".mcp.json",
+    "**/.mcp.json",
     ".codex/*",
     ".codex/**/*",
+    "**/.codex/*",
+    "**/.codex/**/*",
     "CLAUDE.md",
     "**/CLAUDE.md",
     "AGENTS.md",

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from typing import Any
 
 from orchestrator import TARGET_DIR_NAME
@@ -23,6 +23,30 @@ from orchestrator.target_policy import TargetPolicy
 # frontend gate, ...) is NOT hardcoded here - it lives in the target's own
 # <target>/.laddy/policy.toml and is threaded in as a TargetPolicy (M1). These
 # functions stay pure: the caller loads the policy and passes it.
+
+
+def _matches_any(path: str, globs: Sequence[str]) -> bool:
+    """Casefolded glob match - the classification matcher (H8).
+
+    Classification is a security boundary and the Director's repo can live on
+    a case-insensitive filesystem (WSL DrvFs /mnt/c), where ``Claude.md``
+    opens the very same file as ``CLAUDE.md``: a case-variant path would
+    dodge case-sensitive ENGINE_SENSITIVE_GLOBS and, for ``.md``, ride the L1
+    safe lane while shadowing real agent config on disk. So BOTH sides are
+    casefolded before matching. ``fnmatchcase`` keeps the folding explicit
+    and platform-independent (``fnmatch.fnmatch`` defers to the host's
+    ``normcase``, i.e. stays case-sensitive on Linux where the engine runs).
+
+    Deliberately NOT casefolded elsewhere: ``path_guard`` /
+    ``nondraft_report_specs`` (an unmatched case-variant is already an
+    OFFENDING path - fail closed - so widening their match would only loosen
+    them) and ``deleted_test_files`` / ``touches_invariant_tests`` (a D/M
+    status carries the path as recorded in trusted main's index, which a
+    branch cannot case-shift; a case-variant ADD that shadows an invariant
+    test on checkout is caught by the casefolded sensitive match instead).
+    """
+    folded = path.casefold()
+    return any(fnmatchcase(folded, g.casefold()) for g in globs)
 
 
 def touches_invariant_tests(
@@ -133,7 +157,7 @@ def spec_is_high_risk(
         return True
     globs = policy.all_sensitive_globs
     for token in _PATH_TOKEN_RE.findall(spec_text):
-        if any(fnmatch(token, g) for g in globs):
+        if _matches_any(token, globs):
             return True
     return False
 
@@ -147,13 +171,11 @@ _MEDIUM_LINES = 300
 
 def sensitive_paths(policy: TargetPolicy, changed_files: Sequence[str]) -> list[str]:
     globs = policy.all_sensitive_globs
-    return [f for f in changed_files if any(fnmatch(f, g) for g in globs)]
+    return [f for f in changed_files if _matches_any(f, globs)]
 
 
 def security_paths(policy: TargetPolicy, changed_files: Sequence[str]) -> list[str]:
-    return [
-        f for f in changed_files if any(fnmatch(f, g) for g in policy.security_globs)
-    ]
+    return [f for f in changed_files if _matches_any(f, policy.security_globs)]
 
 
 def computed_risk(
@@ -214,9 +236,12 @@ def _is_safe_by_construction(policy: TargetPolicy, path: str) -> bool:
     agents gate it. The exclusion is engine-side and unconditional: a target's
     ``safe_globs`` cannot re-admit the spec dir.
     """
-    if path.startswith(_SPEC_PREFIX):
+    # casefolded like _matches_any (H8): a case-variant spec path resolves to
+    # the real spec dir on a case-insensitive filesystem, so it must not slip
+    # past this exclusion into the L1 no-review lane.
+    if path.casefold().startswith(_SPEC_PREFIX.casefold()):
         return False
-    return any(fnmatch(path, g) for g in policy.all_safe_globs)
+    return _matches_any(path, policy.all_safe_globs)
 
 
 def classify_blast_radius(
@@ -266,7 +291,7 @@ def destructive_migrations(
     drop_table/drop_column (heuristic)."""
     out: list[str] = []
     for f in changed_files:
-        if any(fnmatch(f, g) for g in policy.migration_globs):
+        if _matches_any(f, policy.migration_globs):
             try:
                 text = read_text(f)
             except OSError:
