@@ -90,7 +90,10 @@ class ArtifactAttestation:
     """Result of checking the VPS-authored state/decision artifact chain.
 
     The check is applicable to a fetched VPS task tip: its committed artifacts
-    must describe that exact code history. It is deliberately not applicable
+    must describe that exact code history AND the recomputed policy decision
+    must be mergeable - merge_check exits non-zero for a consistent
+    stop_before_merge too, so an honestly-committed stop holds here instead of
+    laundering into a green policy gate (H1). It is deliberately not applicable
     to ``--local`` because a Director-authored code commit makes those inherited
     artifacts stale by construction; the fresh trusted-local gates judge that
     commit instead. Keeping this as a typed state avoids laundering N/A into a

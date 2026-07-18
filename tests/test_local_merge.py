@@ -1611,6 +1611,46 @@ def test_remote_gather_still_blocks_vps_artifact_mismatch(
     assert any("state_sha_mismatch" in reason for reason in verdict.reasons)
 
 
+def test_remote_gather_holds_an_honest_stop_decision(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # H1: merge_check exits non-zero for a CONSISTENT stop_before_merge (an
+    # honestly-committed stop, e.g. test_files_deleted or declared high_risk on
+    # non-sensitive paths). The local authority must hold that branch even when
+    # it is L2 with every deterministic/judgment gate green - and never merge it.
+    from orchestrator.local_merge import BROKEN
+
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # L2 diff
+    tools = _tools(
+        local_repo,
+        _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    tools.merge_check_fn = lambda repo, base, task: (
+        1,
+        "reason=recomputed_stop_before_merge "
+        "recomputed_reasons=['test_files_deleted: tests/test_x.py']",
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+
+    assert gates.blast == L2 and gates.tests_passed  # green, ordinary logic
+    assert gates.artifact_attestation.failed  # policy_ok is never True for a stop
+    v = decide("t1", gates)
+    assert v.decision == "hold" and v.kind == BROKEN
+    assert any("test_files_deleted" in r for r in v.reasons)
+
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["t1"],
+        verify_one=lambda t: gates,
+        merge_one=lambda request: (merged.append(request.task_id) or True),
+    )
+    [ev] = engine.run()
+    assert ev.decision == "hold"
+    assert merged == []  # the honest stop never reaches the mutating boundary
+
+
 def test_local_gather_resolves_a_branch_ref(local_repo: Path, tmp_path: Path) -> None:
     # AC#1: <ref> may also be a plain branch name (not only a worktree path).
     _fix, sha = _local_fix_commit(local_repo, tmp_path)

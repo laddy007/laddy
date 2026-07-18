@@ -6,9 +6,12 @@ and fails on any mismatch. local_merge calls `check()` with an explicit
 task_id (spec §3) as one of the trial-merge gates before a local merge is
 allowed to proceed.
 
-Returns (exit_code, message): 0 = decision echoed in the message
+Returns (exit_code, message): 0 = a MERGEABLE decision echoed in the message
 ("decision=<...>"), 1 = check failed (mismatch / missing artifacts / stale
-SHAs).
+SHAs) OR the recomputed decision is stop_before_merge. An honestly-committed
+stop is consistent, but consistency is not a pass: the decision VALUE is part
+of the verdict, so a stop must never exit 0 and launder itself into the local
+authority's policy gate (H1).
 """
 
 from __future__ import annotations
@@ -107,5 +110,15 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
         return 1, (
             f"reason=policy_mismatch committed={committed.get('decision')} "
             f"recomputed={recomputed.decision} recomputed_reasons={list(recomputed.reasons)}"
+        )
+    if recomputed.decision == "stop_before_merge":
+        # Consistent stop == stop: the chain is honest, but the verdict says
+        # STOP. The caller reads only the exit code, so exit 0 here would turn
+        # an honestly-computed stop into a green policy gate whenever its
+        # reasons (test_files_deleted, high_risk, senior deadlock, ...) have no
+        # independent local manifestation (H1). Honor the decision value.
+        return 1, (
+            "reason=recomputed_stop_before_merge "
+            f"recomputed_reasons={list(recomputed.reasons)}"
         )
     return 0, f"decision={recomputed.decision}"
