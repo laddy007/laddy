@@ -244,9 +244,11 @@ def test_deploy_secret_config_is_sensitive(path: str) -> None:
         ".mcp.json",
         ".codex/hooks.json",
         "CLAUDE.md",
+        "CLAUDE.local.md",
         "AGENTS.md",
         "GEMINI.md",
         "sub/CLAUDE.md",
+        "pkg/CLAUDE.local.md",
     ],
 )
 def test_agent_config_surface_is_l3(path: str) -> None:
@@ -502,6 +504,7 @@ def test_supply_chain_manifest_is_sensitive_at_any_depth(path: str) -> None:
     [
         "Claude.md",
         "pkg/Claude.md",
+        "Claude.local.md",
         "Agents.md",
         ".Claude/hooks/evil.sh",
         ".MCP.json",

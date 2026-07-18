@@ -123,7 +123,7 @@ the engine checkout — never the hub, never target content.
 
 ## 5. Seed the target's `.laddy/` directory
 
-A target project needs its own `.laddy/{specs,tasks,docker,security}`
+A target project needs its own `.laddy/{specs,tasks,docker,security,policy.toml}`
 committed before the first task can run:
 
 - `.laddy/specs/` — where you author task specs (`create-spec` skill or
@@ -136,6 +136,12 @@ committed before the first task can run:
   them into the target repo; adjust `docker/compose.test.yml` /
   `security/semgrep.yml` for the target's own stack (test DB, service
   image, language-specific rules) as needed.
+- `.laddy/policy.toml` — the per-target merge policy (this engine repo's
+  own `.laddy/policy.toml` is a commented worked example). `test_dirs`
+  is a **required** key (a missing key fails the merge closed): it only
+  ADDS test locations (e.g. `src/tests/`) on top of the engine default
+  `tests/`, which always applies. When upgrading an existing target,
+  add `test_dirs = []` to its `policy.toml`.
 
 ## 6. Activate the skills locally
 

@@ -59,6 +59,8 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "**/.codex/**/*",
     "CLAUDE.md",
     "**/CLAUDE.md",
+    "CLAUDE.local.md",
+    "**/CLAUDE.local.md",
     "AGENTS.md",
     "**/AGENTS.md",
     "GEMINI.md",

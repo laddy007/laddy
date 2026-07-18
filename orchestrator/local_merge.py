@@ -794,7 +794,7 @@ class GateTools:
 # opening "CLAUDE.md" finds a branch-shipped "Claude.md" just the same.
 _UNTRUSTED_CONFIG_DIR_NAMES: frozenset[str] = frozenset({".claude", ".codex"})
 _UNTRUSTED_CONFIG_FILE_NAMES: frozenset[str] = frozenset(
-    {"claude.md", "agents.md", "gemini.md", ".mcp.json"}
+    {"claude.md", "claude.local.md", "agents.md", "gemini.md", ".mcp.json"}
 )
 
 
