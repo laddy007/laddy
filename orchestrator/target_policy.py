@@ -115,6 +115,13 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     #     config the scan step honors; the LOAD-BEARING fix is stripping them in
     #     the gate (testgate._containerized) so the scan cannot run vacuously -
     #     classification here is the SECOND layer (H-D2-2, H-D2-3).
+    #   - .coveragerc: coverage.py (via pytest-cov) auto-discovers a dedicated
+    #     .coveragerc in the gate's cwd; a branch `[run]\nomit = <its changed
+    #     files>` drops those from coverage.xml so diff-cover --fail-under=90
+    #     passes vacuously (the same config in setup.cfg/tox.ini/pyproject.toml is
+    #     already covered above). Same class as the scanner configs: the
+    #     LOAD-BEARING fix is neutralizing it in the gate, classification here is
+    #     the SECOND layer.
     "conftest.py",
     "**/conftest.py",
     "pytest.ini",
@@ -133,6 +140,8 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "**/.gitleaks.toml",
     ".gitleaksignore",
     "**/.gitleaksignore",
+    ".coveragerc",
+    "**/.coveragerc",
     # Engine surfaces when laddy itself is the target branch (repo_laddy):
     # post-split the engine's own code lives at the branch REPO ROOT.
     "orchestrator/*",

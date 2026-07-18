@@ -552,6 +552,11 @@ def test_pytest_and_scanner_config_files_are_sensitive() -> None:
         ".semgrep/rules.yml",
         ".gitleaks.toml",
         ".gitleaksignore",
+        # coverage.py auto-discovers a dedicated .coveragerc; a `[run] omit`
+        # drops the branch's changed files from coverage.xml so
+        # diff-cover --fail-under=90 passes vacuously (same class as H-D2-2/3).
+        ".coveragerc",
+        "sub/.coveragerc",
     ):
         assert sensitive_paths([path]) == [path], path
         assert classify_blast_radius([path]) == L3, path

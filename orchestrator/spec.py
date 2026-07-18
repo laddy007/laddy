@@ -60,17 +60,26 @@ class TaskSpec:
 
 _LIST_RE = re.compile(r"^\[(.*)\]$")
 
-_BOM = "\ufeff"
-
-
 def _parse_front_matter(text: str) -> dict[str, str]:
-    # Fail CLOSED on a defeated opening fence (M-D4-1). A UTF-8 BOM or a leading
-    # blank/whitespace line shifts the '---' off line 0; str.strip() does not
-    # remove a BOM, so the old fence test silently returned {} and defaults fell
-    # to the MOST-privileged interpretation (type=feature -> not report_only,
-    # not draft). A genuinely front-matter-less markdown file stays valid.
-    if text.startswith(_BOM):
-        raise SpecError("spec begins with a UTF-8 BOM (LF + ASCII-only required)")
+    # Fail CLOSED on a defeated opening fence (M-D4-1). A non-ASCII / zero-width
+    # character - a UTF-8 BOM (U+FEFF), a ZWSP (U+200B), or any other invisible
+    # format char - anywhere on the first line shifts the '---' off a clean
+    # fence: str.strip() removes ASCII whitespace but NOT these, so the fence
+    # test silently returned {} and defaults fell to the MOST-privileged
+    # interpretation (type=feature -> not report_only, not draft). Checking the
+    # whole first line (not just text[0]) also rejects a leading ASCII space or
+    # tab placed BEFORE the zero-width char to dodge a text[0]-only guard.
+    # Reject any non-ASCII byte there (it also violates the LF + ASCII-only
+    # invariant these specs are held to). A genuinely front-matter-less ASCII
+    # markdown file stays valid.
+    first_line = text.split("\n", 1)[0]
+    bad = next((ch for ch in first_line if ord(ch) > 0x7F), None)
+    if bad is not None:
+        raise SpecError(
+            f"spec's first line contains a non-ASCII / zero-width character "
+            f"(U+{ord(bad):04X}); LF + ASCII-only required, and a leading "
+            "BOM/ZWSP/format char defeats the '---' front-matter fence"
+        )
     lines = text.splitlines()
     if not lines:
         return {}

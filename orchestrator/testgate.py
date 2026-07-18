@@ -190,20 +190,24 @@ RESTORED_INFRA_PATHS: tuple[str, ...] = (
     f"{TARGET_DIR_NAME}/security",
 )
 
-# Scanner ignore/allow config a branch can plant in the scan root so a gate step
+# Scanner / coverage config a branch can plant in the scan root so a gate step
 # passes VACUOUSLY (H-D2-2, H-D2-3): semgrep auto-honors a `.semgrepignore` /
 # `.semgrep/` in cwd and gitleaks auto-reads a `.gitleaks.toml` (allowlist) plus
-# `.gitleaksignore` (fingerprint suppression) from the source path. Classifying
-# them sensitive is only the SECOND layer - by the time a merge is classified
-# the scan already ran. The LOAD-BEARING fix is to neutralize them BEFORE the
-# scan: restore trusted main's copy over the branch clone, or (the normal case,
-# trusted main ships none) delete the branch's. Only applied with a trusted_ref
-# (the local binding gate); the untrusted VPS pre-filter is not a trust boundary.
+# `.gitleaksignore` (fingerprint suppression) from the source path; coverage.py
+# (via pytest-cov) auto-discovers a `.coveragerc` whose `[run] omit` drops the
+# branch's changed files from coverage.xml so diff-cover --fail-under passes on
+# empty diff. Classifying them sensitive is only the SECOND layer - by the time
+# a merge is classified the scan already ran. The LOAD-BEARING fix is to
+# neutralize them BEFORE the scan: restore trusted main's copy over the branch
+# clone, or (the normal case, trusted main ships none) delete the branch's. Only
+# applied with a trusted_ref (the local binding gate); the untrusted VPS
+# pre-filter is not a trust boundary.
 NEUTRALIZED_SCAN_CONFIGS: tuple[str, ...] = (
     ".semgrepignore",
     ".semgrep",
     ".gitleaks.toml",
     ".gitleaksignore",
+    ".coveragerc",
 )
 
 

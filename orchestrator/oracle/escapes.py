@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.artifacts import TaskArtifacts
+from orchestrator.artifacts import ArtifactPathError, LogCorruptionError, TaskArtifacts
 from orchestrator.flags import ORACLE_ESCAPE, derive_flags, raise_flag
 from orchestrator.oracle.classes import CLASSES_PATH, load_class_slugs
 from orchestrator.oracle.runlog import append_escape, authentic_escape_ids
@@ -141,7 +141,17 @@ def iter_escapes(repo_root: Path) -> list[EscapeRecord]:
     authentic = authentic_escape_ids(repo_root)
     for task_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir()):
         art = TaskArtifacts(repo_root, task_dir.name)
-        for flag in derive_flags(art.read_log()):
+        try:
+            flags = derive_flags(art.read_log())
+        except (LogCorruptionError, ArtifactPathError):
+            # The oracle is a NON-BLOCKING reporter. read_jsonl now raises on an
+            # interior-corrupt task log (S5), and a branch-forged task dir could
+            # be a refused symlink (ArtifactPathError): a single poisoned log
+            # must not break the ledger for every OTHER task. Skip it - a skipped
+            # task counts as zero escapes, the conservative fail-safe direction
+            # (never a spurious RECURRENT), and it changes no merge decision.
+            continue
+        for flag in flags:
             if flag.kind != ORACLE_ESCAPE:
                 continue
             if (task_dir.name, flag.id) not in authentic:

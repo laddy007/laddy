@@ -70,6 +70,30 @@ def test_leading_bom_before_fence_raises(tmp_path: Path) -> None:
         parse_spec(_spec(tmp_path, "\ufeff---\ntype: audit\n---\n"))
 
 
+@pytest.mark.parametrize(
+    "lead",
+    [
+        "\u200b",  # ZWSP - str.strip() leaves it, so the BOM-only guard missed it
+        "\u200c",  # ZWNJ
+        "\ufeff",  # BOM (also covered above; kept for the shared assertion)
+        "\u2060",  # word joiner
+        "\u00a0",  # no-break space
+        " \u200b",  # ASCII space THEN ZWSP - text[0] is ASCII, so a text[0]-only
+        "\t\u200b",  # or leading-tab guard misses it; the whole first line is checked
+    ],
+)
+def test_leading_zero_width_or_non_ascii_before_fence_raises(
+    tmp_path: Path, lead: str
+) -> None:
+    # M-D4-1 residual: any leading non-ASCII / zero-width char shifts '---' off
+    # line 0. str.strip() removes ASCII whitespace but NOT these, so the fence
+    # test silently returned {} -> type=feature (executable, non-draft). The old
+    # guard only rejected the BOM; generalize to fail closed on any leading
+    # non-ASCII byte.
+    with pytest.raises(SpecError, match="non-ASCII|BOM"):
+        parse_spec(_spec(tmp_path, f"{lead}---\ntype: audit\nstatus: draft-proposal\n---\n"))
+
+
 def test_leading_blank_line_before_fence_raises(tmp_path: Path) -> None:
     with pytest.raises(SpecError, match="first line"):
         parse_spec(_spec(tmp_path, "\n---\ntype: audit\n---\n"))

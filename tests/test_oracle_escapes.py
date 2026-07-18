@@ -150,6 +150,27 @@ def test_iter_escapes_counts_only_the_authentic_of_a_mixed_pair(repo: Path) -> N
     assert [(r.task_id, r.flag_id) for r in records] == [("t1", "t1#1")]
 
 
+def test_iter_escapes_skips_a_corrupt_task_log_and_keeps_the_rest(repo: Path) -> None:
+    # S5 interaction: read_jsonl now RAISES LogCorruptionError on a malformed
+    # interior line. The oracle is a non-blocking reporter, so one poisoned
+    # (branch-forged / corrupt) task log must be SKIPPED - not break the ledger
+    # for every OTHER task. The authentic escape from t1 must still surface.
+    from orchestrator import TARGET_DIR_NAME
+
+    _raise(repo)  # t1: authentic escape (run-log provenance written)
+    # t2 gets a well-formed line, then a malformed INTERIOR line prepended so it
+    # is not treated as a torn final append -> read_jsonl raises for this task.
+    TaskArtifacts(repo, "t2").append_log(action="flag", id="t2#1", kind="note",
+                                         summary="ok")
+    log = repo / TARGET_DIR_NAME / "tasks" / "t2" / "iteration-log.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    lines.insert(0, "this is not json - interior corruption")
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    records = iter_escapes(repo)  # must NOT raise
+    assert [(r.task_id, r.flag_id) for r in records] == [("t1", "t1#1")]
+
+
 def test_derive_ledger_counts_recurrence_and_skips_dismissed() -> None:
     def rec(task: str, slug: str | None, status: str = "open") -> EscapeRecord:
         return EscapeRecord(task, f"{task}#1", slug, "confirmed", status, "s")

@@ -256,6 +256,9 @@ def test_binding_gate_neutralizes_branch_scanner_config_with_trusted_ref() -> No
     # clone, or deletes the branch's when trusted main ships none.
     from orchestrator.testgate import NEUTRALIZED_SCAN_CONFIGS, BindingGate
 
+    # .coveragerc rides the same vacuous-gate vector: coverage.py auto-discovers
+    # it and a `[run] omit` empties coverage.xml so diff-cover passes on nothing.
+    assert ".coveragerc" in NEUTRALIZED_SCAN_CONFIGS
     cmd = BindingGate(compose_rel="c.yml").command(
         "branchsha", "myapp", trusted_ref="trustedsha"
     )
