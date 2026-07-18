@@ -20,7 +20,12 @@ for that newer commit. A stopgap until bounce-to-VPS exists.
 Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L1 safe-by-construction : merge after the mechanical gates, no review
   L2 ordinary logic       : the agents ARE the gate (rw2 + security panel)
-  L3 sensitive surface    : never auto-merge; digest -> human Y/N
+  L3 sensitive surface    : never auto-merge; digest -> human risk decision
+
+EVERY merge side-effect into local main - L1, L2, and L3 alike - additionally
+requires the merge-safety confirmation: the operator types the EXACT task id
+(H4). A wrong or blank id declines and merges nothing; --no-input is a true
+dry run that never prompts and never merges.
 
 Deterministic gates (block on red): local full test re-run, diff-coverage,
 semgrep, gitleaks, and (for a fetched VPS tip) artifact attestation via
@@ -138,6 +143,9 @@ BROKEN = "broken"
 #   dry_run       : --no-input dry run -> would auto-merge, but nothing is
 #                   touched (no local-main mutation, no push)
 DRY_RUN = "dry_run"
+#   declined      : gates green and mergeable, but the operator did not type
+#                   the exact task id (H4) -> nothing merged, branch stays ready
+DECLINED = "declined"
 
 
 @dataclass(frozen=True)
@@ -175,12 +183,13 @@ def build_digest(
     advisory: Sequence[str] = (),
 ) -> str:
     """One-screen summary. For a RISK_DECISION it names what is sensitive and
-    asks Y/N; for a BROKEN hold it diagnoses what failed, why, and what is
-    needed - and does NOT offer a merge (you fix broken code, not merge it).
+    asks for the merge-safety confirmation (type the exact task id); for a
+    BROKEN hold it diagnoses what failed, why, and what is needed - and does
+    NOT offer a merge (you fix broken code, not merge it).
 
     ``advisory`` (non-empty only on an --advisory RISK_DECISION) lists the
-    judgment-gate findings being WAIVED, so the Y/N prompt is honest: it never
-    claims "all gates passed" for a change the panel objected to."""
+    judgment-gate findings being WAIVED, so the confirmation prompt is honest:
+    it never claims "all gates passed" for a change the panel objected to."""
     safe_task = untrusted_inline(task_id)
     lines = [f"# Merge hold: {safe_task}  (blast {gates.blast}, {kind})", ""]
 
@@ -201,7 +210,8 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{safe_task}` into main under --advisory? (y/N) - you decide",
+                f"Merge `{safe_task}` into main under --advisory? Type the",
+                "exact task id to merge; anything else declines - you decide",
                 "on this summary, not by reading the diff.",
                 "",
             ]
@@ -213,8 +223,9 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{safe_task}` into main? (y/N) - you decide on this",
-                "summary, not by reading the diff.",
+                f"Merge `{safe_task}` into main? Type the exact task id to",
+                "merge; anything else declines - you decide on this summary,",
+                "not by reading the diff.",
                 "",
             ]
         return "\n".join(lines)
@@ -337,8 +348,8 @@ def decide(
     # blocking; it may never touch deterministic (the trust invariant).
     blocking = deterministic + ([] if advisory_mode else judgment)
     if blocking:
-        # No _L3_REASON here: this branch returns before the L3 y/N prompt can
-        # ever be offered, so naming a "human risk decision" would advertise a
+        # No _L3_REASON here: this branch returns before the L3 confirmation
+        # can ever be offered, so naming a "human risk decision" would advertise a
         # decision the Director is not being given. The blast level still
         # reaches them through the digest header.
         reasons = tuple(blocking)
@@ -479,8 +490,10 @@ class LocalMergeEngine:
     verify_one: VerifyOne
     merge_one: MergeOne
     on_verdict: Callable[[MergeVerdict], None] = field(default=lambda v: None)
-    # consulted for a RISK_DECISION hold (L3, gates green): return True to
-    # approve the merge. Default declines (non-interactive: L3 stays held).
+    # consulted before ANY merge side-effect on local main - an L1/L2
+    # AUTO_MERGE decision as well as an L3 RISK_DECISION hold (H4): return
+    # True to approve. The interactive implementation accepts only the EXACT
+    # task id. Default declines (fail closed: nothing merges unconfirmed).
     confirm: Callable[[MergeVerdict], bool] = field(default=lambda v: False)
     # dry run (--no-input): report what WOULD auto-merge but never mutate local
     # main or push. Without this, --no-input still auto-merged every L1/L2 green
@@ -502,8 +515,11 @@ class LocalMergeEngine:
         landed - a pair that passes in isolation but conflicts once combined is
         caught here, not left in a red main. A hold never blocks the others.
         Never fixes anything - there is no fix path. A BROKEN hold is never
-        offered for merge; only a RISK_DECISION (all gates green, just
-        sensitive) is put to the confirm() callback.
+        offered for merge. EVERY merge side-effect on local main is put to the
+        confirm() callback PER TASK with that task's verdict - an L1/L2
+        AUTO_MERGE decision as well as an L3 RISK_DECISION (H4); interactively
+        that means typing the exact task id. A declined task merges nothing
+        and the batch continues; a dry run never confirms and never merges.
         """
         results: list[MergeVerdict] = []
         for task_id in self.list_ready():
@@ -515,6 +531,24 @@ class LocalMergeEngine:
                     # survives the L3 confirm - else an advisory L3 merge would
                     # silently drop its record (AC5). kind stays RISK_DECISION.
                     verdict = replace(verdict, decision="merge")
+            elif verdict.merged and not self.dry_run and not self.confirm(verdict):
+                # AUTO_MERGE (L1/L2): the merge side-effect needs the SAME
+                # merge-safety confirmation as L3 (H4) - auto-merge means "no
+                # review required", never "no human at the merge". A dry run is
+                # excluded here only because it never merges at all (the swap
+                # below), so there is nothing to confirm and nothing prompts.
+                reasons = (
+                    "merge not confirmed (the exact task id was not typed); "
+                    "nothing merged",
+                )
+                verdict = MergeVerdict(
+                    task_id, "hold", DECLINED, reasons,
+                    f"# Merge hold: {untrusted_inline(task_id)} (not confirmed)\n\n"
+                    "The merge-safety confirmation declined this merge: the exact\n"
+                    "task id was not typed. Nothing was merged and no state was\n"
+                    "changed; the branch stays ready. Re-run merge-verified.sh to\n"
+                    "be asked again.\n",
+                )
             if verdict.merged and self.dry_run:
                 # dry run: record what WOULD auto-merge, but touch nothing. The
                 # advisory tuple is CARRIED (not dropped): the whole point of the
@@ -1122,11 +1156,26 @@ def _default_tools(config: object) -> GateTools:
 
 
 def _interactive_confirm(v: MergeVerdict) -> bool:
-    """RISK_DECISION (L3) prompt: show what is sensitive, ask y/N."""
-    print("\n" + v.digest)
-    # Keep the authorization prompt itself entirely static. All dynamic,
-    # attacker-influenced context is rendered safely above it.
-    return input("[risk] authorize this merge into main? (y/N) > ").strip().lower() == "y"
+    """Merge-safety confirmation for ANY merge into local main (H4).
+
+    L1/L2 AUTO_MERGE and L3 RISK_DECISION alike: the operator must type the
+    EXACT task id. A wrong or blank id declines - nothing is merged and the
+    task simply stays ready/held. A task id the terminal cannot reproduce
+    (hostile control characters) is untypeable and therefore unmergeable:
+    that is fail-closed, not a defect.
+    """
+    if v.digest:  # L3 risk context; an L1/L2 auto-merge has no digest
+        print("\n" + v.digest)
+    # The candidate id is rendered safely here; the input() prompt itself
+    # stays entirely static so attacker-influenced text can never restyle it.
+    print(f"\n[confirm] merge candidate: {untrusted_inline(v.task_id)}")
+    print("[confirm] merging into local main requires typing the EXACT task id;")
+    print("[confirm] anything else declines and merges nothing.")
+    typed = input("[confirm] type the exact task id to merge (blank declines) > ")
+    if typed.strip() != v.task_id:
+        print("[confirm] declined - the typed id does not match; nothing merged.")
+        return False
+    return True
 
 
 def _ask(prompt: str) -> bool:

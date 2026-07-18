@@ -29,8 +29,8 @@ any kind.
                                                                              │
    YOU run merge-verified.sh ◄─────────────────────────────────────────────┘ (fetch the hub)
         │ re-run tests + security panel on YOUR machine (trusted)
-        ├─ safe + green ─► auto-merge into local main
-        ├─ sensitive    ─► asks you "merge? (y/N)"
+        ├─ safe + green ─► merges after you type the exact task id
+        ├─ sensitive    ─► risk summary; type the exact task id to merge
         └─ broken/flag   ─► tells you what failed and why (no merge)
    YOU push main to GitHub, and to the hub (so the next task starts current)
 ```
@@ -247,11 +247,13 @@ the policy from your trusted code (not the branch's), re-runs the
 cross-vendor reviewer plus a **security panel**. Then it acts by how
 risky the change is:
 
-- **Safe (docs/i18n) or ordinary logic, all gates green** → **auto-merges**
-  into your local `main`.
+- **Safe (docs/i18n) or ordinary logic, all gates green** → **merges** into
+  your local `main` after you confirm by typing the **exact task id** (a
+  wrong or blank id declines and merges nothing).
 - **Touches a sensitive surface** (auth, migrations, `models.py`, deploy, …),
   gates green → **asks you**: prints *what* is sensitive and a one-screen
-  summary, then `merge? (y/N)`. You make a risk call — you don't read the diff.
+  summary, then you type the **exact task id** to merge. You make a risk
+  call — you don't read the diff.
 - **Something failed** (a test, coverage, a scanner, a security/reviewer
   blocker) → **broken**: prints *what failed, why, and what is needed*, and
   does **not** offer to merge. Fix it by re-running the task on the VPS; the

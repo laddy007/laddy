@@ -190,6 +190,9 @@ def test_green_l1_auto_merges_without_dry_run() -> None:
         merge_one=lambda request: (
             merged.append((request.task_id, request.verified_sha)) or True
         ),
+        # H4: even a green L1 auto-merge is gated on the merge-safety
+        # confirmation; this test confirms it to exercise the merge path.
+        confirm=lambda v: True,
     )
     results = engine.run()
     assert merged == [("t1", "abc123def456")]

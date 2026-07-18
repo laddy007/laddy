@@ -210,9 +210,11 @@ trusted machine**: full test suite + coverage + semgrep + gitleaks,
 plus a cross-vendor reviewer re-run and a security panel. Then, by
 blast radius:
 
-- safe / ordinary change, all gates green → **auto-merges** into local `main`.
+- safe / ordinary change, all gates green → **merges** into local `main`
+  after you confirm by typing the exact task id (anything else declines).
 - touches a sensitive surface (auth, migrations, `models.py`, deploy, …),
-  gates green → prints what's sensitive + a summary, asks `merge? (y/N)`.
+  gates green → prints what's sensitive + a summary; type the exact task id
+  to merge (anything else declines).
 - anything red (test/coverage/scanner/reviewer) → **holds**, prints what
   failed and why, never offers to merge (fix on the VPS and re-run).
 

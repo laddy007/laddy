@@ -79,9 +79,11 @@ def test_l3_green_is_risk_decision_not_broken() -> None:
     v = decide("t1", _gates(blast=L3, sensitive_files=("myapp/models.py",)))
     assert v.decision == "hold"
     assert v.kind == RISK_DECISION
-    # the digest NAMES what is sensitive and asks y/N (a risk call, not a fix)
+    # the digest NAMES what is sensitive and asks for the exact task id
+    # (a risk call, not a fix - and never a mere y/N)
     assert "myapp/models.py" in v.digest
-    assert "y/N" in v.digest
+    assert "exact task id" in v.digest
+    assert "y/N" not in v.digest
     assert "What is needed" not in v.digest  # not a broken/diagnostic hold
 
 
@@ -93,7 +95,7 @@ def test_failed_gate_is_broken_even_on_sensitive_surface() -> None:
     assert v.kind == BROKEN  # a real failure -> broken, not a risk decision
     # broken digest diagnoses + says what is needed, offers NO merge
     assert "What is needed" in v.digest
-    assert "Merge `t1` into main? (y/N)" not in v.digest
+    assert "Merge `t1` into main?" not in v.digest
 
 
 def test_broken_hold_on_l3_never_claims_a_risk_decision_is_required() -> None:
@@ -298,7 +300,7 @@ def test_l3_advisory_holds_risk_decision_with_honest_digest() -> None:
     )
     assert v.decision == "hold" and v.kind == RISK_DECISION
     assert any("IDOR on order" in a for a in v.advisory)
-    assert "y/N" in v.digest
+    assert "exact task id" in v.digest
     assert "WAIVED" in v.digest
     assert "IDOR on order" in v.digest
     assert "All correctness/security gates passed" not in v.digest
@@ -352,6 +354,9 @@ def test_reviewer_summary_is_safely_derived_without_rewriting_raw_verdict() -> N
 def test_interactive_authorization_prompt_is_static(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # The input() prompt itself carries NO attacker-influenced text: the raw
+    # task id (which the VPS controls) is rendered safely ABOVE it, never
+    # interpolated into the authorization line.
     from orchestrator.local_merge import _interactive_confirm
 
     prompts: list[str] = []
@@ -368,9 +373,45 @@ def test_interactive_authorization_prompt_is_static(
     )
 
     assert _interactive_confirm(verdict) is False
-    assert prompts == ["[risk] authorize this merge into main? (y/N) > "]
-    assert "task" not in prompts[0]
-    assert "safe rendered context" in capsys.readouterr().out
+    assert prompts == [
+        "[confirm] type the exact task id to merge (blank declines) > "
+    ]
+    assert "\x1b" not in prompts[0]
+    out = capsys.readouterr().out
+    assert "safe rendered context" in out
+    assert "\x1b" not in out  # the hostile id was rendered safely, not raw
+
+
+def test_interactive_confirm_accepts_only_the_exact_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # H4 AC1: the merge-safety confirmation is the EXACT task id - the old
+    # y/N answer, a wrong id, and a blank all decline.
+    from orchestrator.local_merge import _interactive_confirm
+
+    verdict = MergeVerdict("t1", "merge")
+    for typed, expected in [
+        ("t1", True),
+        ("  t1  ", True),  # operator whitespace is forgiven, the id is exact
+        ("y", False),  # the old y/N reflex no longer merges anything
+        ("t2", False),
+        ("T1", False),
+        ("", False),
+    ]:
+        monkeypatch.setattr("builtins.input", lambda p, typed=typed: typed)
+        assert _interactive_confirm(verdict) is expected, typed
+
+
+def test_interactive_confirm_prints_decline_message_on_mismatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from orchestrator.local_merge import _interactive_confirm
+
+    monkeypatch.setattr("builtins.input", lambda p: "wrong")
+    assert _interactive_confirm(MergeVerdict("t1", "merge")) is False
+    out = capsys.readouterr().out
+    assert "declined" in out and "nothing merged" in out
+    assert "EXACT task id" in out  # the prompt copy says what to type
 
 
 # --- engine: advisory travels inside the atomic merge request ----------------
@@ -391,6 +432,7 @@ def test_engine_advisory_merge_carries_record_in_request() -> None:
         list_ready=lambda: ["a"],
         verify_one=lambda t: _sec_blocker_gates(blast=L2),
         merge_one=lambda request: (requests.append(request) or True),
+        confirm=lambda v: True,
         advisory_mode=True,
     )
     [v] = engine.run()
@@ -423,6 +465,7 @@ def test_engine_advisory_green_merge_has_empty_record() -> None:
         list_ready=lambda: ["a"],
         verify_one=lambda t: _gates(blast=L2),
         merge_one=lambda request: (requests.append(request) or True),
+        confirm=lambda v: True,
         advisory_mode=True,
     )
     [v] = engine.run()
@@ -438,6 +481,7 @@ def test_engine_precommit_failure_becomes_broken_hold() -> None:
         list_ready=lambda: ["a"],
         verify_one=lambda task: _sec_blocker_gates(blast=L2),
         merge_one=fail_before_commit,
+        confirm=lambda v: True,
         advisory_mode=True,
     )
 
@@ -591,6 +635,7 @@ def test_engine_merges_green_holds_red_processes_all() -> None:
         list_ready=lambda: ready,
         verify_one=lambda t: gate_map[t],
         merge_one=lambda request: (merged.append(request.task_id) or True),
+        confirm=lambda v: True,
     )
     results = engine.run()
     assert [(v.task_id, v.decision) for v in results] == [
@@ -620,6 +665,7 @@ def test_engine_unapplyable_branch_becomes_hold() -> None:
         list_ready=lambda: ["a"],
         verify_one=lambda t: _gates(blast=L2),
         merge_one=lambda request: False,
+        confirm=lambda v: True,
     )
     [v] = engine.run()
     assert v.decision == "hold"
@@ -639,8 +685,101 @@ def test_engine_reverify_is_sequential() -> None:
         order.append(f"merge:{request.task_id}")
         return True
 
-    LocalMergeEngine(list_ready=lambda: ["a", "b"], verify_one=verify, merge_one=merge).run()
+    LocalMergeEngine(
+        list_ready=lambda: ["a", "b"], verify_one=verify, merge_one=merge,
+        confirm=lambda v: True,
+    ).run()
     assert order == ["verify:a", "merge:a", "verify:b", "merge:b"]
+
+
+# --- H4: EVERY merge side-effect requires the merge-safety confirmation ------
+
+
+def test_engine_auto_merge_consults_confirm_per_task_with_its_id() -> None:
+    # H4 AC2: an L1/L2 AUTO_MERGE decision goes through confirm() too - one
+    # call per task carrying that task's exact id - and only confirmed tasks
+    # reach the mutating boundary. A declined task does not block the batch.
+    asked: list[str] = []
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a", "b", "c"],
+        verify_one=lambda t: _gates(blast=L1 if t == "b" else L2),
+        merge_one=lambda request: (merged.append(request.task_id) or True),
+        confirm=lambda v: (asked.append(v.task_id) or v.task_id != "b"),
+    )
+    results = engine.run()
+    assert asked == ["a", "b", "c"]  # per task, in order, with the exact id
+    assert merged == ["a", "c"]  # the declined L1 task merged nothing
+    assert [(v.task_id, v.decision) for v in results] == [
+        ("a", "merge"),
+        ("b", "hold"),
+        ("c", "merge"),
+    ]
+
+
+def test_engine_declined_auto_merge_holds_cleanly() -> None:
+    # H4 AC1: declining merges nothing and marks nothing - the verdict is a
+    # plain "not confirmed" hold (kind DECLINED), never BROKEN, never merged.
+    from orchestrator.local_merge import DECLINED
+
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _gates(blast=L2),
+        merge_one=lambda request: (merged.append(request.task_id) or True),
+        confirm=lambda v: False,
+    )
+    [v] = engine.run()
+    assert v.decision == "hold" and v.kind == DECLINED
+    assert merged == []
+    assert any("nothing merged" in r for r in v.reasons)
+    assert "exact" in v.digest and "task id" in v.digest
+    assert "stays ready" in v.digest
+
+
+def test_engine_default_confirm_declines_every_merge() -> None:
+    # Fail closed: an engine wired with no confirm callback merges NOTHING -
+    # not even a green L1 (the old behavior auto-merged it silently).
+    merged: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _gates(blast=L1),
+        merge_one=lambda request: (merged.append(request.task_id) or True),
+    )
+    [v] = engine.run()
+    assert v.decision == "hold"
+    assert merged == []
+
+
+def test_engine_l3_confirm_is_asked_once_not_twice() -> None:
+    # An L3 RISK_DECISION goes through ONE confirmation (the task-id prompt is
+    # the risk decision) - the merge gate must not stack a second ask on top.
+    asked: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["s"],
+        verify_one=lambda t: _gates(blast=L3, sensitive_files=("myapp/models.py",)),
+        merge_one=lambda request: True,
+        confirm=lambda v: (asked.append(v.task_id) or True),
+    )
+    [v] = engine.run()
+    assert v.decision == "merge"
+    assert asked == ["s"]
+
+
+def test_engine_dry_run_never_consults_confirm() -> None:
+    # --no-input semantics at the engine level: a dry run never merges, so it
+    # never asks - confirm() being reached would mean a prompt under --no-input.
+    from orchestrator.local_merge import DRY_RUN
+
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"],
+        verify_one=lambda t: _gates(blast=L2),
+        merge_one=lambda request: pytest.fail("dry run must not merge"),
+        confirm=lambda v: pytest.fail("dry run must not confirm/prompt"),
+        dry_run=True,
+    )
+    [v] = engine.run()
+    assert v.kind == DRY_RUN and not v.merged
 
 
 # --- integration: real git worktree + merge, fake tests/scans/LLM ------------
@@ -1003,6 +1142,7 @@ def test_cli_advisory_commits_merge_advisory_into_main(
             ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
              "--advisory", "t1"],
             env=env,
+            confirm=lambda v: True,  # merge-safety confirmation given (H4)
             ask=lambda p: False,  # do not push
             pusher=lambda repo, tasks: None,
         )
@@ -1129,6 +1269,105 @@ def test_cli_advisory_dry_run_preview_is_honest_and_mutates_nothing(
         capture_output=True,
     ).returncode
     assert no_record != 0
+
+
+def test_cli_no_input_is_a_true_dry_run_never_prompts_never_merges(
+    local_repo: Path, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H4 AC3 (CLI): --no-input through the real argparse path merges nothing
+    # into local main, never reaches input() (any prompt fails the test), and
+    # reports the branch as a dry-run hold.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # green L2
+    from orchestrator import local_merge
+
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *a: pytest.fail("--no-input must never prompt"),
+    )
+    before = _g("-C", str(local_repo), "rev-parse", "main")
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2)
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
+             "--no-input", "t1"],
+            env=env,
+            pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert rc == 1  # held (dry run), nothing merged
+    assert "[dry-run] t1: WOULD auto-merge" in out
+    assert "0 merged, 1 held" in out
+    # local main did not move and the change is not in its tree
+    assert _g("-C", str(local_repo), "rev-parse", "main") == before
+    unmerged = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert unmerged != 0
+
+
+def test_cli_auto_merge_wrong_id_declines_and_merges_nothing(
+    local_repo: Path, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H4 AC1+AC2 (CLI): with no injected confirm, the real interactive
+    # confirmation gates an L2 AUTO_MERGE; a wrong typed id merges nothing.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    from orchestrator import local_merge
+
+    monkeypatch.setattr("builtins.input", lambda p: "not-the-task-id")
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2)
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"), "t1"],
+            env=env,
+            pusher=lambda repo, tasks: pytest.fail("push must never be called"),
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert rc == 1  # held: declined
+    assert "declined" in out
+    assert "0 merged, 1 held" in out
+    unmerged = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert unmerged != 0  # nothing landed in local main
+
+
+def test_cli_auto_merge_exact_id_typed_merges(
+    local_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # H4 (CLI, positive): typing the exact task id at the real interactive
+    # prompt is what lets an L2 AUTO_MERGE land in local main.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    from orchestrator import local_merge
+
+    def typed(prompt: str) -> str:
+        if "exact task id" in prompt:
+            return "t1"
+        return "n"  # decline the separate GitHub-push y/N
+
+    monkeypatch.setattr("builtins.input", typed)
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2)
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"), "t1"],
+            env=env,
+            pusher=lambda repo, tasks: pytest.fail("push declined with n"),
+        )
+    finally:
+        local_merge.gather_gates = orig
+    assert rc == 0  # merged, nothing held
+    assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
 
 
 def test_engine_risk_decision_confirmed_merges() -> None:
@@ -1757,6 +1996,7 @@ def test_cli_local_judges_local_sha_bypasses_discovery(
             ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
              "--local", str(fix), "t1"],
             env=env,
+            confirm=lambda v: True,  # merge-safety confirmation given (H4)
             ask=lambda p: False,  # do not push
             pusher=lambda repo, tasks: pushed.append(list(tasks)),
         )
@@ -1884,6 +2124,7 @@ def test_cli_local_absent_remote_warns_and_judges(
             ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"),
              "--local", str(fix), "t1"],
             env=env,
+            confirm=lambda v: True,  # merge-safety confirmation given (H4)
             ask=lambda p: False,
             pusher=lambda repo, tasks: pytest.fail("push must never be called"),
         )
