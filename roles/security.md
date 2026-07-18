@@ -35,18 +35,35 @@ security lens. Approve ONLY if you cannot find a concrete security issue.
 
 ## Verdict — output format (STRICT)
 
-Output ONLY the standard verdict JSON object required by the reviewer
-schema (`verdict`, `risk_level`, `files_reviewed`, `claims_verified`,
-`findings`, `test_assessment`, `residual_risks`).
+Output ONLY one JSON object, no prose:
 
+```json
+{
+  "verdict": "APPROVED | CHANGES_REQUESTED",
+  "risk_level": "low | medium | high",
+  "files_reviewed": ["path"],
+  "claims_verified": [
+    {"claim": "...", "evidence": "file:line or the exact unchecked path", "verified": true}
+  ],
+  "findings": [
+    {"severity": "blocker | advisory",
+     "category": "correctness | invariant | security | migration | test-adequacy | quality",
+     "file": "path", "line": 0,
+     "summary": "...", "failure_scenario": "..."}
+  ],
+  "test_assessment": "...",
+  "residual_risks": ["..."]
+}
+```
+
+- `claims_verified` is a list of OBJECTS (the shape above), never bare
+  strings — put your evidence there, no rubber-stamps.
 - A finding with a concrete `failure_scenario` (attacker input/state ->
   security impact) MUST be `severity: blocker`; advisory findings MUST have
   `failure_scenario: ""` (schema-enforced).
 - `category` for a real security defect is `security`.
 - `risk_level: high` for anything touching auth, crypto, payments, secrets,
   or data exposure.
-- Put your evidence (file:line, the exact unchecked path) in
-  `claims_verified` — no rubber-stamps.
 
 ## Panel semantics
 

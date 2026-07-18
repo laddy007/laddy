@@ -1,0 +1,51 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "note_server/writer.py",
+    "note_server/totp.py",
+    "note_server/server.py",
+    "note_server/config.py",
+    "tests/note_server/test_writer.py",
+    "tests/note_server/test_server.py",
+    "tests/note_server/test_totp.py",
+    "tests/note_server/test_note_config.py",
+    "pyproject.toml",
+    "requirements-dev.txt",
+    ".laddy/specs/mcp.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "The escalating dispute (rw2's write-time-failure blocker, repeating across rounds 4-5) is resolved: a write-time OSError no longer leaves a derelict empty O_CREAT file and does not silently drift a retry onto {name}-2.md",
+      "evidence": "note_server/writer.py:76-89 — the fdopen/write OSError handler best-effort os.unlink(path) before raising a path-free WriteError. The fd cannot leak: os.fdopen's context manager closes the descriptor on __exit__ (which closes the underlying fd even if flush fails) before control reaches the except block and the unlink. Covered by test_writer.py:78-95 (asserts empty folder after failure) and test_writer.py:98-116 (retry reuses notes.md, notes-2.md absent). Independently ran tests/note_server: 55 passed.",
+      "verified": true
+    },
+    {
+      "claim": "Auth-before-write ordering and side-effect freedom: no file is created on an auth or validation rejection",
+      "evidence": "server.py:40-51 verifies the token, then validate_project_name, then writes; each early return precedes write_note. test_server.py:65-93 assert list(tmp_path.iterdir()) == [] on bad token, ±2-drift token, and each invalid project_name.",
+      "verified": true
+    },
+    {
+      "claim": "The path-traversal guard is an authoritative allowlist and error responses never leak the folder's absolute path",
+      "evidence": "writer.py:12,26-28,56-57 reject anything but ^[A-Za-z0-9_-]+$ (test_writer.py:21-26 rejects '', 'foo.md', 'a/b', '../x', 'a b', backslash, non-ASCII); every OS-failure branch raises a path-free WriteError (writer.py:71-89) and the handler returns a generic string (server.py:47-51). No-leak asserted at writer, handler, and end-to-end call_tool levels: test_server.py:99-144.",
+      "verified": true
+    },
+    {
+      "claim": "TOTP is standard RFC 6238 with a correctly decoded hardcoded secret and an exactly-±1 drift window; the base32 secret is gate-safe",
+      "evidence": "Independent recompute: base32 'KNVWKZLWFVHWW2LOMF3WC' -> b'Skeev-Okinawa'; totp t=0/59/1234567890 -> 411400/795119/948172 (matches spec and test_totp.py:32-37). verify (totp.py:62-90) accepts c-1/c/c+1, rejects ±2, skips negative counters (test_totp.py:57-77), and rejects non-ASCII tokens without raising. Secret line carries `# gitleaks:allow` (totp.py:18).",
+      "verified": true
+    },
+    {
+      "claim": "Config is env-only, all required with no default, and fails loud; dependency hygiene per AC8 is satisfied",
+      "evidence": "config.py:31-61 raises ConfigError on missing/non-existent folder, missing host, missing/non-integer/out-of-range port. mcp declared in pyproject.toml [project].dependencies AND requirements-dev.txt:8 (so the gate image, which never runs `pip install .`, still installs it); basedpyright include extended to cover note_server.",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "All eight acceptance criteria are covered by unit tests plus end-to-end call_tool round-trips, and I independently confirmed the note_server suite is green (55 passed). No invariant/architecture-contract tests were weakened; the Round-5 delta only adds coverage (write-time cleanup and retry-reuse) and strengthens the 'nothing written on failure' invariant. Both reviewers now concur (rw1 APPROVED, rw2's sole prior blocker resolved and APPROVED); I verified the fix from first principles rather than relying on their verdicts, and it is sound.",
+  "residual_risks": [
+    "The os.unlink cleanup and the resolved-path escape branch (writer.py:64-65) are best-effort / defence-in-depth and inherently untestable via the public API given the regex — acceptable and honestly commented.",
+    "In the extremely rare case os.fdopen itself raises before returning the file object, the descriptor would not be closed by the context manager; this is a negligible double-fault edge (fdopen essentially only fails on an invalid fd) and does not affect the 'nothing written' invariant since the unlink still runs.",
+    "Design-level, documented in the spec's Known limitation: the hardcoded shared secret makes TOTP a static shared credential, not per-user auth — acceptable for the stated single-user VPS use, not for multi-user without follow-up."
+  ]
+}

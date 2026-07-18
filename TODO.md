@@ -33,23 +33,22 @@ až dojedu tab local claude - zjistit jak je to s mcp (je nová spec?)
 dva specy merge-hold.md
 !     0local creating spec openhabds
 
-v mcp je přímo secret - má být v env.conf či nějde co nebude v gitu
-
 ## From the 2026-07-17 session (mcp + fullrun-s2 hand-merged, bypassing the gate)
 
-- **DO NOT `git push origin` until the mcp secret is settled.** Hand-merging `mcp`
-  puts `SECRET_B32 = "KNVWKZLWFVHWW2LOMF3WC"` (`note_server/totp.py:18`, decodes to
-  ASCII `Skeev-Okinawa`) into main's history permanently. `origin` is
-  `https://github.com/laddy007/laddy.git` - the first push publishes it, and moving
-  the secret to env afterwards does NOT remove it without rewriting history. This is
-  the one irreversible consequence of the hand-merge (see the secret item above).
-- **mcp's two real defects are now IN main, so they need a NEW task, not a
-  `--resume`:** a 6-digit network factor with no throttling / replay protection
-  (brute-forceable if the server is ever exposed), and saved notes defaulting to
-  group/other-readable. Its spec asked for neither, so no reviewer would ever have
-  caught them - see the `decide()` item below.
-- `note_server/totp.py:18` carries `# gitleaks:allow` - that line stays permanently
-  unscannable even after the secret moves to env. Drop the suppression with it.
+- **mcp secret: RESOLVED in code (fix/mcp-secret-out-of-source).** The TOTP secret is
+  gone from `note_server/` source and read from `NOTE_SERVER_TOTP_SECRET` (base32, no
+  default); the `# gitleaks:allow` line is dropped with it, and `.laddy/specs/mcp.md`
+  no longer instructs hardcoding. The secret was ROTATED, so the old value is dead
+  everywhere it still literally appears (branch history commit 44670ac1,
+  `.laddy/tasks/mcp/*` run artifacts). Before `git push origin` (Tier 3,
+  `https://github.com/laddy007/laddy.git`), the Director decides whether a dead but
+  real-looking secret string in public history is acceptable or whether to scrub
+  branch history first. Merge into LOCAL main is safe.
+- **mcp's two real defects need a NEW task once mcp merges** (not a `--resume`): a
+  6-digit network factor with no throttling / replay protection (brute-forceable if
+  the server is ever exposed), and saved notes defaulting to group/other-readable.
+  Its spec asked for neither, so no reviewer would ever have caught them - see the
+  `decide()` item below.
 - `requirements-dev.txt` pins nothing (pytest/ruff/basedpyright/mcp all floating)
   and the gate image installs it on the TRUSTED machine. Pin them.
 - **fullrun-s2 is the safe hand-merge, but it now owns the gate.** Its red suite was
@@ -75,3 +74,7 @@ v mcp je přímo secret - má být v env.conf či nějde co nebude v gitu
 
 
 proč merge-verified.sh nevypisuje co se děje?
+merger-verified funguje asi jen na vps branche ... ale co když něco neprojde, já to upravím ručně a budu to chtít merger-verified (jen pokud to nedoáže sám před vrácení devu)
+
+
+kod pro ntfy vytáhout mimo git a odrotovat
