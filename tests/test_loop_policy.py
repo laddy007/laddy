@@ -153,7 +153,7 @@ def test_artifact_commits_do_not_invalidate_approvals(
 
     wt = orch.gitops.task_worktree("t1")
     # HEAD (with artifact commits) differs from the code SHA the gates keyed on
-    assert orch.gitops.head_sha(wt) != orch.gitops.code_sha(wt)
+    assert orch.gitops.head_sha(wt) != orch.gitops.code_sha(wt, "t1")
 
 
 def test_cap_reached_writes_handback_and_notifies(

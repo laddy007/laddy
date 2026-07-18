@@ -644,7 +644,8 @@ class Orchestrator:
         if phase in ("authoritative", "push") and not senior_ran(entries):
             # post-approval senior gate: high-risk change or test/invariant edits
             if self._declared_risk_high(artifacts) or touches_invariant_tests(
-                load_target_policy(wt), self.gitops.changed_files(wt)
+                load_target_policy(wt),
+                self.gitops.changed_files(wt, artifacts.task_id),
             ):
                 return "senior"
         return phase
@@ -852,8 +853,8 @@ class Orchestrator:
     def _decide_merge(
         self, task_id: str, wt: Path, artifacts: TaskArtifacts
     ) -> MergeDecision:
-        head_sha = self.gitops.code_sha(wt)
-        changed = self.gitops.changed_files(wt)
+        head_sha = self.gitops.code_sha(wt, task_id)
+        changed = self.gitops.changed_files(wt, task_id)
         # The DECISION always requires all three gates (S8 auto-merge
         # precondition) - a composition that skipped rw2 or the docker gate
         # can push, but never auto-merge.
@@ -883,10 +884,10 @@ class Orchestrator:
         return merge_decision(
             policy=load_target_policy(wt),
             changed_files=changed,
-            diff_lines=self.gitops.diff_line_count(wt),
+            diff_lines=self.gitops.diff_line_count(wt, task_id),
             declared_risk=declared_risk_from_verdicts(artifacts),
             gates=gates,
-            changed_statuses=self.gitops.changed_statuses(wt),
+            changed_statuses=self.gitops.changed_statuses(wt, task_id),
             migration_texts=_read_wt,
             senior_deadlock=deadlock,
         )
@@ -1042,7 +1043,7 @@ class Orchestrator:
             )
             self.gitops.commit_all(wt, f"Verified findings for {task_id}")
 
-        ok, offending = path_guard(task_id, self.gitops.changed_files(wt))
+        ok, offending = path_guard(task_id, self.gitops.changed_files(wt, task_id))
         if not ok:
             artifacts.append_log(
                 action="path_guard", outcome="violation", detail="; ".join(offending)[:2000]
@@ -1051,7 +1052,7 @@ class Orchestrator:
 
         terminal = "PUSHED"
         if self.policy_enabled:
-            changed_now = self.gitops.changed_files(wt)
+            changed_now = self.gitops.changed_files(wt, task_id)
             decision = report_only_decision(
                 task_id=task_id,
                 changed_files=changed_now,
@@ -1123,7 +1124,7 @@ class Orchestrator:
             outcome="approved" if verdict.approved else "changes_requested",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
         self.gitops.commit_all(wt, f"Round {rp.round}: rw1 review for {task_id}")
@@ -1188,7 +1189,7 @@ class Orchestrator:
             outcome="nogo" if nogo else "go",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             fingerprint=verdict_fingerprint(verdict) if nogo else None,
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
@@ -1198,9 +1199,10 @@ class Orchestrator:
         self, task_id: str, wt: Path, artifacts: TaskArtifacts, rp: ResumePoint
     ) -> None:
         assert self.docker_gate is not None
-        sha = self.gitops.code_sha(wt)
+        sha = self.gitops.code_sha(wt, task_id)
         include_frontend = frontend_touched(
-            self.gitops.changed_files(wt), load_target_policy(wt).frontend_prefixes
+            self.gitops.changed_files(wt, task_id),
+            load_target_policy(wt).frontend_prefixes,
         )
         result = self.docker_gate.run(wt, sha, include_frontend)
         # flaky = this exact SHA failed the gate before and passes now (S7)
@@ -1261,7 +1263,7 @@ class Orchestrator:
             outcome="approved" if verdict.approved else "changes_requested",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
         self.gitops.commit_all(wt, f"Senior escalation verdict for {task_id}")

@@ -39,14 +39,20 @@ def _run(args: Sequence[str], cwd: Path | None = None) -> str:
     return proc.stdout.strip()
 
 
-def policy_pathspec() -> list[str]:
-    """The policy view of a diff: everything EXCEPT <agent-dir>/tasks/**.
+def policy_pathspec(task_id: str) -> list[str]:
+    """The policy view of a diff: everything EXCEPT the task's OWN artifact
+    lane <agent-dir>/tasks/<task_id>/**.
 
     Task artifacts (iteration logs, verdicts) ride every branch; the policy
-    and the oracle both classify by the PRODUCT diff. One home for
-    the exclusion so no caller restates it (convergence R1/R3).
+    and the oracle both classify by the PRODUCT diff. Only the branch's own
+    lane is exempt: content a branch plants under ANY OTHER tasks/ path lands
+    in the integrated tree, so it is classified like any other change (M2 -
+    a blanket tasks/ exclusion let such plants through unclassified). One
+    home for the exclusion so no caller restates it (convergence R1/R3).
+    ``literal`` pins the task id as a literal path: a wildcard in a hostile
+    branch name must not widen the exclusion.
     """
-    return ["--", ".", f":(exclude){TARGET_DIR_NAME}/tasks"]
+    return ["--", ".", f":(exclude,literal){TARGET_DIR_NAME}/tasks/{task_id}"]
 
 
 class GitOps:
@@ -131,25 +137,19 @@ class GitOps:
     def head_sha(self, wt: Path) -> str:
         return _run(["git", "-C", str(wt), "rev-parse", "HEAD"])
 
-    def code_sha(self, wt: Path) -> str:
-        """SHA of the last commit touching anything OUTSIDE <agent-dir>/tasks/.
+    def code_sha(self, wt: Path, task_id: str) -> str:
+        """SHA of the last commit touching anything OUTSIDE the task's own
+        <agent-dir>/tasks/<task_id>/ lane.
 
         Gate results are keyed to this, not HEAD: artifact commits (verdicts,
         logs) move HEAD but do not change the reviewed code, so they must not
-        invalidate approvals. Any real code commit does.
+        invalidate approvals. Any real code commit does - including a commit
+        that plants files in ANOTHER task's lane (M2: that content is part of
+        what ships, so it must re-key the approvals like any code change).
         """
         out = _run(
-            [
-                "git",
-                "-C",
-                str(wt),
-                "rev-list",
-                "-1",
-                "HEAD",
-                "--",
-                ".",
-                f":(exclude){TARGET_DIR_NAME}/tasks",
-            ]
+            ["git", "-C", str(wt), "rev-list", "-1", "HEAD"]
+            + policy_pathspec(task_id)
         )
         return out or self.head_sha(wt)
 
@@ -173,31 +173,33 @@ class GitOps:
     #   --no-renames  : a `git mv tests/test_x.py elsewhere` shows as
     #                   D tests/test_x.py + A elsewhere, so a renamed-away
     #                   invariant/sensitive test is still seen by the guards.
-    #   :(exclude)<agent-dir>/tasks : every task commits its own artifacts there;
-    #                   counting them would (a) inflate size-based risk and
-    #                   (b) make the VPS pre-artifact-commit decision differ
-    #                   from the CI post-artifact-commit recompute.
+    #   :(exclude)<agent-dir>/tasks/<task> : the task commits its OWN artifacts
+    #                   there; counting them would (a) inflate size-based risk
+    #                   and (b) make the VPS pre-artifact-commit decision differ
+    #                   from the CI post-artifact-commit recompute. Only the
+    #                   task's own lane is exempt (M2): files planted in other
+    #                   tasks' lanes count like any other change.
     def _range(self) -> str:
         return f"origin/{self.default_branch}...HEAD"
 
-    def _policy_pathspec(self) -> list[str]:
-        return policy_pathspec()
+    def _policy_pathspec(self, task_id: str) -> list[str]:
+        return policy_pathspec(task_id)
 
-    def changed_files(self, wt: Path) -> list[str]:
+    def changed_files(self, wt: Path, task_id: str) -> list[str]:
         out = _run(
             ["git", "-C", str(wt), "diff", "--no-renames", "--name-only", self._range()]
-            + self._policy_pathspec()
+            + self._policy_pathspec(task_id)
         )
         return [line for line in out.splitlines() if line]
 
     def diff_text(self, wt: Path) -> str:
         return _run(["git", "-C", str(wt), "diff", self._range()])
 
-    def diff_line_count(self, wt: Path) -> int:
-        """Added+deleted line count for policy sizing (excludes task artifacts)."""
+    def diff_line_count(self, wt: Path, task_id: str) -> int:
+        """Added+deleted line count for policy sizing (excludes own artifacts)."""
         out = _run(
             ["git", "-C", str(wt), "diff", "--no-renames", "--numstat", self._range()]
-            + self._policy_pathspec()
+            + self._policy_pathspec(task_id)
         )
         total = 0
         for line in out.splitlines():
@@ -207,11 +209,11 @@ class GitOps:
             )
         return total
 
-    def changed_statuses(self, wt: Path) -> dict[str, str]:
+    def changed_statuses(self, wt: Path, task_id: str) -> dict[str, str]:
         """path -> git status letter (A/M/D). Renames disabled (see above)."""
         out = _run(
             ["git", "-C", str(wt), "diff", "--no-renames", "--name-status", self._range()]
-            + self._policy_pathspec()
+            + self._policy_pathspec(task_id)
         )
         statuses: dict[str, str] = {}
         for line in out.splitlines():

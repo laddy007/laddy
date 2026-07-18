@@ -115,7 +115,7 @@ def test_changed_files_lists_paths_vs_origin_main(gitops: GitOps) -> None:
     (wt / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
     (wt / "README.md").write_text("changed\n", encoding="utf-8")
     gitops.commit_all(wt, "changes")
-    assert sorted(gitops.changed_files(wt)) == ["README.md", "pkg/mod.py"]
+    assert sorted(gitops.changed_files(wt, "t1")) == ["README.md", "pkg/mod.py"]
 
 
 def test_diff_text_contains_patch(gitops: GitOps) -> None:
@@ -143,8 +143,8 @@ def test_changed_files_shows_renamed_away_test_as_deletion(
     subprocess.run(["git", "-C", str(wt), "mv", "tests/test_arch.py", "notes.py"], check=True)
     gitops.commit_all(wt, "move test out")
 
-    statuses = gitops.changed_statuses(wt)
-    files = gitops.changed_files(wt)
+    statuses = gitops.changed_statuses(wt, "t1")
+    files = gitops.changed_files(wt, "t1")
     # with --no-renames the move is D(old) + A(new), so the old tests/ path is
     # visible to deleted_test_files / touches_invariant_tests / sensitive_paths
     assert "tests/test_arch.py" in files
@@ -152,18 +152,48 @@ def test_changed_files_shows_renamed_away_test_as_deletion(
     assert "notes.py" in files
 
 
-def test_changed_files_excludes_task_artifacts(gitops: GitOps) -> None:
-    # <agent-dir>/tasks/** must not count toward policy inputs (VPS/CI diff drift)
+def test_changed_files_excludes_own_task_artifacts(gitops: GitOps) -> None:
+    # <agent-dir>/tasks/<own-task>/** must not count toward policy inputs
+    # (VPS/CI diff drift)
     wt = gitops.task_worktree("t1")
     (wt / "real.py").write_text("x = 1\n", encoding="utf-8")
     art_dir = wt / TARGET_DIR_NAME / "tasks" / "t1"
     art_dir.mkdir(parents=True)
     (art_dir / "iteration-log.jsonl").write_text('{"a":1}\n', encoding="utf-8")
     gitops.commit_all(wt, "code + artifacts")
-    files = gitops.changed_files(wt)
+    files = gitops.changed_files(wt, "t1")
     assert "real.py" in files
     assert not any(f.startswith(f"{TARGET_DIR_NAME}/tasks/") for f in files)
-    assert gitops.diff_line_count(wt) == 1  # only real.py's one line counts
+    assert gitops.diff_line_count(wt, "t1") == 1  # only real.py's one line counts
+
+
+def test_changed_files_includes_files_planted_in_other_task_dirs(
+    gitops: GitOps,
+) -> None:
+    # M2: only the branch's OWN artifact lane is exempt from the policy view.
+    # A file planted under ANOTHER task's dir lands in the integrated tree, so
+    # it must count for classification, sizing, statuses AND code_sha - a
+    # blanket tasks/ exclusion let it ship unclassified.
+    wt = gitops.task_worktree("t1")
+    own_dir = wt / TARGET_DIR_NAME / "tasks" / "t1"
+    own_dir.mkdir(parents=True)
+    (own_dir / "iteration-log.jsonl").write_text('{"a":1}\n', encoding="utf-8")
+    first_sha = gitops.commit_all(wt, "own artifacts only")
+    planted_dir = wt / TARGET_DIR_NAME / "tasks" / "t2"
+    planted_dir.mkdir(parents=True)
+    (planted_dir / "x.py").write_text("evil = 1\n", encoding="utf-8")
+    gitops.commit_all(wt, "planted file in another task's lane")
+
+    planted = f"{TARGET_DIR_NAME}/tasks/t2/x.py"
+    files = gitops.changed_files(wt, "t1")
+    assert planted in files
+    assert not any(f.startswith(f"{TARGET_DIR_NAME}/tasks/t1/") for f in files)
+    assert gitops.changed_statuses(wt, "t1").get(planted) == "A"
+    assert gitops.diff_line_count(wt, "t1") == 1  # the planted line counts
+    # the plant moves code_sha (approvals re-key), unlike own-artifact commits
+    assert first_sha is not None
+    assert gitops.code_sha(wt, "t1") != first_sha
+    assert gitops.code_sha(wt, "t1") == gitops.head_sha(wt)
 
 
 def test_refresh_base_syncs_working_tree_to_remote_head(

@@ -79,7 +79,7 @@ def check_local_fix(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     gitops = GitOps(
         repo_url="unused", work_root=repo.parent, default_branch=base.split("/")[-1]
     )
-    changed = gitops.changed_files(repo)
+    changed = gitops.changed_files(repo, task)
 
     def _read(path: str) -> str:
         return (repo / path).read_text(encoding="utf-8")
@@ -113,7 +113,7 @@ def check_local_fix(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     # Per-target policy from the TRUSTED base ref, exactly as merge_check.check
     # (M1): a fix tree cannot weaken its own classification either.
     policy = load_target_policy(repo, ref=base)
-    if deleted := deleted_test_files(policy, gitops.changed_statuses(repo)):
+    if deleted := deleted_test_files(policy, gitops.changed_statuses(repo, task)):
         reasons.append(f"test_files_deleted: {', '.join(deleted[:5])}")
     if destructive := destructive_migrations(policy, changed, _read):
         reasons.append(f"destructive_migrations: {', '.join(destructive[:5])}")

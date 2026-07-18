@@ -155,7 +155,8 @@ def _cmd_prepare(repo: Path, args: argparse.Namespace) -> int:
     ).read_text(encoding="utf-8")
     phase1 = build_phase1_prompt(
         task_id=task_id, spec_text=spec_text,
-        diff_text=merge_diff(repo, task.merge_sha), worktree=wt, class_slugs=slugs,
+        diff_text=merge_diff(repo, task.merge_sha, task_id), worktree=wt,
+        class_slugs=slugs,
     )
     art = TaskArtifacts(repo, task_id)
     phase2 = build_phase2_prompt(

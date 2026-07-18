@@ -78,7 +78,10 @@ __all__ = [
     "run_security_panel",
 ]
 
-# (repo, base, task_id) -> (exit_code, message) - wraps merge_check.check
+# (repo, base, task_id) -> (exit_code, message) - wraps merge_check.check.
+# ``base`` is the trusted LOCAL base branch name (config.default_branch): the
+# policy recompute loads policy.toml from that local ref, not from a possibly
+# -stale origin/<base> remote-tracking ref (M1).
 MergeCheckFn = Callable[[Path, str, str], tuple[int, str]]
 
 # --- results & verdict -------------------------------------------------------
@@ -935,8 +938,13 @@ def gather_gates(
     )
     try:
         verified_sha = _worktree_sha(wt)
+        # The recompute (and --local's stop recompute below) is keyed to the
+        # trusted LOCAL base branch (M1): policy loads from local <base_branch>
+        # - the same trusted ref the binding gate uses - never from a possibly
+        # -stale origin/<base> remote-tracking ref, and never from a literal
+        # "main" on a target whose default branch is named differently.
         if local_ref is None:
-            code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
+            code, msg = tools.merge_check_fn(wt, base_branch, task_id)
             artifact_attestation = ArtifactAttestation(
                 ArtifactAttestationState.PASSED
                 if code == 0
@@ -949,7 +957,7 @@ def gather_gates(
                 from orchestrator.merge_check_local import (
                     check_local_fix as local_check,
                 )
-            code, msg = local_check(wt, "origin/main", task_id)
+            code, msg = local_check(wt, base_branch, task_id)
             if code == 0:
                 artifact_attestation = ArtifactAttestation(
                     ArtifactAttestationState.NOT_APPLICABLE,
@@ -967,9 +975,11 @@ def gather_gates(
 
         from orchestrator.gitops import GitOps
 
-        gitops = GitOps(repo_url="unused", work_root=work_root, default_branch="main")
-        changed = gitops.changed_files(wt)
-        statuses = gitops.changed_statuses(wt)
+        gitops = GitOps(
+            repo_url="unused", work_root=work_root, default_branch=base_branch
+        )
+        changed = gitops.changed_files(wt, task_id)
+        statuses = gitops.changed_statuses(wt, task_id)
         # Per-target policy from TRUSTED main (base_branch) via git show, NOT the
         # branch worktree - a branch cannot weaken its own classification (M1);
         # editing .laddy/policy.toml is itself L3.
@@ -999,11 +1009,11 @@ def gather_gates(
         rw2: Verdict | None = None
         if blast in (L2, L3):
             prompt = SECURITY_PANEL_PROMPT.format(
-                role=_role(tools.roles_dir, "security"), task=task_id, base="main"
+                role=_role(tools.roles_dir, "security"), task=task_id, base=base_branch
             )
             security = tuple(run_security_panel(tools.security_runners, prompt, wt))
         if blast == L2:
-            rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir)
+            rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir, base_branch)
 
         return GateResults(
             blast=blast,
@@ -1027,8 +1037,12 @@ def _role(roles_dir: Path, name: str) -> str:
     return (roles_dir / f"{name}.md").read_text(encoding="utf-8")
 
 
-def _rw2(runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path) -> Verdict | None:
-    prompt = RW2_LOCAL_PROMPT.format(role=_role(roles_dir, "rw2"), task=task_id, base="main")
+def _rw2(
+    runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path, base_branch: str
+) -> Verdict | None:
+    prompt = RW2_LOCAL_PROMPT.format(
+        role=_role(roles_dir, "rw2"), task=task_id, base=base_branch
+    )
     try:
         verdict, _ = request_verdict(runner, prompt, wt)
         return verdict
@@ -1335,7 +1349,11 @@ def main(
     _confirm = confirm or ((lambda v: False) if args.no_input else _interactive_confirm)
     _ask_fn = ask or ((lambda p: False) if args.no_input else _ask)
     _push = pusher or (
-        lambda r, tasks: push_and_cleanup(r, tasks, branch_remote=config.branch_remote)
+        lambda r, tasks: push_and_cleanup(
+            r, tasks,
+            base_branch=config.default_branch,
+            branch_remote=config.branch_remote,
+        )
     )
     merged: list[str] = []
 
@@ -1393,7 +1411,14 @@ def main(
         # sha is a local commit; there may be no reachable remote).
         list_ready=lambda: (
             args.task if local_ref is not None
-            else (args.task or discover_ready(repo, branch_remote=config.branch_remote))
+            else (
+                args.task
+                or discover_ready(
+                    repo,
+                    base_branch=config.default_branch,
+                    branch_remote=config.branch_remote,
+                )
+            )
         ),
         # In the default path the call signature is unchanged (no local_ref
         # kwarg), so existing gather_gates fakes/tests are untouched; --local
@@ -1405,6 +1430,7 @@ def main(
         ),
         merge_one=lambda request: merge_branch(
             repo, request.task_id, request.verified_sha,
+            base_branch=config.default_branch,
             branch_remote=config.branch_remote,
             fetch=local_ref is None,
             advisory=request.advisory,
@@ -1431,7 +1457,7 @@ def main(
         print(
             "[push] not pushed. Merged locally: "
             + ", ".join(untrusted_inline(task) for task in merged)
-            + ". Push with: git push origin main"
+            + f". Push with: git push origin {config.default_branch}"
         )
 
     return 1 if held else 0

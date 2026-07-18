@@ -58,7 +58,7 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     gitops = GitOps(
         repo_url="unused", work_root=repo.parent, default_branch=base.split("/")[-1]
     )
-    changed = gitops.changed_files(repo)
+    changed = gitops.changed_files(repo, task)
 
     if spec.report_only:
         recomputed = report_only_decision(
@@ -74,7 +74,7 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
             return 1, "reason=missing_state"
         # recompute code_sha from the actual history and compare to state.json
         # (a fabricated state.json must not survive)
-        actual_code_sha = gitops.code_sha(repo)
+        actual_code_sha = gitops.code_sha(repo, task)
         if state.get("head_sha") != actual_code_sha:
             return 1, (
                 f"reason=state_sha_mismatch state={state.get('head_sha')} "
@@ -98,10 +98,10 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
         recomputed = merge_decision(
             policy=load_target_policy(repo, ref=base),
             changed_files=changed,
-            diff_lines=gitops.diff_line_count(repo),
+            diff_lines=gitops.diff_line_count(repo, task),
             declared_risk=declared_risk_from_verdicts(artifacts),
             gates=gates,
-            changed_statuses=gitops.changed_statuses(repo),
+            changed_statuses=gitops.changed_statuses(repo, task),
             migration_texts=_read,
             senior_deadlock=deadlock,
         )

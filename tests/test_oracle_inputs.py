@@ -93,7 +93,7 @@ def test_skip_clarify_task_falls_back_to_specs_dir(tmp_path: Path) -> None:
 
 def test_merge_diff_shows_product_and_excludes_artifacts(repo_with_task) -> None:
     repo, sha, _ = repo_with_task
-    diff = merge_diff(repo, sha)
+    diff = merge_diff(repo, sha, "t1")
     assert "def f() -> int:" in diff
     # contamination control #2: the diff fed to phase 1 must not carry the
     # iteration log / verdicts that ride the same merge commit

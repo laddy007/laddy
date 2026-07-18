@@ -130,7 +130,7 @@ def test_check_fails_on_forged_state_sha(pushed_task: Path) -> None:
     state = art.read_json(STATE)
     assert state is not None
     gitops = GitOps(repo_url="unused", work_root=pushed_task.parent)
-    state["head_sha"] = gitops.code_sha(pushed_task)
+    state["head_sha"] = gitops.code_sha(pushed_task, "t1")
     art.write_json(STATE, state)
 
     code, message = check(pushed_task, base="origin/main", task_id="t1")
@@ -230,7 +230,7 @@ def test_check_fails_on_honest_deleted_test_stop(
     from orchestrator.target_policy import TargetPolicy
 
     gitops = GitOps(repo_url="unused", work_root=ci.parent, default_branch="main")
-    changed = gitops.changed_files(ci)
+    changed = gitops.changed_files(ci, "t1")
     assert classify_blast_radius(TargetPolicy.myapp(), changed) == L2
 
     code, message = check(ci, base="origin/main", task_id="t1")
