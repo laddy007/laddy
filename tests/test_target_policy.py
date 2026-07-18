@@ -23,6 +23,7 @@ coverage_package = "acme"
 sensitive_globs = ["acme/models.py"]
 security_globs = ["acme/auth.py"]
 invariant_tests = ["tests/test_contract.py"]
+test_dirs = ["src/tests/"]
 migration_globs = ["migrations/*"]
 frontend_prefixes = ["web/"]
 frontend_gate = "npm run build"
@@ -49,6 +50,18 @@ def test_all_sensitive_merges_engine_product_and_invariants() -> None:
     assert POLICY_REL in merged
 
 
+def test_all_test_dirs_merges_engine_default_and_product() -> None:
+    # M4: a target ADDS test locations; the engine default (literal tests/)
+    # is always present - an empty test_dirs cannot weaken deleted-test
+    # detection.
+    pol = parse_target_policy(_MINIMAL)
+    assert "src/tests/" in pol.all_test_dirs
+    assert "tests/" in pol.all_test_dirs
+    from dataclasses import replace
+
+    assert "tests/" in replace(pol, test_dirs=()).all_test_dirs
+
+
 def test_all_safe_merges_engine_and_product() -> None:
     pol = parse_target_policy(_MINIMAL)
     assert "web/i18n/**/*.json" in pol.all_safe_globs
@@ -63,6 +76,7 @@ def test_all_safe_merges_engine_and_product() -> None:
         "sensitive_globs",
         "security_globs",
         "invariant_tests",
+        "test_dirs",
         "migration_globs",
         "frontend_prefixes",
         "frontend_gate",

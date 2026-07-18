@@ -209,12 +209,20 @@ def classify_blast_radius(
     return L2
 
 
-def deleted_test_files(changed_statuses: Mapping[str, str]) -> list[str]:
-    """changed_statuses: path -> git status letter (A/M/D/R...)."""
+def deleted_test_files(
+    policy: TargetPolicy, changed_statuses: Mapping[str, str]
+) -> list[str]:
+    """changed_statuses: path -> git status letter (A/M/D/R...).
+
+    Test locations are per-target (``policy.all_test_dirs``): the engine
+    default (literal tests/) always applies and a target can only ADD its own
+    dirs (src/tests/, frontend/__tests__/, ...), never remove the default (M4).
+    """
+    prefixes = policy.all_test_dirs
     return [
         p
         for p, s in changed_statuses.items()
-        if s.startswith("D") and p.startswith("tests/")
+        if s.startswith("D") and p.startswith(prefixes)
     ]
 
 
@@ -296,7 +304,7 @@ def merge_decision(
         reasons.append(f"policy_sensitive_paths: {', '.join(sensitive[:5])}")
     if security := security_paths(policy, changed_files):
         reasons.append(f"security_auth_paths: {', '.join(security[:5])}")
-    if changed_statuses and (deleted := deleted_test_files(changed_statuses)):
+    if changed_statuses and (deleted := deleted_test_files(policy, changed_statuses)):
         reasons.append(f"test_files_deleted: {', '.join(deleted[:5])}")
     if migration_texts is not None and (
         destructive := destructive_migrations(policy, changed_files, migration_texts)

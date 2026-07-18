@@ -297,6 +297,39 @@ def test_stop_on_deleted_test_files() -> None:
     assert any("test_files_deleted" in r for r in d.reasons)
 
 
+def test_stop_on_deleted_test_under_configured_test_dir() -> None:
+    # M4: the myapp sample policy declares src/tests/ and frontend/__tests__/
+    # as extra test locations (test_dirs); a deletion there must raise
+    # test_files_deleted exactly like a deletion under literal tests/.
+    for deleted in ("src/tests/test_x.py", "frontend/__tests__/App.test.tsx"):
+        d = merge_decision(
+            changed_files=["a.py"],
+            diff_lines=5,
+            declared_risk="low",
+            gates=_gates(),
+            changed_statuses={deleted: "D", "a.py": "M"},
+        )
+        assert d.decision == "stop_before_merge", deleted
+        assert any("test_files_deleted" in r for r in d.reasons), deleted
+
+
+def test_deleted_tests_dir_detected_even_when_target_configures_nothing() -> None:
+    # Fail-closed: literal tests/ is an ENGINE default a target can only ADD
+    # to, never remove - a policy with empty test_dirs still detects it.
+    from dataclasses import replace
+
+    d = _policy.merge_decision(
+        policy=replace(_POL, test_dirs=()),
+        changed_files=["a.py"],
+        diff_lines=5,
+        declared_risk="low",
+        gates=_gates(),
+        changed_statuses={"tests/test_x.py": "D"},
+    )
+    assert d.decision == "stop_before_merge"
+    assert any("test_files_deleted" in r for r in d.reasons)
+
+
 def test_stop_on_destructive_migration() -> None:
     texts = {"alembic/versions/9_drop.py": "op.drop_table('usage_record')"}
     d = merge_decision(

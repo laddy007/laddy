@@ -94,11 +94,17 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
 # catalogues (i18n JSON, etc.) are added per-target via ``safe_globs``.
 ENGINE_SAFE_GLOBS: tuple[str, ...] = ("*.md", "**/*.md")
 
+# Where test files live (path prefixes). The engine default always applies -
+# a target's ``test_dirs`` only ADDS locations (src/tests/, frontend/__tests__/,
+# ...), it can never remove literal tests/ from deleted-test detection (M4).
+ENGINE_TEST_DIRS: tuple[str, ...] = ("tests/",)
+
 _REQUIRED_KEYS: tuple[str, ...] = (
     "coverage_package",
     "sensitive_globs",
     "security_globs",
     "invariant_tests",
+    "test_dirs",
     "migration_globs",
     "frontend_prefixes",
     "frontend_gate",
@@ -117,6 +123,7 @@ class TargetPolicy:
     sensitive_globs: tuple[str, ...]
     security_globs: tuple[str, ...]
     invariant_tests: tuple[str, ...]
+    test_dirs: tuple[str, ...]
     migration_globs: tuple[str, ...]
     frontend_prefixes: tuple[str, ...]
     frontend_gate: str
@@ -133,6 +140,13 @@ class TargetPolicy:
     def all_safe_globs(self) -> tuple[str, ...]:
         """Engine-generic (markdown) + product safe-by-construction globs."""
         return ENGINE_SAFE_GLOBS + self.safe_globs
+
+    @property
+    def all_test_dirs(self) -> tuple[str, ...]:
+        """Engine default (literal tests/) + the target's declared test
+        locations. Additive only: a target cannot weaken deleted-test
+        detection by leaving ``test_dirs`` empty (M4)."""
+        return ENGINE_TEST_DIRS + self.test_dirs
 
     @classmethod
     def myapp(cls) -> TargetPolicy:
@@ -178,6 +192,7 @@ class TargetPolicy:
                 "tests/test_invariants_append_only_game_edit_event.py",
                 "tests/test_purchase_payment_received_at_immutable.py",
             ),
+            test_dirs=("src/tests/", "frontend/__tests__/"),
             migration_globs=("alembic/*", "alembic/**/*"),
             frontend_prefixes=("frontend/", "apps/", "packages/"),
             frontend_gate=(
@@ -223,6 +238,7 @@ def parse_target_policy(text: str) -> TargetPolicy:
         sensitive_globs=_as_str_tuple(data["sensitive_globs"], "sensitive_globs"),
         security_globs=_as_str_tuple(data["security_globs"], "security_globs"),
         invariant_tests=_as_str_tuple(data["invariant_tests"], "invariant_tests"),
+        test_dirs=_as_str_tuple(data["test_dirs"], "test_dirs"),
         migration_globs=_as_str_tuple(data["migration_globs"], "migration_globs"),
         frontend_prefixes=_as_str_tuple(data["frontend_prefixes"], "frontend_prefixes"),
         frontend_gate=_as_str(data["frontend_gate"], "frontend_gate"),
@@ -253,6 +269,7 @@ def dump_target_policy(policy: TargetPolicy) -> str:
             f"sensitive_globs = {_arr(policy.sensitive_globs)}",
             f"security_globs = {_arr(policy.security_globs)}",
             f"invariant_tests = {_arr(policy.invariant_tests)}",
+            f"test_dirs = {_arr(policy.test_dirs)}",
             f"migration_globs = {_arr(policy.migration_globs)}",
             f"frontend_prefixes = {_arr(policy.frontend_prefixes)}",
             f"frontend_gate = {_s(policy.frontend_gate)}",

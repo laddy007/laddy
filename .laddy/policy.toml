@@ -45,6 +45,11 @@ invariant_tests = [
   "tests/test_trust_blockers.py",
 ]
 
+# laddy's tests all live under tests/, the engine default that always applies
+# (target_policy.ENGINE_TEST_DIRS) - a target may only ADD test locations here
+# (e.g. "src/tests/"), never remove the tests/ default.
+test_dirs = []
+
 # laddy has no DB migrations.
 migration_globs = []
 
