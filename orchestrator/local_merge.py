@@ -29,8 +29,9 @@ dry run that never prompts and never merges.
 
 Deterministic gates (block on red): local full test re-run, diff-coverage,
 semgrep, gitleaks, and (for a fetched VPS tip) artifact attestation via
-merge_check. Judgment gates (escalate, never silently block): rw2 re-run, the
-security panel.
+merge_check - or, under --local, the fail-closed policy recompute on the fix
+tree via merge_check_local (H5). Judgment gates (escalate, never silently
+block): rw2 re-run, the security panel.
 """
 
 from __future__ import annotations
@@ -102,8 +103,11 @@ class ArtifactAttestation:
     laundering into a green policy gate (H1). It is deliberately not applicable
     to ``--local`` because a Director-authored code commit makes those inherited
     artifacts stale by construction; the fresh trusted-local gates judge that
-    commit instead. Keeping this as a typed state avoids laundering N/A into a
-    fake successful policy check.
+    commit instead. The --local route still runs the fail-closed policy
+    recompute on the fix tree (merge_check_local, H5): a stop it recomputes is
+    carried here as FAILED, so an honestly-stopped branch cannot be laundered
+    by re-judging a trivial fix with --local. Keeping this as a typed state
+    avoids laundering N/A into a fake successful policy check.
     """
 
     state: ArtifactAttestationState
@@ -710,6 +714,11 @@ class GateTools:
     rw2_runner: AgentRunner
     security_runners: Sequence[AgentRunner]
     roles_dir: Path
+    # --local ONLY: the fail-closed policy recompute on the Director's fix tree
+    # (merge_check_local.check_local_fix, H5). None = use the real one; injected
+    # here so tests can spy/fake it like merge_check_fn. NEVER consulted on the
+    # fetched-branch path (which keeps running merge_check_fn unchanged).
+    local_check_fn: MergeCheckFn | None = None
 
 
 # Agent-config entry points a headless claude/codex loads from its working
@@ -914,6 +923,10 @@ def gather_gates(
     binding gate, security panel, rw2, and ``head_sha`` TOCTOU pin are identical.
     Only the VPS artifact attestation is N/A: state.json and the VPS log describe
     the older task tip by construction once the Director adds a local code fix.
+    The policy recompute is NOT skipped with it (H5): check_local_fix re-derives
+    every stop still recomputable from the FIXED tree (deleted tests, destructive
+    migrations, inherited declared high risk, senior deadlock, the report-only
+    guard) and a recomputed stop is a deterministic FAILED - fail closed.
     """
     wt = (
         _local_worktree(repo, task_id, work_root, local_ref)
@@ -931,10 +944,26 @@ def gather_gates(
                 msg,
             )
         else:
-            artifact_attestation = ArtifactAttestation(
-                ArtifactAttestationState.NOT_APPLICABLE,
-                "Director-authored --local commit is judged by fresh trusted-local gates",
-            )
+            local_check = tools.local_check_fn
+            if local_check is None:
+                from orchestrator.merge_check_local import (
+                    check_local_fix as local_check,
+                )
+            code, msg = local_check(wt, "origin/main", task_id)
+            if code == 0:
+                artifact_attestation = ArtifactAttestation(
+                    ArtifactAttestationState.NOT_APPLICABLE,
+                    "Director-authored --local commit is judged by fresh "
+                    f"trusted-local gates; policy recompute found no stop ({msg})",
+                )
+            else:
+                # A stop the fix tree still manifests (deleted tests, declared
+                # high risk, senior deadlock, ...) is NOT waived by the trusted
+                # route: --local accommodates only the checks the fix commit
+                # invalidates by construction (H5), never the decision value.
+                artifact_attestation = ArtifactAttestation(
+                    ArtifactAttestationState.FAILED, msg
+                )
 
         from orchestrator.gitops import GitOps
 
@@ -1158,6 +1187,7 @@ def _default_tools(config: object) -> GateTools:
     from orchestrator.agents import ClaudeRunner, CodexRunner
     from orchestrator.config import OrchestratorConfig
     from orchestrator.merge_check import check as _merge_check
+    from orchestrator.merge_check_local import check_local_fix as _local_check
     from orchestrator.run import default_roles_dir
 
     assert isinstance(config, OrchestratorConfig)
@@ -1176,6 +1206,8 @@ def _default_tools(config: object) -> GateTools:
             CodexRunner(config.review_codex_cmd),  # cross-vendor lens, read-only
         ),
         roles_dir=default_roles_dir(),
+        # --local ONLY: the fail-closed policy recompute on the fix tree (H5)
+        local_check_fn=_local_check,
     )
 
 

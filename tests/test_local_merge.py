@@ -803,9 +803,11 @@ def _g(*args: str) -> str:
 _ID = ("-c", "user.name=t", "-c", "user.email=t@e.com")
 
 
-@pytest.fixture()
-def local_repo(tmp_path: Path) -> Path:
-    """A local clone (Director machine) with an origin bare remote."""
+def make_local_repo(tmp_path: Path) -> Path:
+    """A local clone (Director machine) with an origin bare remote.
+
+    Plain helper (not a fixture) so sibling modules (test_local_fix_check)
+    can build the identical repo under their own fixture name."""
     bare = tmp_path / "remote.git"
     _g("init", "--bare", "--initial-branch=main", str(bare))
     seed = tmp_path / "seed"
@@ -825,6 +827,11 @@ def local_repo(tmp_path: Path) -> Path:
     local = tmp_path / "local"
     _g("clone", str(bare), str(local))
     return local
+
+
+@pytest.fixture()
+def local_repo(tmp_path: Path) -> Path:
+    return make_local_repo(tmp_path)
 
 
 def _push_ready_branch(local_repo: Path, tmp_path: Path, sensitive: bool) -> None:
