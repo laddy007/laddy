@@ -20,6 +20,7 @@ from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import TaskArtifacts
 from orchestrator.flags import ORACLE_ESCAPE, derive_flags, raise_flag
 from orchestrator.oracle.classes import CLASSES_PATH, load_class_slugs
+from orchestrator.oracle.runlog import append_escape, authentic_escape_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -76,7 +77,7 @@ def raise_oracle_escape(
     }
     if gate is not None:
         payload["attribution"] = {"gate": gate, "note": attribution_note or ""}
-    return raise_flag(
+    flag_id = raise_flag(
         art,
         ORACLE_ESCAPE,
         summary,
@@ -86,6 +87,21 @@ def raise_oracle_escape(
         # refuses an oracle-escape from any other caller (library boundary)
         allow_oracle_escape=True,
     )
+    # Anchor the escape's authenticity in the oracle-only run log: iter_escapes
+    # counts only task-log oracle-escape flags that have a matching record
+    # here. The task log is branch-writable (forgeable); this run log is not
+    # (the <agent-dir>/oracle/* L3 sensitive glob). Writing it HERE - the
+    # validated raise - and not from iter_escapes is what breaks the
+    # record-run/iter_escapes circularity: the anchor never derives from the
+    # thing it authenticates.
+    append_escape(
+        art.repo_root,
+        task=art.task_id,
+        flag_id=flag_id,
+        class_slug=class_slug,
+        grade=grade,
+    )
+    return flag_id
 
 
 UNCLASSIFIED = "unclassified"  # ledger bucket for unparseable/missing payloads
@@ -104,22 +120,32 @@ class EscapeRecord:
 
 
 def iter_escapes(repo_root: Path) -> list[EscapeRecord]:
-    """Every oracle-escape flag across all tasks' committed iteration logs.
+    """Every AUTHENTIC oracle-escape flag across all tasks' committed logs.
 
     Reads <agent-dir>/tasks/*/iteration-log.jsonl in the working tree -
     post-merge those are on main, which is exactly the oracle's substrate.
     An unparseable ``detail`` degrades to class/grade None (folded into the
     UNCLASSIFIED ledger bucket), never a crash: the ledger is a reporter.
+
+    A task-log oracle-escape flag is counted only when its (task, flag_id) has
+    a matching provenance record in the oracle-only run log (written by the
+    validated raise, ``runlog.authentic_escape_ids``). A flag with no such
+    record is branch-forged content - the task log is branch-writable, the run
+    log is not - and is dropped, so a forged line can neither poison the ledger
+    nor trip a false RECURRENT.
     """
     tasks_dir = repo_root / TARGET_DIR_NAME / "tasks"
     records: list[EscapeRecord] = []
     if not tasks_dir.is_dir():
         return records
+    authentic = authentic_escape_ids(repo_root)
     for task_dir in sorted(p for p in tasks_dir.iterdir() if p.is_dir()):
         art = TaskArtifacts(repo_root, task_dir.name)
         for flag in derive_flags(art.read_log()):
             if flag.kind != ORACLE_ESCAPE:
                 continue
+            if (task_dir.name, flag.id) not in authentic:
+                continue  # forged: no oracle-authored provenance record
             slug: str | None = None
             grade: str | None = None
             try:

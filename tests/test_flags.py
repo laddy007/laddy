@@ -134,6 +134,32 @@ def test_raise_flag_assigns_sequential_ids(tmp_path: Path) -> None:
     assert raise_flag(art, "note", "three", needs_director=True) == "mytask#3"
 
 
+def test_raise_flag_id_skips_over_a_planted_gap_id(tmp_path: Path) -> None:
+    # M-D6-2: a branch pre-plants ONE flag event with a GAP id (mytask#2, no
+    # #1). A count-based id would assign mytask#2 again (raised count == 1),
+    # colliding with the plant; derive_flags then silently drops the later
+    # duplicate, so the genuine flag vanishes from every derived view. Max+1
+    # assigns mytask#3 - strictly above every existing numeric id - and the
+    # genuine flag survives.
+    art = _art(tmp_path)
+    art.append_log(action="flag", id="mytask#2", kind="note",
+                   summary="planted", needs_director=False)
+    fid = raise_flag(art, ORACLE_ESCAPE, "genuine escape", allow_oracle_escape=True)
+    assert fid == "mytask#3"  # NOT mytask#2 (the count-based collision)
+    derived = derive_flags(art.read_log())
+    assert [f.id for f in derived] == ["mytask#2", "mytask#3"]
+    assert any(f.kind == ORACLE_ESCAPE for f in derived)  # escape not suppressed
+
+
+def test_raise_flag_ignores_non_numeric_suffix_ids_for_max(tmp_path: Path) -> None:
+    # A hand-written flag with a non-numeric #suffix must not derail max+1: it
+    # contributes 0 to the max, so the next numeric id is still assigned.
+    art = _art(tmp_path)
+    art.append_log(action="flag", id="mytask#legacy", kind="note",
+                   summary="odd", needs_director=False)
+    assert raise_flag(art, "note", "next") == "mytask#1"
+
+
 def test_raise_flag_writes_exactly_one_line_and_is_append_only(tmp_path: Path) -> None:
     art = _art(tmp_path)
     art.append_log(action="developer", outcome="ok")

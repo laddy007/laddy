@@ -14,7 +14,7 @@ commit authority; push stays with the Director).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import append_jsonl, read_jsonl, utc_now
@@ -22,7 +22,20 @@ from orchestrator.artifacts import append_jsonl, read_jsonl, utc_now
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from orchestrator.oracle.escapes import EscapeRecord
+
+class _EscapeStatus(Protocol):
+    """Structural view escape_rate_series needs of an escape record.
+
+    runlog is the foundational log substrate: it must NOT import from
+    escapes (that would cycle now that escapes anchors provenance here). It
+    reads only these two fields off ``EscapeRecord``, so a Protocol suffices.
+    """
+
+    @property
+    def flag_id(self) -> str: ...
+    @property
+    def status(self) -> str: ...
+
 
 RUN_LOG_PATH = f"{TARGET_DIR_NAME}/oracle/run-log.jsonl"
 
@@ -142,6 +155,63 @@ def read_evals(repo_root: Path) -> list[dict[str, Any]]:
     return _read_events(repo_root, SEEDED_EVAL)
 
 
+# The oracle-escape PROVENANCE event: written at raise time through the
+# single validated channel (escapes.raise_oracle_escape / the CLI ``escape``
+# action) to the oracle-only run log. It is the AUTHORITATIVE record that an
+# escape exists. The per-task iteration-log oracle-escape FLAG is
+# branch-writable content (a merged branch can forge a raw flag line); this
+# run log is not - it lives under the <agent-dir>/oracle/* L3 sensitive glob,
+# so a branch touching it rides the risk lane, never L2 auto-merge. A
+# task-log oracle-escape with no matching event here is forged and must not be
+# counted (iter_escapes drops it). This event is NOT sourced from
+# iter_escapes (that would be circular) - it is written by the validated raise.
+ESCAPE_RAISED = "escape-raised"
+
+
+def append_escape(
+    repo_root: Path,
+    *,
+    task: str,
+    flag_id: str,
+    class_slug: str,
+    grade: str,
+    now: Callable[[], str] | None = None,
+) -> None:
+    """Append exactly one ``escape-raised`` provenance event (never rewrites).
+
+    Called only by the validated raise (escapes.raise_oracle_escape), so an
+    entry here vouches that the oracle - not a branch - raised this escape.
+    """
+    if not task or not flag_id:
+        raise ValueError("task and flag_id are required (escape provenance)")
+    event = {
+        "ts": (now or utc_now)(),
+        "action": ESCAPE_RAISED,
+        "task": task,
+        "flag_id": flag_id,
+        "class": class_slug,
+        "grade": grade,
+    }
+    append_jsonl(run_log_path(repo_root), event)
+
+
+def read_escapes(repo_root: Path) -> list[dict[str, Any]]:
+    """All escape-raised provenance events, oldest first."""
+    return _read_events(repo_root, ESCAPE_RAISED)
+
+
+def authentic_escape_ids(repo_root: Path) -> set[tuple[str, str]]:
+    """(task, flag_id) pairs the oracle authored through the validated raise.
+
+    The authenticity anchor iter_escapes cross-checks each task-log
+    oracle-escape flag against: a flag whose (task, flag_id) is absent here is
+    branch-forged and not a real escape.
+    """
+    return {
+        (str(e.get("task")), str(e.get("flag_id"))) for e in read_escapes(repo_root)
+    }
+
+
 def watermark(repo_root: Path) -> str | None:
     """Last reviewed merge commit = ``to_sha`` of the latest run (derived)."""
     runs = read_runs(repo_root)
@@ -152,7 +222,7 @@ def watermark(repo_root: Path) -> str | None:
 
 
 def escape_rate_series(
-    runs: Sequence[Mapping[str, Any]], records: Sequence[EscapeRecord]
+    runs: Sequence[Mapping[str, Any]], records: Sequence[_EscapeStatus]
 ) -> list[dict[str, Any]]:
     """Per-run, per-bucket time series with the honest denominator (pure).
 

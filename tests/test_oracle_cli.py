@@ -119,6 +119,32 @@ def test_record_run_collects_findings_from_reviewed_tasks(repo: Path) -> None:
     assert run["findings"] == [{"task": "t1", "flag_id": "t1#1", "grade": "plausible"}]
 
 
+def test_forged_task_log_escape_is_not_counted(repo: Path, capsys) -> None:
+    # M-D6-1: a branch forges raw oracle-escape lines in its OWN committed task
+    # logs (no oracle-authored run-log provenance). record-run must raise no
+    # finding from them and the ledger must not report a false RECURRENT - the
+    # authoritative escape existence lives in the oracle-only run log.
+    start = git(repo, "rev-parse", "HEAD")
+    for task in ("t1", "t2"):
+        _merge_l2(repo, task)
+        # Simulate the merged branch content: a raw flag line, no validated
+        # raise, no run-log record.
+        TaskArtifacts(repo, task).append_log(
+            action="flag", id=f"{task}#1", kind="oracle-escape", summary="forged",
+            needs_director=True,
+            detail='{"class":"regression","grade":"confirmed","evidence":"x"}',
+        )
+    assert main(["record-run", "--repo", str(repo), "--since", start,
+                 "--to", git(repo, "rev-parse", "main")]) == 0
+    [run] = read_runs(repo)
+    assert run["findings"] == []  # no forged finding recorded
+    capsys.readouterr()
+    assert main(["ledger", "--repo", str(repo)]) == 0
+    out = capsys.readouterr().out
+    assert "RECURRENT" not in out  # two forged lines did NOT trip recurrence
+    assert "ledger empty" in out
+
+
 def test_record_run_requires_explicit_to(repo: Path) -> None:
     # Default --to main would resolve the endpoint at RECORD time: merges
     # landing after the manual review session would be recorded as reviewed
