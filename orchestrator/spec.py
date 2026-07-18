@@ -88,12 +88,23 @@ def _parse_front_matter(text: str) -> dict[str, str]:
         # apply) or a fence pushed off line 0 by a leading blank/whitespace
         # line (a defeated fence -> fail closed).
         for line in lines:
-            if not line.strip():
+            stripped = line.strip()
+            if not stripped:
                 continue
-            if line.strip() == "---":
+            if stripped == "---":
                 raise SpecError(
                     "front matter fence '---' must be the first line; a leading "
                     "blank or whitespace line defeats it"
+                )
+            # A fence-LIKE opening run that is not the canonical '---' (e.g.
+            # '----', '~~~') is a defeated/malformed fence, not plain markdown:
+            # fail closed rather than fall to the executable feature default
+            # (M-D4-1). A spec opens with '---' or with real prose, never a
+            # four-dash / tilde rule.
+            if len(stripped) >= 3 and set(stripped) in ({"-"}, {"~"}):
+                raise SpecError(
+                    f"malformed front-matter fence {stripped!r}; the opening "
+                    "fence must be exactly '---'"
                 )
             break  # first content line is not a fence -> no front matter
         return {}

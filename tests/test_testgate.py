@@ -259,6 +259,9 @@ def test_binding_gate_neutralizes_branch_scanner_config_with_trusted_ref() -> No
     # .coveragerc rides the same vacuous-gate vector: coverage.py auto-discovers
     # it and a `[run] omit` empties coverage.xml so diff-cover passes on nothing.
     assert ".coveragerc" in NEUTRALIZED_SCAN_CONFIGS
+    # ruff/basedpyright config for the lint/type steps: same vacuous-pass class.
+    for cfg in ("ruff.toml", ".ruff.toml", "pyrightconfig.json"):
+        assert cfg in NEUTRALIZED_SCAN_CONFIGS
     cmd = BindingGate(compose_rel="c.yml").command(
         "branchsha", "myapp", trusted_ref="trustedsha"
     )

@@ -196,18 +196,24 @@ RESTORED_INFRA_PATHS: tuple[str, ...] = (
 # `.gitleaksignore` (fingerprint suppression) from the source path; coverage.py
 # (via pytest-cov) auto-discovers a `.coveragerc` whose `[run] omit` drops the
 # branch's changed files from coverage.xml so diff-cover --fail-under passes on
-# empty diff. Classifying them sensitive is only the SECOND layer - by the time
-# a merge is classified the scan already ran. The LOAD-BEARING fix is to
-# neutralize them BEFORE the scan: restore trusted main's copy over the branch
-# clone, or (the normal case, trusted main ships none) delete the branch's. Only
-# applied with a trusted_ref (the local binding gate); the untrusted VPS
-# pre-filter is not a trust boundary.
+# empty diff; ruff auto-reads `ruff.toml`/`.ruff.toml` and basedpyright reads
+# `pyrightconfig.json`, so a branch `[lint] select = []` / `typeCheckingMode:
+# off` turns the lint/type steps green vacuously. Classifying them sensitive is
+# only the SECOND layer - by the time a merge is classified the step already
+# ran (and a human reviewing an L3 hold would see a forged-green gate). The
+# LOAD-BEARING fix is to neutralize them BEFORE the step: restore trusted main's
+# copy over the branch clone, or (the normal case, trusted main ships none)
+# delete the branch's. Only applied with a trusted_ref (the local binding gate);
+# the untrusted VPS pre-filter is not a trust boundary.
 NEUTRALIZED_SCAN_CONFIGS: tuple[str, ...] = (
     ".semgrepignore",
     ".semgrep",
     ".gitleaks.toml",
     ".gitleaksignore",
     ".coveragerc",
+    "ruff.toml",
+    ".ruff.toml",
+    "pyrightconfig.json",
 )
 
 

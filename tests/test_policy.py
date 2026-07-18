@@ -557,6 +557,14 @@ def test_pytest_and_scanner_config_files_are_sensitive() -> None:
         # diff-cover --fail-under=90 passes vacuously (same class as H-D2-2/3).
         ".coveragerc",
         "sub/.coveragerc",
+        # ruff auto-reads ruff.toml/.ruff.toml and basedpyright reads
+        # pyrightconfig.json: config for the lint/type gate steps, same
+        # vacuous-pass class as the scanner/coverage configs.
+        "ruff.toml",
+        ".ruff.toml",
+        "sub/ruff.toml",
+        "pyrightconfig.json",
+        "svc/pyrightconfig.json",
     ):
         assert sensitive_paths([path]) == [path], path
         assert classify_blast_radius([path]) == L3, path

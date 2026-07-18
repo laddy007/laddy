@@ -104,6 +104,20 @@ def test_leading_whitespace_line_before_fence_raises(tmp_path: Path) -> None:
         parse_spec(_spec(tmp_path, "   \n---\ntype: audit\n---\n"))
 
 
+@pytest.mark.parametrize("fence", ["----", "-----", "~~~", "~~~~"])
+def test_fence_like_opening_run_is_rejected(tmp_path: Path, fence: str) -> None:
+    # M-D4-1 near-miss: a '----'/'~~~' opener (not the canonical '---') read as
+    # plain markdown -> executable feature default while looking like frontmatter.
+    with pytest.raises(SpecError, match="fence"):
+        parse_spec(_spec(tmp_path, f"{fence}\ntype: audit\nstatus: draft-proposal\n{fence}\n"))
+
+
+def test_plain_markdown_dash_list_is_not_a_fence(tmp_path: Path) -> None:
+    # A leading '- item' list (mixed chars) is genuine markdown, not a fence.
+    spec = parse_spec(_spec(tmp_path, "- one\n- two\n"))
+    assert spec.task_type == "feature"
+
+
 def test_duplicate_front_matter_key_raises(tmp_path: Path) -> None:
     # L-D4-2: front matter is not YAML; last-wins was a spoofing surface.
     with pytest.raises(SpecError, match="duplicate front matter key"):

@@ -122,6 +122,13 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     #     already covered above). Same class as the scanner configs: the
     #     LOAD-BEARING fix is neutralizing it in the gate, classification here is
     #     the SECOND layer.
+    #   - ruff.toml / .ruff.toml / pyrightconfig.json: config for the OTHER two
+    #     gate steps (`ruff check .` -> L, `basedpyright` -> T). ruff auto-reads
+    #     ruff.toml/.ruff.toml and basedpyright reads pyrightconfig.json from the
+    #     gate cwd; a branch `[lint]\nselect = []` (ruff) or
+    #     `{"typeCheckingMode":"off"}` (pyright) turns a red step green. The same
+    #     config in pyproject.toml ([tool.ruff]/[tool.basedpyright]) is already
+    #     covered above; these dedicated files were the .coveragerc-style gap.
     "conftest.py",
     "**/conftest.py",
     "pytest.ini",
@@ -142,6 +149,12 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "**/.gitleaksignore",
     ".coveragerc",
     "**/.coveragerc",
+    "ruff.toml",
+    "**/ruff.toml",
+    ".ruff.toml",
+    "**/.ruff.toml",
+    "pyrightconfig.json",
+    "**/pyrightconfig.json",
     # Engine surfaces when laddy itself is the target branch (repo_laddy):
     # post-split the engine's own code lives at the branch REPO ROOT.
     "orchestrator/*",
