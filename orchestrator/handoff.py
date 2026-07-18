@@ -16,6 +16,43 @@ from orchestrator.artifacts import (
     TaskArtifacts,
 )
 from orchestrator.flags import open_flags
+from orchestrator.human_text import untrusted_inline
+
+
+def _safe_inline(text: object, *, limit: int = 200) -> str:
+    """First physical line of untrusted text as one bounded, terminal-safe line.
+
+    Take only the first line (a multi-line detail must not inject a spurious
+    heading into a one-screen section), then route it through
+    :func:`untrusted_inline`, which neutralizes ANSI/CSI/OSC/CR/bidi controls
+    that would otherwise corrupt the Director's terminal on ``cat``. Empty
+    input renders empty.
+    """
+    lines = str(text).splitlines()
+    return untrusted_inline(lines[0], limit=limit) if lines else ""
+
+
+def _longest_backtick_run(text: str) -> int:
+    best = run = 0
+    for char in text:
+        run = run + 1 if char == "`" else 0
+        best = max(best, run)
+    return best
+
+
+def _fenced_untrusted(text: str) -> list[str]:
+    """A code-fenced block branch-influenced content cannot break out of.
+
+    Inside a fence, markdown (a forged ``## Latest verdicts`` heading) is inert;
+    the only escape is a backtick run that closes the fence. Neutralize control
+    characters per line (terminal safety on ``cat``, newlines preserved), then
+    pick a fence delimiter strictly longer than the longest backtick run in the
+    content, so no line in it can match and close the fence.
+    """
+    body = [untrusted_inline(line, limit=1500) if line else "" for line in text.splitlines()]
+    longest = max((_longest_backtick_run(line) for line in body), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [fence, *body, fence]
 
 
 def _flags_section(entries: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -34,10 +71,11 @@ def _flags_section(entries: Sequence[Mapping[str, Any]]) -> list[str]:
         lines.append(f"- [{flag.kind}] {flag.summary} ({flag.id}){mark}")
         extra = flag.note or flag.detail
         if extra:
-            # First line only, truncated - a multi-line detail must not inject
+            # First line only, neutralized - a multi-line detail must not inject
             # raw continuation lines (e.g. a spurious "## Rounds" heading) into
-            # this one-screen section. Matches the round-trace detail rendering.
-            first = str(extra).splitlines()[0][:200]
+            # this one-screen section, and control chars must not reach the
+            # Director's terminal. Matches the round-trace detail rendering.
+            first = _safe_inline(extra, limit=200)
             lines.append(f"  {first}")
     lines.append("")
     return lines
@@ -73,7 +111,7 @@ def build_summary(
         detail = str(entry.get("detail", "")).strip()
         line = f"- {entry.get('ts', '')} `{action}` -> {outcome}"
         if detail:
-            first = detail.splitlines()[0][:200]
+            first = _safe_inline(detail, limit=200)
             line += f" — {first}"
         lines.append(line)
     lines.append("")
@@ -106,13 +144,17 @@ def _verdict_line(artifacts: TaskArtifacts, name: str, label: str) -> str:
     # failed run, so it has to survive malformed input.
     findings = verdict.get("findings")
     findings = findings if isinstance(findings, list) else []
+    # verdict + blocker summaries are agent-authored (branch-influenced): route
+    # each through untrusted_inline so ANSI/CR cannot corrupt the terminal and a
+    # multi-line summary cannot inject a fake structural line.
     blockers = [
-        f.get("summary", "?")
+        untrusted_inline(str(f.get("summary", "?")), limit=200)
         for f in findings
         if isinstance(f, dict) and f.get("severity") == "blocker"
     ]
     suffix = f" — blockers: {'; '.join(blockers[:3])}" if blockers else ""
-    return f"- {label}: {verdict.get('verdict', '?')}{suffix}"
+    verdict_text = untrusted_inline(str(verdict.get("verdict", "?")), limit=80)
+    return f"- {label}: {verdict_text}{suffix}"
 
 
 def build_handback(
@@ -139,8 +181,7 @@ def build_handback(
         # and other metadata-only events render in the ⚑ Flags section above.
         if "outcome" not in entry:
             continue
-        detail = str(entry.get("detail", "")).strip().splitlines()
-        first = detail[0][:160] if detail else ""
+        first = _safe_inline(str(entry.get("detail", "")).strip(), limit=160)
         lines.append(
             f"- round {entry.get('round', '-')}: `{entry.get('action')}` -> "
             f"{entry.get('outcome')}{' — ' + first if first else ''}"
@@ -157,13 +198,14 @@ def build_handback(
         None,
     )
     if last_failure:
+        # action is loop-controlled (fast_tests/authoritative, per the filter
+        # above); the detail tail is raw branch-influenced test output, so it is
+        # rendered inside a fence that its own backtick runs cannot break out of.
         lines += [
             "",
             f"## Last {last_failure['action']} failure (tail)",
             "",
-            "```",
-            str(last_failure.get("detail", ""))[-1500:],
-            "```",
+            *_fenced_untrusted(str(last_failure.get("detail", ""))[-1500:]),
         ]
     lines.append("")
     return "\n".join(lines)

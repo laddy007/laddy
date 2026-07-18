@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Run this FROM the target repo you are merging into; the engine's own
-# location is irrelevant to which repo is integrated (spec §3 step 0).
+# location is irrelevant to which repo is integrated (spec section 3 step 0).
 REPO_DIR="$(pwd)"
 git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || { echo "ERROR: run merge-verified.sh from inside the target repo" >&2; exit 1; }

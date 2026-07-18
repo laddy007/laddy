@@ -41,7 +41,8 @@ for u in "${USERS[@]}"; do
   # an untracked file, which must NOT count as dirty or the very first upgrade
   # of every onboarded user would be blocked forever.
   status=$(ssh "$alias" "
-    if pgrep -u \"\$(id -un)\" -f '[o]rchestrator.run' >/dev/null 2>&1; then echo busy-loop;
+    if ! command -v pgrep >/dev/null 2>&1; then echo busy-nopgrep;
+    elif pgrep -u \"\$(id -un)\" -f '[o]rchestrator.run' >/dev/null 2>&1; then echo busy-loop;
     elif [ -n \"\$(git -C '$path' status --porcelain --untracked-files=no 2>/dev/null)\" ]; then echo dirty-tree;
     else echo clear; fi" 2>/dev/null) || status=unreachable
   if [ "$status" = clear ]; then UPGRADABLE+=("$u"); else BUSY+=("$u($status)"); fi

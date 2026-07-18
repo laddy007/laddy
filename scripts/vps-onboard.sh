@@ -115,6 +115,10 @@ for v in VPS_ROOT_SSH LADDY_USERS CPU_QUOTA MEMORY_MAX; do
   [ -n "${!v:-}" ] || die "$CONF missing $v (delete the file and re-run to be asked again)"
 done
 _safe_token VPS_ROOT_SSH "$VPS_ROOT_SSH"
+# NTFY_TOPIC is embedded verbatim into env.vps and sourced on the VPS, so a
+# hand-edited value in $CONF must be re-validated on read too, not only at first
+# capture (matches the capture-time _safe_field guard above).
+[ -z "${NTFY_TOPIC:-}" ] || _safe_field NTFY_TOPIC "$NTFY_TOPIC"
 [[ "$CPU_QUOTA" =~ ^[0-9]+%$ ]] || die "CPU_QUOTA must look like 300% (got: $CPU_QUOTA)"
 [[ "$MEMORY_MAX" =~ ^[0-9]+[KMG]$ ]] || die "MEMORY_MAX must look like 8G (got: $MEMORY_MAX)"
 

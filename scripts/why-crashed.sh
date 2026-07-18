@@ -6,7 +6,12 @@ set -u
 echo "======================================================================"
 echo " OOM killer - zabité procesy (kernel log, čitelné timestampy)"
 echo "======================================================================"
-if oom=$(dmesg -T 2>/dev/null | grep -iE "killed process|out of memory"); then
+if dmesg_out=$(dmesg -T 2>/dev/null); then
+  # Test dmesg availability FIRST (the if above), THEN grep separately - a
+  # working dmesg with no OOM match must report "no OOM", not "dmesg unavailable"
+  # (which is what piping dmesg|grep into the if would do, since grep's non-match
+  # exit 1 is the pipeline's status).
+  oom=$(printf '%s\n' "$dmesg_out" | grep -iE "killed process|out of memory")
   if [ -n "$oom" ]; then
     echo "$oom" | tail -20
     echo

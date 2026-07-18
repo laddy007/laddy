@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -368,6 +369,37 @@ def test_enqueue_all_queues_candidates_and_skips_unready(
     assert [i.task_id for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()] == ["qt1"]
 
 
+def test_enqueue_explicit_id_rejects_high_risk_without_design_approval(
+    remote: Path, tmp_path: Path
+) -> None:
+    # L-D1-1: the explicit-id enqueue path must pre-check the high-risk ->
+    # design-approval gate too (like --all), rejecting all-or-nothing so a
+    # high-risk task cannot be queued before its design is approved.
+    env = _env(remote, tmp_path)
+    _push_spec(remote, tmp_path, "hr",
+               "---\ntype: feature\nrisk: high\n---\n# t\nTouch .laddy/orchestrator/run.py.\n")
+    _mark_clarified(env, "hr")
+    rc = main(["hr", "--phase", "enqueue"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert TaskQueue(Path(env["AGENT_WORK_ROOT"])).items() == []
+
+
+def test_enqueue_explicit_id_queues_high_risk_after_design_approval(
+    remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _push_spec(remote, tmp_path, "hr",
+               "---\ntype: feature\nrisk: high\n---\n# t\nTouch .laddy/orchestrator/run.py.\n")
+    _mark_clarified(env, "hr")
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("hr")
+    TaskArtifacts(wt, "hr").append_log(action="design", outcome="approved")
+    rc = main(["hr", "--phase", "enqueue"], env=env, deps=_deps([]))
+    assert rc == 0
+    assert [i.task_id for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()] == ["hr"]
+
+
 def test_enqueue_all_skips_high_risk_without_design_approval(remote: Path, tmp_path: Path) -> None:
     env = _env(remote, tmp_path)
     _push_spec(remote, tmp_path, "hr",
@@ -455,13 +487,28 @@ def test_queue_processes_fifo_and_removes_after_terminal(
     assert TaskQueue(Path(env["AGENT_WORK_ROOT"])).items() == []
 
 
-def test_queue_refuses_when_locked(remote: Path, tmp_path: Path) -> None:
+def test_queue_refuses_when_locked_by_a_live_holder(remote: Path, tmp_path: Path) -> None:
+    # A queue lock held by a LIVE process still refuses (rc 3). Our own pid is a
+    # guaranteed-live holder, so the crash-reclaim (L-D5-1) must NOT take it over.
     env = _env(remote, tmp_path)
     q = TaskQueue(Path(env["AGENT_WORK_ROOT"]))
     q.dir.mkdir(parents=True, exist_ok=True)
-    (q.dir / ".lock").write_text("999\n", encoding="utf-8")
+    (q.dir / ".lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
     rc = main(["--phase", "queue"], env=env, deps=_deps([]))
     assert rc == 3
+
+
+def test_queue_reclaims_stale_lock_from_dead_holder(remote: Path, tmp_path: Path) -> None:
+    # L-D5-1: a --phase queue runner that crashed mid-batch orphans the .lock;
+    # a later --phase queue must reclaim it (dead pid) and run to empty, not stay
+    # wedged at rc 3 until a human deletes the file. 999999999 is above pid_max,
+    # so it is deterministically dead.
+    env = _env(remote, tmp_path)
+    q = TaskQueue(Path(env["AGENT_WORK_ROOT"]))
+    q.dir.mkdir(parents=True, exist_ok=True)
+    (q.dir / ".lock").write_text("999999999\n", encoding="utf-8")
+    rc = main(["--phase", "queue"], env=env, deps=_deps([]))
+    assert rc == 0
 
 
 def test_queue_list_prints_items(capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path) -> None:

@@ -520,7 +520,7 @@ def _phase_enqueue(
         return 2
     for task_id in task_ids:
         wt = gitops.task_worktree(task_id)
-        _, rc = _load_spec(wt, task_id)
+        spec, rc = _load_spec(wt, task_id)
         if rc != 0:
             print(f"ERROR: {task_id}: invalid spec, nothing queued", file=sys.stderr)
             return rc
@@ -536,6 +536,22 @@ def _phase_enqueue(
                 file=sys.stderr,
             )
             return 2
+        # High-risk tasks need an approved design BEFORE they can be queued -
+        # the same gate _phase_loop_locked enforces at run time and
+        # _phase_enqueue_all pre-checks, so an explicit-id enqueue cannot slip a
+        # high-risk task past the design-approval gate into the queue.
+        if spec is not None:
+            spec_text = (wt / _spec_rel(task_id)).read_text(encoding="utf-8")
+            if spec_is_high_risk(load_target_policy(wt), spec_text, spec.risk) and not any(
+                e.get("action") == "design" and e.get("outcome") == "approved"
+                for e in artifacts.read_log()
+            ):
+                print(
+                    f"ERROR: {task_id}: high-risk task requires design approval "
+                    "(run `--phase design` first); nothing queued",
+                    file=sys.stderr,
+                )
+                return 2
     for task_id in task_ids:
         try:
             item = queue.enqueue(task_id, skip_clarify=skip_clarify)
@@ -617,7 +633,14 @@ def _phase_enqueue_all(config: OrchestratorConfig, deps: Deps, skip_clarify: boo
                 continue
         ready.append(task_id)
     for task_id in ready:
-        item = queue.enqueue(task_id, skip_clarify=skip_clarify)
+        try:
+            item = queue.enqueue(task_id, skip_clarify=skip_clarify)
+        except QueueError as exc:
+            # enqueue now serializes under queue.lock(); a concurrent queue
+            # runner holding it (QueueLocked) or a racing writer (dup) stops the
+            # rest of the batch cleanly rather than tracebacking.
+            print(f"ERROR: {task_id}: {exc}", file=sys.stderr)
+            return 2
         print(f"[enqueue] queued as {item.path.name}")
     if not ready:
         print("[enqueue] nothing ready to queue")
