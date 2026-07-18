@@ -113,7 +113,7 @@ def test_broken_hold_on_l3_never_claims_a_risk_decision_is_required() -> None:
 
 def test_infra_override_holds_even_when_every_gate_is_green() -> None:
     # The gate restores .laddy/docker + .laddy/security from trusted main over
-    # the branch (NÁLEZ 1), so for a branch that CHANGES those paths a green run
+    # the branch (FINDING 1), so for a branch that CHANGES those paths a green run
     # is a verdict on main's infra, not on the branch's. Offering that as
     # "all gates passed, your risk call" would be a false claim - it is a hold.
     from orchestrator.local_merge import BROKEN
@@ -1601,6 +1601,49 @@ def test_cli_auto_merge_exact_id_typed_merges(
         local_merge.gather_gates = orig
     assert rc == 0  # merged, nothing held
     assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
+
+
+def test_cli_dirty_tree_on_normal_path_refuses_distinctly(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    # LOW (C2+C3 audit): a dirty tree on the NORMAL (non---local) path used to
+    # surface as the false "branch no longer applies cleanly" hold - a
+    # re-run-the-whole-VPS-task signal for what a `git stash` fixes. It must
+    # refuse up front with the same distinct commit-or-stash message as the
+    # --local route, and merge nothing.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # green L2
+    from orchestrator import local_merge
+
+    # dirty the Director's main checkout with content the branch also brings,
+    # so a merge attempted over it would fail (the old misreport trigger)
+    (local_repo / "myapp").mkdir(exist_ok=True)
+    (local_repo / "myapp" / "api_helper.py").write_text(
+        "uncommitted local edit\n", encoding="utf-8"
+    )
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2)
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"), "t1"],
+            env=env,
+            confirm=lambda v: True,  # merge-safety confirmation given (H4)
+            ask=lambda p: False,  # never push
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert rc != 0
+    # the DISTINCT dirty-tree refusal, not the false merge-conflict report
+    assert "commit or stash" in out
+    assert "no longer applies cleanly" not in out.lower()
+    # nothing merged into local main
+    unmerged = subprocess.run(
+        ["git", "-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py"],
+        capture_output=True,
+    ).returncode
+    assert unmerged != 0
 
 
 def test_engine_risk_decision_confirmed_merges() -> None:

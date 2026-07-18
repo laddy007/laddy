@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator import TARGET_DIR_NAME
+from orchestrator.agent_retry import request_payload, request_verdict
 from orchestrator.agents import AgentRunner
 from orchestrator.artifacts import (
     AUTHORITATIVE,
@@ -58,8 +59,6 @@ from orchestrator.terminals import terminal_spec
 from orchestrator.testgate import DockerGate, ShellRunner, frontend_touched, run_fast
 from orchestrator.verdict import (
     VerdictError,
-    request_payload,
-    request_verdict,
     validate_rw2,
 )
 from orchestrator.verdict import (

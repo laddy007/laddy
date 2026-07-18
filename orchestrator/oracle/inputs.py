@@ -18,7 +18,7 @@ from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import SPEC
-from orchestrator.gitops import policy_pathspec
+from orchestrator.gitdiff import policy_pathspec
 from orchestrator.oracle import add_detached_worktree, remove_worktree, run_git
 
 

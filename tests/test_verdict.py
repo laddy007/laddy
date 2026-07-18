@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.agent_retry import request_verdict
 from orchestrator.verdict import (
     Verdict,
     VerdictError,
     extract_json,
     parse_verdict,
-    request_verdict,
     validate_review,
 )
 from tests.fakes import FakeRunner, advisory, blocker, verdict_json

@@ -201,7 +201,7 @@ def restored_infra_paths(changed: Iterable[str]) -> tuple[str, ...]:
     against main's rules). Neither reading is safe to leave implicit, so the
     caller names these paths in its report instead of guessing.
 
-    Restoring is deliberate and stays (NÁLEZ 1) - this only makes its cost
+    Restoring is deliberate and stays (FINDING 1) - this only makes its cost
     visible. Matching is path-segment exact: ``<dir>/security-notes.md`` is not
     under ``<dir>/security`` and is not restored.
     """
@@ -219,7 +219,7 @@ def _containerized(
     a clean SHA-pinned clone, so untrusted branch code NEVER executes on the
     host and the reviewed commit (not the live worktree) is what runs.
 
-    ``trusted_ref`` (NÁLEZ 1): the gate INFRASTRUCTURE the daemon builds and
+    ``trusted_ref`` (FINDING 1): the gate INFRASTRUCTURE the daemon builds and
     runs - the compose file, the Dockerfile, and the semgrep ruleset under
     ``<agent-dir>/docker`` + ``<agent-dir>/security`` - is attacker-controlled if taken
     from the branch (a branch could set ``privileged: true`` or bind-mount the
@@ -456,7 +456,7 @@ class BindingGate:
         # coverage_package is per-target (from the trusted policy the caller
         # loaded). trusted_ref restores the gate infra (compose/Dockerfile/
         # semgrep) from the local trusted main, so the branch cannot ship a
-        # hostile container definition (NÁLEZ 1). The decision keys off the
+        # hostile container definition (FINDING 1). The decision keys off the
         # container EXIT CODE (unforgeable by code that ran earlier), not the
         # parsed stdout line. compare_ref baselines the scanners to the tree
         # being merged into.

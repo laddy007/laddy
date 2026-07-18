@@ -177,7 +177,7 @@ def test_dependency_and_payment_files_classify_l3() -> None:
 
 
 def test_gate_own_security_ruleset_is_sensitive() -> None:
-    # NÁLEZ 4: the gate's own semgrep ruleset (<agent-dir>/security/*) must be
+    # FINDING 4: the gate's own semgrep ruleset (<agent-dir>/security/*) must be
     # sensitive - a branch that weakens the rules must not auto-merge as L2,
     # or the weakened rules become the trusted version next time.
     from orchestrator.policy import L3
@@ -511,7 +511,7 @@ def test_spec_files_are_never_l1_even_as_pure_markdown() -> None:
 def test_added_test_files_are_not_safe_by_construction() -> None:
     from orchestrator.policy import L2
 
-    # NÁLEZ 3: a test file is executable Python, not data. An added conftest.py
+    # FINDING 3: a test file is executable Python, not data. An added conftest.py
     # can neutralize the gate via collection hooks, and every merged test then
     # runs on the host at each `pytest -n auto`. So added tests are L2 (the
     # agents review them cheaply), never L1 safe-by-construction.

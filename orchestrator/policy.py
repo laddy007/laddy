@@ -237,7 +237,7 @@ def user_visible(policy: TargetPolicy, changed_files: Sequence[str]) -> bool:
 # conservative - when unsure, a file falls through to L2 (agents gate it).
 # NOTE: fnmatch's ``*`` crosses ``/`` (unlike a shell glob), so a bare
 # ``docs/*`` / ``docs/**/*`` would match ``docs/anything/evil.py`` and route
-# executable code into the no-review L1 auto-merge path — a fail-open hole
+# executable code into the no-review L1 auto-merge path - a fail-open hole
 # under the "branch is attacker-controlled" threat model. L1 is therefore an
 # INERT-EXTENSION allowlist (markdown + the target's declared data catalogues),
 # never a directory allowlist: any non-inert file falls through to L2 so the
@@ -256,7 +256,7 @@ def _is_safe_by_construction(policy: TargetPolicy, path: str) -> bool:
     executable Python that runs on the host at every ``pytest`` after merge,
     and an added ``conftest.py`` can neutralize the gate through collection
     hooks. Code is never safe-by-construction; added tests go to L2 so the
-    agents review them (NÁLEZ 3).
+    agents review them (FINDING 3).
 
     Task specs are excluded for the same reason even though they are markdown
     (H2): ``<agent-dir>/specs/*.md`` is an EXECUTABLE task description - a
@@ -314,7 +314,7 @@ def deleted_test_files(
 
 
 def destructive_migrations(
-    policy: TargetPolicy, changed_files: Sequence[str], read_text: Any
+    policy: TargetPolicy, changed_files: Sequence[str], read_text: Callable[[str], str]
 ) -> list[str]:
     """Migration files (per-target ``migration_globs``) containing
     drop_table/drop_column (heuristic)."""
@@ -366,7 +366,7 @@ def merge_decision(
     declared_risk: str,
     gates: GateStates,
     changed_statuses: Mapping[str, str] | None = None,
-    migration_texts: Any = None,
+    migration_texts: Callable[[str], str] | None = None,
     senior_deadlock: bool = False,
     unclear_intent: bool = False,
 ) -> MergeDecision:

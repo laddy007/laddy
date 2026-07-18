@@ -1,4 +1,4 @@
-"""Git operations for task branches (design doc S11: gitops.py).
+"""Git provisioning for task branches (design doc S11: gitops.py).
 
 Clone/fetch the base repo, maintain one worktree per task on a bare
 `<task>` branch, commit and push that branch. The hub is a closed
@@ -6,15 +6,20 @@ namespace where every non-default branch IS a task id (spec: discovery
 selector) - so `task_id` doubles as the branch name, and any id equal to
 `default_branch` is rejected before any git command runs. Nothing here
 can write the default branch: pushes go exclusively to bare `<task>` refs.
+
+Stateless diff sizing/classification lives in orchestrator.gitdiff; the
+method forms below are thin binders (worktree + default_branch) kept
+because the loop and the policy recheckers call them on the GitOps instance.
 """
 
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 
-from orchestrator import TARGET_DIR_NAME
+from orchestrator import gitdiff
+from orchestrator.gitdiff import GitError as GitError  # re-export (one error type)
+from orchestrator.gitdiff import git_out
 
 _IDENTITY = (
     "-c",
@@ -23,36 +28,6 @@ _IDENTITY = (
     "user.email=agent@myapp.local",
 )
 
-
-class GitError(RuntimeError):
-    """A git command failed."""
-
-
-def _run(args: Sequence[str], cwd: Path | None = None) -> str:
-    proc = subprocess.run(
-        list(args), cwd=cwd, capture_output=True, text=True, check=False
-    )
-    if proc.returncode != 0:
-        raise GitError(
-            f"git command failed ({proc.returncode}): {' '.join(args)}\n{proc.stderr}"
-        )
-    return proc.stdout.strip()
-
-
-def policy_pathspec(task_id: str) -> list[str]:
-    """The policy view of a diff: everything EXCEPT the task's OWN artifact
-    lane <agent-dir>/tasks/<task_id>/**.
-
-    Task artifacts (iteration logs, verdicts) ride every branch; the policy
-    and the oracle both classify by the PRODUCT diff. Only the branch's own
-    lane is exempt: content a branch plants under ANY OTHER tasks/ path lands
-    in the integrated tree, so it is classified like any other change (M2 -
-    a blanket tasks/ exclusion let such plants through unclassified). One
-    home for the exclusion so no caller restates it (convergence R1/R3).
-    ``literal`` pins the task id as a literal path: a wildcard in a hostile
-    branch name must not widen the exclusion.
-    """
-    return ["--", ".", f":(exclude,literal){TARGET_DIR_NAME}/tasks/{task_id}"]
 
 
 class GitOps:
@@ -71,9 +46,9 @@ class GitOps:
         """Clone the repo once; fetch on every later call."""
         if not (self.base_dir / ".git").is_dir():
             self.base_dir.parent.mkdir(parents=True, exist_ok=True)
-            _run(["git", "clone", self.repo_url, str(self.base_dir)])
+            git_out(["git", "clone", self.repo_url, str(self.base_dir)])
         else:
-            _run(["git", "-C", str(self.base_dir), "fetch", "origin"])
+            git_out(["git", "-C", str(self.base_dir), "fetch", "origin"])
         return self.base_dir
 
     def refresh_base(self) -> Path:
@@ -84,8 +59,8 @@ class GitOps:
         because ensure_base only fetches - its working tree stays at
         clone-time state, and enqueue discovery must read CURRENT specs."""
         base = self.ensure_base()
-        _run(["git", "-C", str(base), "checkout", "-q", self.default_branch])
-        _run(
+        git_out(["git", "-C", str(base), "checkout", "-q", self.default_branch])
+        git_out(
             [
                 "git", "-C", str(base), "reset", "--hard", "-q",
                 f"origin/{self.default_branch}",
@@ -109,7 +84,7 @@ class GitOps:
         wt = self.work_root / "wt" / task_id
         if (wt / ".git").exists():
             return wt
-        _run(["git", "-C", str(base), "worktree", "prune"])
+        git_out(["git", "-C", str(base), "worktree", "prune"])
         remote_ref = f"origin/{branch}"
         has_remote = (
             subprocess.run(
@@ -121,42 +96,23 @@ class GitOps:
         )
         start = remote_ref if has_remote else f"origin/{self.default_branch}"
         wt.parent.mkdir(parents=True, exist_ok=True)
-        _run(
+        git_out(
             ["git", "-C", str(base), "worktree", "add", "-B", branch, str(wt), start]
         )
         return wt
 
     def commit_all(self, wt: Path, message: str) -> str | None:
         """Stage and commit everything; None when the tree is clean."""
-        if not _run(["git", "-C", str(wt), "status", "--porcelain"]):
+        if not git_out(["git", "-C", str(wt), "status", "--porcelain"]):
             return None
-        _run(["git", "-C", str(wt), "add", "-A"])
-        _run(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
+        git_out(["git", "-C", str(wt), "add", "-A"])
+        git_out(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
         return self.head_sha(wt)
-
-    def head_sha(self, wt: Path) -> str:
-        return _run(["git", "-C", str(wt), "rev-parse", "HEAD"])
-
-    def code_sha(self, wt: Path, task_id: str) -> str:
-        """SHA of the last commit touching anything OUTSIDE the task's own
-        <agent-dir>/tasks/<task_id>/ lane.
-
-        Gate results are keyed to this, not HEAD: artifact commits (verdicts,
-        logs) move HEAD but do not change the reviewed code, so they must not
-        invalidate approvals. Any real code commit does - including a commit
-        that plants files in ANOTHER task's lane (M2: that content is part of
-        what ships, so it must re-key the approvals like any code change).
-        """
-        out = _run(
-            ["git", "-C", str(wt), "rev-list", "-1", "HEAD"]
-            + policy_pathspec(task_id)
-        )
-        return out or self.head_sha(wt)
 
     def push(self, wt: Path, task_id: str) -> None:
         """Push the task branch. The ONLY remote write this module performs."""
         branch = self._branch(task_id)
-        _run(
+        git_out(
             [
                 "git",
                 "-C",
@@ -167,57 +123,22 @@ class GitOps:
             ]
         )
 
-    # Policy inputs (changed_files / changed_statuses / diff_line_count) share
-    # two deliberate flags so the VPS decision and the off-VPS recheck agree
-    # AND cannot be gamed:
-    #   --no-renames  : a `git mv tests/test_x.py elsewhere` shows as
-    #                   D tests/test_x.py + A elsewhere, so a renamed-away
-    #                   invariant/sensitive test is still seen by the guards.
-    #   :(exclude)<agent-dir>/tasks/<task> : the task commits its OWN artifacts
-    #                   there; counting them would (a) inflate size-based risk
-    #                   and (b) make the VPS pre-artifact-commit decision differ
-    #                   from the CI post-artifact-commit recompute. Only the
-    #                   task's own lane is exempt (M2): files planted in other
-    #                   tasks' lanes count like any other change.
-    def _range(self) -> str:
-        return f"origin/{self.default_branch}...HEAD"
+    # --- diff helpers: thin binders over orchestrator.gitdiff ---------------
 
-    def _policy_pathspec(self, task_id: str) -> list[str]:
-        return policy_pathspec(task_id)
+    def head_sha(self, wt: Path) -> str:
+        return gitdiff.head_sha(wt)
+
+    def code_sha(self, wt: Path, task_id: str) -> str:
+        return gitdiff.code_sha(wt, task_id)
 
     def changed_files(self, wt: Path, task_id: str) -> list[str]:
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--name-only", self._range()]
-            + self._policy_pathspec(task_id)
-        )
-        return [line for line in out.splitlines() if line]
+        return gitdiff.changed_files(wt, task_id, self.default_branch)
 
     def diff_text(self, wt: Path) -> str:
-        return _run(["git", "-C", str(wt), "diff", self._range()])
+        return gitdiff.diff_text(wt, self.default_branch)
 
     def diff_line_count(self, wt: Path, task_id: str) -> int:
-        """Added+deleted line count for policy sizing (excludes own artifacts)."""
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--numstat", self._range()]
-            + self._policy_pathspec(task_id)
-        )
-        total = 0
-        for line in out.splitlines():
-            added, deleted, *_ = line.split("\t")
-            total += (0 if added == "-" else int(added)) + (
-                0 if deleted == "-" else int(deleted)
-            )
-        return total
+        return gitdiff.diff_line_count(wt, task_id, self.default_branch)
 
     def changed_statuses(self, wt: Path, task_id: str) -> dict[str, str]:
-        """path -> git status letter (A/M/D). Renames disabled (see above)."""
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--name-status", self._range()]
-            + self._policy_pathspec(task_id)
-        )
-        statuses: dict[str, str] = {}
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                statuses[parts[-1]] = parts[0]
-        return statuses
+        return gitdiff.changed_statuses(wt, task_id, self.default_branch)

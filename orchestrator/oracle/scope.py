@@ -17,7 +17,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from orchestrator.gitops import policy_pathspec
+from orchestrator.gitdiff import policy_pathspec
 from orchestrator.merge_subject import parse_merge_subject
 from orchestrator.oracle import run_git
 from orchestrator.policy import L1, classify_blast_radius

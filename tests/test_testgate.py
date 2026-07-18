@@ -196,7 +196,7 @@ def test_binding_gate_command_single_quotes_gate_so_rc_survives() -> None:
 
 
 def test_binding_gate_runs_trusted_infra_not_the_branch() -> None:
-    # NÁLEZ 1: the compose file / Dockerfile / semgrep ruleset the gate BUILDS
+    # FINDING 1: the compose file / Dockerfile / semgrep ruleset the gate BUILDS
     # and RUNS must come from TRUSTED main, not the untrusted branch clone -
     # else a branch adds `privileged: true` / a host bind-mount to
     # compose.test.yml and escapes onto the Director's daemon DURING

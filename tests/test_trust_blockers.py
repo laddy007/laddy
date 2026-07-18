@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator import TARGET_DIR_NAME, agents, policy, testgate, verdict
+from orchestrator import TARGET_DIR_NAME, agent_retry, agents, policy, testgate, verdict
 from orchestrator.agents import AgentResult
 from orchestrator.local_merge import (
     DRY_RUN,
@@ -108,7 +108,7 @@ class _FakeRunner:
 
 
 def test_clean_run_verdict_trusted() -> None:
-    v, _ = verdict.request_verdict(_FakeRunner("ok"), "p", Path("."), max_retries=0)
+    v, _ = agent_retry.request_verdict(_FakeRunner("ok"), "p", Path("."), max_retries=0)
     assert v.approved
 
 
@@ -116,7 +116,7 @@ def test_clean_run_verdict_trusted() -> None:
 def test_non_ok_run_verdict_refused(reason: str) -> None:
     # a valid APPROVED payload carried by an errored/quota run must NOT clear the gate
     with pytest.raises(verdict.VerdictError):
-        verdict.request_verdict(_FakeRunner(reason), "p", Path("."), max_retries=1)
+        agent_retry.request_verdict(_FakeRunner(reason), "p", Path("."), max_retries=1)
 
 
 # --------------------------------------------------------------------------

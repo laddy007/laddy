@@ -45,6 +45,7 @@ from enum import Enum
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
+from orchestrator.agent_retry import request_verdict
 from orchestrator.agents import AgentRunner
 
 # Hub-main tripwire (spec S5, audit M3) - deletion / rewind / divergence
@@ -71,7 +72,7 @@ from orchestrator.merge_subject import (
 from orchestrator.policy import L2, L3, classify_blast_radius
 from orchestrator.target_policy import load_target_policy
 from orchestrator.testgate import BindingGate, BindingResult, restored_infra_paths
-from orchestrator.verdict import Verdict, VerdictError, request_verdict
+from orchestrator.verdict import Verdict, VerdictError
 
 __all__ = [
     "ArtifactAttestation",
@@ -152,7 +153,7 @@ class GateResults:
     sensitive_files: tuple[str, ...] = ()  # the paths that made it L3
     head_sha: str = ""  # the exact commit these gates verified (TOCTOU pin)
     # Gate-infra paths this branch changed whose branch version the gate did NOT
-    # run: it restored trusted main's copy over them (NÁLEZ 1). Empty for every
+    # run: it restored trusted main's copy over them (FINDING 1). Empty for every
     # branch that leaves the gate infra alone - i.e. almost all of them.
     infra_overridden: tuple[str, ...] = ()
 
@@ -1045,7 +1046,7 @@ def gather_gates(
         # and re-verifies against prior merges this batch already landed. The
         # gate infra (compose/Dockerfile/semgrep) is restored from local main,
         # not the branch, so a branch cannot ship a hostile container definition
-        # that escapes during verification (NÁLEZ 1). verified_sha (the branch
+        # that escapes during verification (FINDING 1). verified_sha (the branch
         # tip) stays the TOCTOU pin merge_branch integrates.
         binding = _binding_on_merged_tree(
             repo, task_id, work_root, base_sha, verified_sha, tools.binding_gate,
@@ -1378,16 +1379,21 @@ def main(
     work_root.mkdir(parents=True, exist_ok=True)
     tools = _default_tools(config)
 
-    # Dirty-tree guard (--local only): what is judged must be exactly a committed
-    # revision, so nothing uncommitted can ride along into the merged tree
-    # (judged == merged). Refuse before any gate runs; nothing is merged.
-    if local_ref is not None:
-        _, porcelain = _git(repo, "status", "--porcelain")
-        if porcelain.strip():
-            print("[dirty] the target working tree has uncommitted changes.")
+    # Dirty-tree guard (both routes): the merge lands in this working tree, so
+    # nothing uncommitted may ride along into the merged tree (judged ==
+    # merged). On the normal route a dirty tree would otherwise make git fail
+    # the merge and misreport a clean branch as "no longer applies cleanly" -
+    # a re-run-the-whole-VPS-task signal for what a stash fixes. Refuse before
+    # any gate runs; nothing is merged.
+    _, porcelain = _git(repo, "status", "--porcelain")
+    if porcelain.strip():
+        print("[dirty] the target working tree has uncommitted changes.")
+        if local_ref is not None:
             print("--local judges a committed revision so judged == merged;")
-            print("commit or stash your changes first. NOTHING was merged.")
-            return 1
+        else:
+            print("merging needs a clean tree so judged == merged;")
+        print("commit or stash your changes first. NOTHING was merged.")
+        return 1
 
     # Tripwire (spec S5, M3) - before the engine runs, and deliberately with NO
     # fetch first: check_hub_main consults the hub via ls-remote and compares
