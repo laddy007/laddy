@@ -17,6 +17,8 @@ from orchestrator import TARGET_DIR_NAME, agents, policy, testgate, verdict
 from orchestrator.agents import AgentResult
 from orchestrator.local_merge import (
     DRY_RUN,
+    ArtifactAttestation,
+    ArtifactAttestationState,
     GateResults,
     LocalMergeEngine,
     decide,
@@ -166,8 +168,7 @@ def test_recorded_terminal_none_mid_run() -> None:
 def _green_l1() -> GateResults:
     return GateResults(
         blast="L1",
-        policy_ok=True,
-        policy_reason="",
+        artifact_attestation=ArtifactAttestation(ArtifactAttestationState.PASSED),
         tests_passed=True,
         tests_tail="",
         coverage_ok=True,

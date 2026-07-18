@@ -8,13 +8,14 @@ failing test: a needed fix is a new VPS task, not this tool's job.
 
 ``--local <ref>`` is the trusted-machine escape hatch for a task the local
 gate held BROKEN: the Director authors the fix by hand with ordinary git and
-this tool judges that locally-committed revision through the IDENTICAL gate
+this tool judges that locally-committed revision through the same applicable gate
 (no fetch of the remote branch, no VPS round trip). It stays fix-free - the
 only new capability is sourcing the judged/merged commit from a local ref
 instead of a fetched one. It does not trust the code more, it trusts the
-route: the Director is the trusted author, the same gate judges the diff, and
-the judged sha is the merged sha (dirty-tree guarded), so nothing unverified
-slips in. A stopgap until bounce-to-VPS exists.
+route: the Director is the trusted author, the same applicable trusted-local
+gate judges the diff, and the judged sha is the merged sha (dirty-tree guarded),
+so nothing unverified slips in. The inherited VPS artifact attestation is N/A
+for that newer commit. A stopgap until bounce-to-VPS exists.
 
 Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L1 safe-by-construction : merge after the mechanical gates, no review
@@ -22,8 +23,9 @@ Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L3 sensitive surface    : never auto-merge; digest -> human Y/N
 
 Deterministic gates (block on red): local full test re-run, diff-coverage,
-semgrep, gitleaks, and the recomputed merge_check policy. Judgment gates
-(escalate, never silently block): rw2 re-run, the security panel.
+semgrep, gitleaks, and (for a fetched VPS tip) artifact attestation via
+merge_check. Judgment gates (escalate, never silently block): rw2 re-run, the
+security panel.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
@@ -52,6 +55,8 @@ from orchestrator.testgate import BindingGate, BindingResult, restored_infra_pat
 from orchestrator.verdict import Verdict, VerdictError, request_verdict
 
 __all__ = [
+    "ArtifactAttestation",
+    "ArtifactAttestationState",
     "GateResults",
     "LocalMergeEngine",
     "MergeVerdict",
@@ -68,13 +73,40 @@ MergeCheckFn = Callable[[Path, str, str], tuple[int, str]]
 # --- results & verdict -------------------------------------------------------
 
 
+class ArtifactAttestationState(str, Enum):
+    """Whether the VPS artifact chain describes the commit under judgment."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class ArtifactAttestation:
+    """Result of checking the VPS-authored state/decision artifact chain.
+
+    The check is applicable to a fetched VPS task tip: its committed artifacts
+    must describe that exact code history. It is deliberately not applicable
+    to ``--local`` because a Director-authored code commit makes those inherited
+    artifacts stale by construction; the fresh trusted-local gates judge that
+    commit instead. Keeping this as a typed state avoids laundering N/A into a
+    fake successful policy check.
+    """
+
+    state: ArtifactAttestationState
+    detail: str = ""
+
+    @property
+    def failed(self) -> bool:
+        return self.state is ArtifactAttestationState.FAILED
+
+
 @dataclass(frozen=True)
 class GateResults:
     """Everything the local gate gathered for one branch."""
 
     blast: str  # L1 | L2 | L3
-    policy_ok: bool
-    policy_reason: str
+    artifact_attestation: ArtifactAttestation
     tests_passed: bool
     tests_tail: str
     coverage_ok: bool
@@ -181,8 +213,9 @@ def build_digest(task_id: str, gates: GateResults, kind: str, reasons: Sequence[
             "commit the fix ON TOP of this branch with ordinary git, then run",
             "`merge-verified.sh <task> --local <ref>` (a sha, branch, or worktree",
             "path). --local does not trust the code more - it trusts the route:",
-            "you are the trusted author and the IDENTICAL gate still judges the",
-            "diff, and the judged sha is the merged sha, so nothing unverified",
+            "you are the trusted author and the same applicable gate still judges",
+            "the diff (the historical VPS artifact attestation is N/A),",
+            "and the judged sha is the merged sha, so nothing unverified",
             "slips in. It is a stopgap until bounce-to-VPS exists (and a",
             "legitimate escape hatch after).",
         ]
@@ -195,8 +228,10 @@ def decide(task_id: str, gates: GateResults) -> MergeVerdict:
     broken: list[str] = []
 
     # deterministic hard gates - any red is BROKEN
-    if not gates.policy_ok:
-        broken.append(f"policy recompute failed/mismatch: {gates.policy_reason}")
+    if gates.artifact_attestation.failed:
+        broken.append(
+            f"VPS artifact attestation failed/mismatch: {gates.artifact_attestation.detail}"
+        )
     if not gates.tests_passed:
         broken.append("local full test suite is red")
     if not gates.coverage_ok:
@@ -644,10 +679,10 @@ def gather_gates(
 
     ``local_ref`` selects --local mode: source the worktree from the local sha
     that ``local_ref`` resolves to (no fetch of the remote branch) instead of
-    the fetched remote tip. Everything downstream - trial-merge into current
-    main, merge_check, policy from trusted base_branch, binding gate, security
-    panel, rw2, and the ``head_sha`` TOCTOU pin - is byte-identical, so --local
-    runs the SAME gate set; only the commit's provenance differs.
+    the fetched remote tip. The trusted policy/classification, trial merge,
+    binding gate, security panel, rw2, and ``head_sha`` TOCTOU pin are identical.
+    Only the VPS artifact attestation is N/A: state.json and the VPS log describe
+    the older task tip by construction once the Director adds a local code fix.
     """
     wt = (
         _local_worktree(repo, task_id, work_root, local_ref)
@@ -656,8 +691,19 @@ def gather_gates(
     )
     try:
         verified_sha = _worktree_sha(wt)
-        code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
-        policy_ok = code == 0
+        if local_ref is None:
+            code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
+            artifact_attestation = ArtifactAttestation(
+                ArtifactAttestationState.PASSED
+                if code == 0
+                else ArtifactAttestationState.FAILED,
+                msg,
+            )
+        else:
+            artifact_attestation = ArtifactAttestation(
+                ArtifactAttestationState.NOT_APPLICABLE,
+                "Director-authored --local commit is judged by fresh trusted-local gates",
+            )
 
         from orchestrator.gitops import GitOps
 
@@ -701,8 +747,7 @@ def gather_gates(
 
         return GateResults(
             blast=blast,
-            policy_ok=policy_ok,
-            policy_reason=msg,
+            artifact_attestation=artifact_attestation,
             tests_passed=binding.tests_passed,
             tests_tail=binding.tests_tail,
             coverage_ok=binding.coverage_ok,

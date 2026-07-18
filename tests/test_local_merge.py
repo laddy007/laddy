@@ -6,6 +6,8 @@ from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.local_merge import (
+    ArtifactAttestation,
+    ArtifactAttestationState,
     GateResults,
     LocalMergeEngine,
     decide,
@@ -18,7 +20,7 @@ from tests.fakes import FakeRunner, blocker, verdict_json, write_policy_toml
 
 def _gates(
     blast: str = L2,
-    policy_ok: bool = True,
+    artifact_attestation_ok: bool = True,
     tests_passed: bool = True,
     coverage_ok: bool = True,
     scan_findings: tuple[str, ...] = (),
@@ -37,8 +39,12 @@ def _gates(
     )
     return GateResults(
         blast=blast,
-        policy_ok=policy_ok,
-        policy_reason="" if policy_ok else "mismatch",
+        artifact_attestation=ArtifactAttestation(
+            ArtifactAttestationState.PASSED
+            if artifact_attestation_ok
+            else ArtifactAttestationState.FAILED,
+            "" if artifact_attestation_ok else "mismatch",
+        ),
         tests_passed=tests_passed,
         tests_tail="" if tests_passed else "FAILED test_x",
         coverage_ok=coverage_ok,
@@ -175,10 +181,10 @@ def test_scan_findings_hold() -> None:
     assert any("security scan" in r for r in v.reasons)
 
 
-def test_policy_mismatch_holds() -> None:
-    v = decide("t1", _gates(policy_ok=False))
+def test_vps_artifact_attestation_mismatch_holds() -> None:
+    v = decide("t1", _gates(artifact_attestation_ok=False))
     assert v.decision == "hold"
-    assert any("policy recompute" in r for r in v.reasons)
+    assert any("artifact attestation" in r for r in v.reasons)
 
 
 def test_security_panel_blocker_holds() -> None:
@@ -587,7 +593,9 @@ def _fake_gather(blast=L3, **over):
     from orchestrator.verdict import parse_verdict
 
     default = GateResults(
-        blast=blast, policy_ok=True, policy_reason="", tests_passed=True,
+        blast=blast,
+        artifact_attestation=ArtifactAttestation(ArtifactAttestationState.PASSED),
+        tests_passed=True,
         tests_tail="", coverage_ok=True, coverage_detail="", scan_findings=(),
         rw2=None, security_verdicts=(parse_verdict(verdict_json("APPROVED")),),
         sensitive_files=(("myapp/models.py",) if blast == L3 else ()),
@@ -943,7 +951,7 @@ def test_main_aborts_whole_run_on_tripwire(
 # --- --local: judge a Director-authored local fix through the full gate -------
 #
 # The Director fixes a held task by hand with ordinary git and re-judges the
-# LOCAL commit (no fetch, no VPS) through the identical gate. These tests build
+# LOCAL commit (no fetch, no VPS) through the same applicable gate. These tests build
 # the local fix commit as the recipe does (a worktree on top of local main) and
 # never push it, so the judged sha lives only in the local object store.
 
@@ -986,6 +994,7 @@ def test_local_gather_and_merge_uses_local_sha_no_fetch_no_push(
     # pass the worktree PATH as <ref> (the recipe's own form), not a rev
     gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref=str(fix))
     assert gates.head_sha == sha  # judged exactly the local sha
+    assert gates.artifact_attestation.state is ArtifactAttestationState.NOT_APPLICABLE
     assert gates.blast == L2 and gates.tests_passed
     assert decide("t1", gates).decision == "merge"
 
@@ -1001,6 +1010,79 @@ def test_local_gather_and_merge_uses_local_sha_no_fetch_no_push(
     assert rc != 0
 
 
+def test_local_gather_does_not_attest_stale_vps_artifacts(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#1/#2: reproduce the real fix-on-top shape. The inherited VPS state is
+    # stale for the new code SHA, which the normal artifact check correctly
+    # rejects. --local must classify that historical attestation N/A and run the
+    # fresh trusted-local gates instead - never launder it into a fake pass.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    _g("-C", str(local_repo), "fetch", "origin", "t1")
+    fix = tmp_path / "stale-fix"
+    _g(
+        "-C",
+        str(local_repo),
+        "worktree",
+        "add",
+        "-b",
+        "stale-fix",
+        str(fix),
+        "origin/t1",
+    )
+    (fix / "myapp" / "api_helper.py").write_text("x = 2\n", encoding="utf-8")
+    _g("-C", str(fix), "add", "-A")
+    _g("-C", str(fix), *_ID, "commit", "-m", "fix: trusted local edit")
+
+    from orchestrator.merge_check import check
+
+    code, message = check(fix, "origin/main", "t1")
+    assert code == 1 and "state_sha_mismatch" in message
+
+    tools = _tools(
+        local_repo,
+        _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    tools.merge_check_fn = lambda *args: pytest.fail(  # type: ignore[assignment]
+        "the stale VPS artifact attestation is N/A in --local mode"
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools, local_ref=str(fix))
+
+    assert gates.artifact_attestation.state is ArtifactAttestationState.NOT_APPLICABLE
+    assert gates.tests_passed and gates.coverage_ok
+    assert decide("t1", gates).decision == "merge"
+
+
+def test_remote_gather_still_blocks_vps_artifact_mismatch(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # AC#3: N/A is local-only. The fetched task route still invokes the exact
+    # attestation collaborator, and its mismatch remains a deterministic hold.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    calls: list[tuple[Path, str, str]] = []
+    tools = _tools(
+        local_repo,
+        _green_shell(),
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+
+    def mismatch(repo: Path, base: str, task: str) -> tuple[int, str]:
+        calls.append((repo, base, task))
+        return 1, "reason=state_sha_mismatch state=old actual=new"
+
+    tools.merge_check_fn = mismatch
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+
+    assert len(calls) == 1 and calls[0][1:] == ("origin/main", "t1")
+    assert gates.artifact_attestation.state is ArtifactAttestationState.FAILED
+    verdict = decide("t1", gates)
+    assert verdict.decision == "hold"
+    assert any("state_sha_mismatch" in reason for reason in verdict.reasons)
+
+
 def test_local_gather_resolves_a_branch_ref(local_repo: Path, tmp_path: Path) -> None:
     # AC#1: <ref> may also be a plain branch name (not only a worktree path).
     _fix, sha = _local_fix_commit(local_repo, tmp_path)
@@ -1014,7 +1096,7 @@ def test_local_gather_resolves_a_branch_ref(local_repo: Path, tmp_path: Path) ->
 
 
 def test_local_gather_red_tests_holds(local_repo: Path, tmp_path: Path) -> None:
-    # AC#4: --local runs the IDENTICAL gate - a red suite is a BROKEN hold, no merge.
+    # AC#4: --local runs the same binding gate - a red suite is BROKEN, no merge.
     fix, _sha = _local_fix_commit(local_repo, tmp_path)
     from tests.fakes import FakeSplitShell
 
@@ -1064,7 +1146,9 @@ def _fake_local_gather(captured: dict[str, object], blast=L2, **over):  # noqa: 
     from orchestrator.local_merge import GateResults, _resolve_local_ref
 
     default = GateResults(
-        blast=blast, policy_ok=True, policy_reason="", tests_passed=True,
+        blast=blast,
+        artifact_attestation=ArtifactAttestation(ArtifactAttestationState.NOT_APPLICABLE),
+        tests_passed=True,
         tests_tail="", coverage_ok=True, coverage_detail="", scan_findings=(),
         rw2=None, security_verdicts=(parse_verdict(verdict_json("APPROVED")),),
         sensitive_files=(("myapp/models.py",) if blast == L3 else ()),

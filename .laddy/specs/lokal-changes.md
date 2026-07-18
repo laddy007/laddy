@@ -48,9 +48,12 @@ The root cause is already established; this task needs no exploration.
   `--local <ref>` argument (with exactly one task id). In this mode:
   - the gate worktree is built from the **local** sha that `<ref>` resolves to
     in the target repo -- `git worktree add --detach <wt> <sha>` with **no
-    preceding `fetch <branch_remote> <task>`** -- and the **same** gate set runs
-    (binding suite + `rw2` + security panel + policy/coverage recompute, agent
-    config neutralised exactly as today);
+    preceding `fetch <branch_remote> <task>`** -- and the same trusted-local
+    gate set runs (binding suite + `rw2` + security panel + trusted policy/blast
+    classification + coverage, agent config neutralised exactly as today). The
+    VPS artifact attestation is explicitly N/A after a Director-authored code
+    commit because those inherited artifacts describe the older VPS tip; see
+    `local-ref-artifact-attestation`;
   - on a green verdict, the **same judged sha** is merged into local `main`
     (the verify->merge TOCTOU pin still holds: judged sha == merged sha), with
     no fetch;
@@ -78,11 +81,13 @@ The root cause is already established; this task needs no exploration.
   new remote branch, no `main` write anywhere but local. The stale hub `<task>`
   branch is left untouched and cleaned up later by the normal GitHub
   push/cleanup step.
-- **No gate weakened.** `--local` runs the identical full gate; a green is a
-  real green and a red is a real BROKEN hold. No skipping tests, `rw2`, the
-  security panel, coverage, or the policy/blast recompute. The L3 risk-decision
-  `y/N` flow is unchanged (a sensitive-but-green local fix still gets the same
-  prompt).
+- **No applicable gate weakened.** `--local` runs the identical trusted-local
+  binding and judgment gates; a green is a real green and a red is a real
+  BROKEN hold. No skipping tests, `rw2`, the security panel, coverage, scans,
+  trusted policy/blast classification, or the infra guard. Only the VPS
+  artifact attestation is N/A because it describes the pre-fix VPS tip, not the
+  newer Director-authored commit. The L3 risk-decision `y/N` flow is unchanged
+  (a sensitive-but-green local fix still gets the same prompt).
 - **No change to the default (discovery/batch) path.** `merge-verified.sh` with
   no `--local` behaves exactly as today, including the hard tripwire abort and
   the remote-required die.
@@ -110,16 +115,18 @@ merge-verified.sh <task> --local ../fix  # judge THIS commit, merge if green
   fix commit, which sits on top of the VPS branch so the diff/coverage baseline
   still spans the whole change.
 - The gate builds its worktree from that local sha (no fetch) and runs the same
-  binding suite + `rw2` + security panel + policy/coverage recompute. The verdict
-  is computed the same way:
+  trusted-local binding suite + `rw2` + security panel + trusted policy/blast
+  classification + coverage/scans. The inherited VPS artifact attestation is
+  N/A for this newer local commit. The verdict is computed the same way:
   - **green** -> the **same sha** is merged into local `main` (`--no-ff`), and
     the end-of-run GitHub push offer behaves exactly as today (Tier-3 `y/N`);
   - **BROKEN** -> the usual diagnostic digest; nothing merged. The Director can
     edit again and re-run `--local`.
 - **Trust framing (must be preserved and stated in the digest/docstring):**
   `--local` does not trust the code more, it trusts the *route*. The Director is
-  the trusted author, and the identical gate still judges the diff. The judged
-  sha is the merged sha, so no unverified commit can slip in.
+  the trusted author, and the same applicable trusted-local gate still judges
+  the diff. The historical VPS artifact attestation is N/A. The judged sha is
+  the merged sha, so no unverified commit can slip in.
 - **Tripwire:** in `--local` mode, when the branch remote is reachable and hub
   `main` is not an ancestor of local `main`, the run still aborts (the tamper
   signal is real regardless of mode). When the remote is absent/unreachable, the
@@ -143,9 +150,10 @@ recording stub (as existing `local_merge` tests do); no real LLM/git-push.
 3. **Discovery bypassed.** `--local` processes only the one named task;
    `discover_ready` is not consulted -- asserted with a fake that would raise if
    called.
-4. **Full gate still runs.** A `--local` run whose stubbed gates carry a
-   security/`rw2` blocker or a red suite yields a **BROKEN** hold (not a merge);
-   a fully-green stub merges. The gate set is identical to the remote path --
+4. **Every applicable gate still runs.** A `--local` run whose stubbed gates
+   carry a security/`rw2` blocker or a red suite yields a **BROKEN** hold (not a
+   merge); a fully-green stub merges. The trusted-local gate set is identical
+   to the remote path; only the historical VPS artifact attestation is N/A --
    asserted by reusing the existing gate-result fixtures.
 5. **Dirty-tree guard.** `--local` on a repo whose working tree has uncommitted
    changes exits non-zero, merges nothing, and names the fix (commit/stash);
