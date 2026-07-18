@@ -18,7 +18,13 @@ from orchestrator.local_merge import (
 )
 from orchestrator.policy import L1, L2, L3
 from orchestrator.verdict import parse_verdict
-from tests.fakes import FakeRunner, blocker, verdict_json, write_policy_toml
+from tests.fakes import (
+    FakeRunner,
+    FakeSplitShell,
+    blocker,
+    verdict_json,
+    write_policy_toml,
+)
 
 
 def _gates(
@@ -1053,6 +1059,133 @@ def test_gather_red_tests_holds(local_repo: Path, tmp_path: Path) -> None:
     v = decide("t1", gates)
     assert v.decision == "hold"
     assert "FAILED test_boom" in v.digest
+
+
+def _push_frontend_branch(tmp_path: Path, branch_policy_frontend_off: bool = False) -> None:
+    """Push bare t1 whose change touches the target's frontend_prefixes.
+
+    ``branch_policy_frontend_off``: also ship a branch policy.toml with an empty
+    ``frontend_prefixes`` and a sabotaged ``frontend_gate`` - used to prove the
+    authoritative gate keys the frontend decision off the TRUSTED base policy,
+    never the branch's (M-D2-4)."""
+    from orchestrator.artifacts import TaskArtifacts
+
+    wt = tmp_path / "vps-fe"
+    bare = str(tmp_path / "remote.git")
+    _g("clone", bare, str(wt))
+    _g("-C", str(wt), "checkout", "-b", "t1")
+    (wt / "frontend" / "src").mkdir(parents=True)
+    (wt / "frontend" / "src" / "App.tsx").write_text(
+        "export const x = 1;\n", encoding="utf-8"
+    )
+    if branch_policy_frontend_off:
+        import dataclasses
+
+        from orchestrator.target_policy import (
+            POLICY_REL,
+            TargetPolicy,
+            dump_target_policy,
+        )
+
+        subverted = dataclasses.replace(
+            TargetPolicy.myapp(),
+            frontend_prefixes=(),
+            frontend_gate="echo BRANCH_FRONTEND_SHOULD_NOT_RUN",
+        )
+        (wt / POLICY_REL).write_text(
+            dump_target_policy(subverted), encoding="utf-8", newline="\n"
+        )
+    art = TaskArtifacts(wt, "t1")
+    art.write_json(
+        "merge-decision.json", {"decision": "auto_merge", "risk_level": "low", "reasons": []}
+    )
+    art.write_json("state.json", {"head_sha": "x"})  # merge_check_fn is faked below
+    _g("-C", str(wt), "add", "-A")
+    _g("-C", str(wt), *_ID, "commit", "-m", "frontend change")
+    _g("-C", str(wt), "push", "origin", "t1")
+
+
+def test_gather_runs_frontend_gate_when_diff_touches_frontend(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # M-D2-4: a diff touching the target's frontend_prefixes makes the
+    # authoritative binding gate build/test the frontend - the parity gap the
+    # finding names (the frontend gate previously lived ONLY in the advisory VPS
+    # DockerGate). The threaded command is the trusted policy's frontend_gate.
+    _push_frontend_branch(tmp_path)
+    shell = FakeSplitShell(
+        echo_sentinel="lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=0"
+    )
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+    binding_cmd = shell.calls[0][0]
+    assert "pnpm" in binding_cmd  # the myapp frontend_gate ran in the container
+    assert "frontend=$F" in binding_cmd
+    assert gates.tests_passed and gates.coverage_ok
+
+
+def test_gather_red_frontend_holds(local_repo: Path, tmp_path: Path) -> None:
+    # M-D2-4: a red frontend build/test on a frontend-touching diff HOLDS the
+    # merge at the trust boundary instead of auto-merging on a green backend.
+    _push_frontend_branch(tmp_path)
+    shell = FakeSplitShell(
+        echo_sentinel="lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=1",
+        stdout_prefix="frontend build FAILED",
+    )
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+    assert "pnpm" in shell.calls[0][0]
+    assert gates.tests_passed is False
+    assert decide("t1", gates).decision == "hold"
+
+
+def test_gather_backend_only_diff_does_not_run_the_frontend_gate(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # M-D2-4 (no regression): a backend-only diff triggers NO frontend gate, so
+    # the authoritative gate never depends on a frontend the change never touched.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # touches myapp/api_helper.py
+    shell = _green_shell()
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gather_gates("t1", local_repo, tmp_path / "mw", tools)
+    binding_cmd = shell.calls[0][0]
+    assert "pnpm" not in binding_cmd
+    assert "frontend=" not in binding_cmd
+
+
+def test_gather_frontend_decision_uses_trusted_policy_not_the_branch(
+    local_repo: Path, tmp_path: Path
+) -> None:
+    # M-D2-4: the frontend_prefixes AND the frontend_gate command come from the
+    # TRUSTED base_sha policy, never the branch - a branch that empties its own
+    # frontend_prefixes / rewrites frontend_gate cannot disable or hijack the
+    # frontend gate. The trusted "pnpm ..." gate still runs; the branch's
+    # sabotaged command never appears.
+    _push_frontend_branch(tmp_path, branch_policy_frontend_off=True)
+    shell = FakeSplitShell(
+        echo_sentinel="lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=0"
+    )
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gather_gates("t1", local_repo, tmp_path / "mw", tools)
+    binding_cmd = shell.calls[0][0]
+    assert "pnpm" in binding_cmd
+    assert "BRANCH_FRONTEND_SHOULD_NOT_RUN" not in binding_cmd
 
 
 def _push_branch_with_agent_config(tmp_path: Path) -> None:

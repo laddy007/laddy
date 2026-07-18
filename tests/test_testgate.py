@@ -174,6 +174,59 @@ def test_binding_gate_command_runs_everything_in_container_offline() -> None:
     assert "exit $(( L || T || P || C || S || G ))" in cmd
 
 
+def test_binding_gate_omits_frontend_when_no_frontend_gate_given() -> None:
+    # M-D2-4: a backend-only diff (or a target with no frontend) passes no
+    # frontend_gate, so the frontend step, its @@GATE token and its exit term
+    # are ABSENT - the authoritative gate must not spuriously depend on a
+    # frontend that the change never touched (no regression).
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert "frontend=" not in cmd
+    assert "F=$?" not in cmd
+    assert "exit $(( L || T || P || C || S || G ))" in cmd
+
+
+def test_binding_gate_runs_the_frontend_gate_when_the_diff_touches_frontend() -> None:
+    # M-D2-4: when the caller determines the diff touched the target's
+    # frontend_prefixes it threads the TRUSTED policy's frontend_gate in; the
+    # authoritative local gate then builds/tests the frontend (parity with the
+    # advisory VPS DockerGate), its exit is captured as F, echoed for
+    # diagnostics, and folded into the composite exit so a red frontend fails.
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command(
+        "abc", "myapp", frontend_gate="pnpm -r build && pnpm -r test"
+    )
+    assert "pnpm -r build && pnpm -r test; F=$?" in cmd
+    assert "frontend=$F" in cmd
+    assert "exit $(( L || T || P || C || S || G || F ))" in cmd
+    # the frontend step runs AFTER the backend/scan steps, BEFORE the @@GATE echo
+    assert cmd.index("gitleaks detect") < cmd.index("pnpm -r build")
+    assert cmd.index("pnpm -r build") < cmd.index("echo @@GATE")
+
+
+def test_parse_binding_red_frontend_holds_the_gate_without_claiming_tampering() -> None:
+    # M-D2-4: a red frontend (frontend=1) on a non-zero exit must hold the gate
+    # as a genuine failure, NOT be mislabelled the all-green-with-nonzero
+    # "possible tampering" case (every other step green).
+    from orchestrator.testgate import parse_binding_output
+
+    out = "@@GATE lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=1\n"
+    r = parse_binding_output(out, container_rc=1)
+    assert r.tests_passed is False
+    assert not any("tamper" in f.lower() for f in r.scan_findings)
+
+
+def test_parse_binding_green_frontend_passes() -> None:
+    # a green frontend token does not by itself fail the gate.
+    from orchestrator.testgate import parse_binding_output
+
+    out = "@@GATE lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=0\n"
+    r = parse_binding_output(out, container_rc=0)
+    assert r.tests_passed and r.coverage_ok and r.scan_findings == ()
+
+
 def test_binding_gate_passes_gitleaks_an_explicit_trusted_config() -> None:
     # H-D2-3: gitleaks auto-discovers a branch `.gitleaks.toml` (allowlist) if no
     # --config is given, so a branch could suppress its own secret. The gate must

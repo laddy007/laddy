@@ -71,7 +71,12 @@ from orchestrator.merge_subject import (
 )
 from orchestrator.policy import L2, L3, classify_blast_radius
 from orchestrator.target_policy import load_target_policy
-from orchestrator.testgate import BindingGate, BindingResult, restored_infra_paths
+from orchestrator.testgate import (
+    BindingGate,
+    BindingResult,
+    frontend_touched,
+    restored_infra_paths,
+)
 from orchestrator.verdict import Verdict, VerdictError
 
 __all__ = [
@@ -918,6 +923,7 @@ def _binding_on_merged_tree(
     branch_sha: str,
     binding_gate: BindingGate,
     coverage_package: str,
+    frontend_gate: str = "",
 ) -> BindingResult:
     """Run the deterministic gate on the branch TRIAL-MERGED into current local
     main, not on the branch alone (#11).
@@ -930,6 +936,11 @@ def _binding_on_merged_tree(
     scope THIS change against the tree it is actually merging into - not the
     stale ``origin/main`` remote-tracking ref. A textual merge conflict is a
     fail (the real merge would conflict too), reported as a broken gate.
+
+    ``frontend_gate`` (M-D2-4) is the TRUSTED base policy's frontend command,
+    non-empty only when this diff touches the target's frontend_prefixes; the
+    authoritative gate then builds/tests the frontend too, mirroring the VPS
+    DockerGate instead of relying on that advisory pre-filter.
     """
     mwt = work_root / f"verify-merge-{task_id}"
     _git(repo, "worktree", "prune")
@@ -957,7 +968,12 @@ def _binding_on_merged_tree(
             )
         merge_sha = _worktree_sha(mwt)
         return binding_gate.run(
-            mwt, merge_sha, coverage_package, trusted_ref=base_sha, compare_ref=base_sha
+            mwt,
+            merge_sha,
+            coverage_package,
+            trusted_ref=base_sha,
+            compare_ref=base_sha,
+            frontend_gate=frontend_gate,
         )
     finally:
         _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
@@ -1054,9 +1070,20 @@ def gather_gates(
         # not the branch, so a branch cannot ship a hostile container definition
         # that escapes during verification (FINDING 1). verified_sha (the branch
         # tip) stays the TOCTOU pin merge_branch integrates.
+        # M-D2-4: when the diff touches the TRUSTED policy's frontend_prefixes,
+        # thread that policy's frontend_gate into the authoritative gate so the
+        # frontend is deterministically built/tested on the trust boundary (the
+        # VPS DockerGate that also runs it is only an advisory pre-filter). Both
+        # the prefixes and the command come from base_sha's policy, never the
+        # branch's, so a branch cannot disable its own frontend gate.
+        frontend_gate = (
+            policy.frontend_gate
+            if frontend_touched(changed, policy.frontend_prefixes)
+            else ""
+        )
         binding = _binding_on_merged_tree(
             repo, task_id, work_root, base_sha, verified_sha, tools.binding_gate,
-            policy.coverage_package,
+            policy.coverage_package, frontend_gate,
         )
 
         security: tuple[Verdict, ...] = ()

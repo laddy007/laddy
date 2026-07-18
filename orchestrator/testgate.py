@@ -323,7 +323,11 @@ GITLEAKS_CONFIG = f"{TARGET_DIR_NAME}/security/gitleaks.toml"
 _SENTINEL_PREFIX = "@@GATE"
 
 
-def _binding_gate(coverage_package: str, compare_ref: str = _COVERAGE_COMPARE) -> str:
+def _binding_gate(
+    coverage_package: str,
+    compare_ref: str = _COVERAGE_COMPARE,
+    frontend_gate: str = "",
+) -> str:
     # coverage_package is per-target (target_policy) so the gate covers the right
     # package instead of a hardcoded one. compare_ref scopes
     # coverage/semgrep/gitleaks to THE CHANGE. The local binding gate passes the
@@ -339,6 +343,21 @@ def _binding_gate(coverage_package: str, compare_ref: str = _COVERAGE_COMPARE) -
     # hook that forces exitstatus=0 (H-D2-1) is therefore NOT closable at the
     # gate; the close is CLASSIFICATION: conftest.py is engine-sensitive (L3), so
     # it never rides the L2 auto-merge lane and a human reviews the hook diff.
+    # frontend_gate (M-D2-4): the authoritative binding gate is otherwise
+    # backend-only, so a target with a frontend had NO deterministic frontend gate
+    # on the trust boundary. When the caller determines the diff touches the
+    # target's frontend_prefixes it threads the frontend_gate command (from the
+    # TRUSTED base policy) in here, mirroring DockerGate's include_frontend: its
+    # exit is captured as F, echoed on the @@GATE line, and folded into the
+    # composite exit so a red frontend fails the gate. Empty (backend-only diff,
+    # or a target with no frontend) -> the step, sentinel token, and exit term are
+    # all absent, so nothing spuriously depends on a frontend that isn't there.
+    frontend_step = f"{frontend_gate}; F=$?; " if frontend_gate else ""
+    sentinel = "lint=$L types=$T tests=$P coverage=$C semgrep=$S gitleaks=$G"
+    exit_expr = "L || T || P || C || S || G"
+    if frontend_gate:
+        sentinel += " frontend=$F"
+        exit_expr += " || F"
     return (
         "set +e; "
         "ruff check .; L=$?; "
@@ -350,8 +369,9 @@ def _binding_gate(coverage_package: str, compare_ref: str = _COVERAGE_COMPARE) -
         f"semgrep --error --config {SEMGREP_CONFIG} --baseline-commit {compare_ref} .; S=$?; "
         f"gitleaks detect --no-banner --config {GITLEAKS_CONFIG} "
         f"--log-opts={compare_ref}..HEAD; G=$?; "
-        f"echo {_SENTINEL_PREFIX} lint=$L types=$T tests=$P coverage=$C semgrep=$S gitleaks=$G; "
-        "exit $(( L || T || P || C || S || G ))"
+        f"{frontend_step}"
+        f"echo {_SENTINEL_PREFIX} {sentinel}; "
+        f"exit $(( {exit_expr} ))"
     )
 
 
@@ -434,10 +454,17 @@ def parse_binding_output(
         )
         if f is not None
     )
+    # frontend (M-D2-4) is a conditional step: it is ONLY on the @@GATE line when
+    # the diff touched the target's frontend_prefixes, so a missing token means
+    # "not run" (default 0), not a fail. When present, a red frontend build/test
+    # holds the gate exactly like a red backend suite. (The authoritative signal
+    # is still container_rc; this only keeps the diagnostic honest rather than
+    # mislabelling a real frontend failure as all-green tampering.)
     tests_passed = (
         codes.get("lint", 1) == 0
         and codes.get("types", 1) == 0
         and codes.get("tests", 1) == 0
+        and codes.get("frontend", 0) == 0
     )
     coverage_ok = codes.get("coverage", 1) == 0
     if tests_passed and coverage_ok and not findings:
@@ -480,11 +507,12 @@ class BindingGate:
         coverage_package: str,
         trusted_ref: str | None = None,
         compare_ref: str = _COVERAGE_COMPARE,
+        frontend_gate: str = "",
     ) -> str:
         return _containerized(
             self.compose_rel,
             sha,
-            _binding_gate(coverage_package, compare_ref),
+            _binding_gate(coverage_package, compare_ref, frontend_gate),
             trusted_ref,
         )
 
@@ -495,6 +523,7 @@ class BindingGate:
         coverage_package: str,
         trusted_ref: str | None = None,
         compare_ref: str = _COVERAGE_COMPARE,
+        frontend_gate: str = "",
     ) -> BindingResult:
         # coverage_package is per-target (from the trusted policy the caller
         # loaded). trusted_ref restores the gate infra (compose/Dockerfile/
@@ -502,9 +531,11 @@ class BindingGate:
         # hostile container definition (FINDING 1). The decision keys off the
         # container EXIT CODE (unforgeable by code that ran earlier), not the
         # parsed stdout line. compare_ref baselines the scanners to the tree
-        # being merged into.
+        # being merged into. frontend_gate (M-D2-4) is the TRUSTED-policy frontend
+        # command, non-empty only when the diff touches the frontend prefixes.
         rc, out, err = self.shell(
-            self.command(sha, coverage_package, trusted_ref, compare_ref), wt
+            self.command(sha, coverage_package, trusted_ref, compare_ref, frontend_gate),
+            wt,
         )
         # err first, out LAST (see _subprocess_shell_gate): docker/compose
         # build+teardown noise floods stderr, so putting it first means _tail
