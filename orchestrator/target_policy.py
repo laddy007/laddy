@@ -67,13 +67,29 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     ".github/*",
     ".github/**/*",
     # Supply chain: a dependency bump / lockfile change is the main realistic
-    # attack vector (trust-model S9).
+    # attack vector (trust-model S9). Manifests AND lockfiles, at any depth
+    # (M6): a dependency injected into nested backend/requirements.txt or a
+    # lockfile rides the same vector as the root manifest.
     "requirements*.txt",
+    "**/requirements*.txt",
     "pyproject.toml",
+    "**/pyproject.toml",
+    "Pipfile",
+    "**/Pipfile",
+    "Pipfile.lock",
+    "**/Pipfile.lock",
+    "poetry.lock",
+    "**/poetry.lock",
+    "uv.lock",
+    "**/uv.lock",
     "package.json",
     "**/package.json",
+    "package-lock.json",
+    "**/package-lock.json",
     "pnpm-lock.yaml",
     "**/pnpm-lock.yaml",
+    "yarn.lock",
+    "**/yarn.lock",
     # Engine surfaces when laddy itself is the target branch (repo_laddy):
     # post-split the engine's own code lives at the branch REPO ROOT.
     "orchestrator/*",
@@ -100,6 +116,15 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
 # Inert-extension allowlist shared by every target (markdown only). Product data
 # catalogues (i18n JSON, etc.) are added per-target via ``safe_globs``.
 ENGINE_SAFE_GLOBS: tuple[str, ...] = ("*.md", "**/*.md")
+
+# Extensions a target's ``safe_globs`` may route to the L1 no-review lane (M5).
+# Deliberately tiny - genuinely inert data/document formats only. JSON is here
+# for the documented use case (i18n catalogues); executable-adjacent JSON like
+# package.json / .mcp.json is engine-sensitive, so L3 wins before L1 is even
+# considered. Deliberately NOT here: yaml/toml/ini (config that programs act
+# on), svg/html (can embed scripts), and anything code-shaped. A target that
+# needs more falls back to L2, where the agents gate it.
+INERT_SAFE_EXTENSIONS: tuple[str, ...] = ("md", "txt", "json", "csv", "po")
 
 # Where test files live (path prefixes). The engine default always applies -
 # a target's ``test_dirs`` only ADDS locations (src/tests/, frontend/__tests__/,
@@ -227,6 +252,32 @@ def _as_str_tuple(value: object, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _as_inert_safe_globs(value: object) -> tuple[str, ...]:
+    """Validate ``safe_globs`` entries against the inert-extension allowlist (M5).
+
+    ``safe_globs`` feed the L1 no-review auto-merge lane, so a target may only
+    ADD inert data catalogues - never widen L1 to cover code. Each glob must
+    end in a literal ``.<ext>`` with ``ext`` on :data:`INERT_SAFE_EXTENSIONS`:
+    a glob without that constraint (``src/**`` - fnmatch's ``*`` crosses ``/``
+    and matches ``src/evil.py``), with a code extension (``**/*.py``), or with
+    a wildcard in the suffix (``*.json*``) is rejected at PARSE time, failing
+    the whole policy closed. Loud beats silent: match-time skipping would hide
+    the misconfiguration while the Director believes the lane exists.
+    Casefolded like the matcher (H8), so ``*.PY`` is still code and ``*.PO``
+    is still a catalogue.
+    """
+    globs = _as_str_tuple(value, "safe_globs")
+    for g in globs:
+        stem, sep, ext = g.casefold().rpartition(".")
+        if not sep or not stem or ext not in INERT_SAFE_EXTENSIONS:
+            raise TargetPolicyError(
+                f"{POLICY_REL}: safe_globs entry {g!r} could match a non-inert "
+                "file; L1 globs must end in a literal inert extension "
+                f"({', '.join('.' + e for e in INERT_SAFE_EXTENSIONS)})"
+            )
+    return globs
+
+
 def parse_target_policy(text: str) -> TargetPolicy:
     """Parse ``policy.toml`` content into a :class:`TargetPolicy`.
 
@@ -252,7 +303,7 @@ def parse_target_policy(text: str) -> TargetPolicy:
         user_visible_prefixes=_as_str_tuple(
             data["user_visible_prefixes"], "user_visible_prefixes"
         ),
-        safe_globs=_as_str_tuple(data["safe_globs"], "safe_globs"),
+        safe_globs=_as_inert_safe_globs(data["safe_globs"]),
     )
 
 

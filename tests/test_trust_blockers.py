@@ -420,6 +420,45 @@ def test_extract_json_last_object_ignores_trailing_unbalanced_brace() -> None:
 
 
 # --------------------------------------------------------------------------
+# M6 (C2+C3 audit) - supply-chain manifests and lockfiles are engine-sensitive
+# at ANY depth, not just the repo root: a dependency injected into a nested
+# backend/requirements.txt or a lockfile (poetry.lock, uv.lock,
+# package-lock.json, yarn.lock, Pipfile.lock) is the same S9 attack vector as
+# the root manifest and must ride L3, never a lower lane.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # nested python manifests
+        "svc/requirements.txt",
+        "backend/requirements-dev.txt",
+        "svc/pyproject.toml",
+        # python lockfiles, root and nested
+        "poetry.lock",
+        "api/poetry.lock",
+        "uv.lock",
+        "svc/uv.lock",
+        "Pipfile",
+        "svc/Pipfile",
+        "Pipfile.lock",
+        "svc/Pipfile.lock",
+        # js manifests/lockfiles, root and nested
+        "web/package.json",
+        "package-lock.json",
+        "web/package-lock.json",
+        "yarn.lock",
+        "web/yarn.lock",
+        "web/pnpm-lock.yaml",
+    ],
+)
+def test_supply_chain_manifest_is_sensitive_at_any_depth(path: str) -> None:
+    assert policy.sensitive_paths(_POL, [path]) == [path]
+    assert policy.classify_blast_radius(_POL, [path]) == "L3"
+
+
+# --------------------------------------------------------------------------
 # H8 (C2+C3 audit) - classification globs match casefolded: the Director's
 # repo can live on case-insensitive DrvFs (/mnt/c under WSL), where Claude.md
 # opens the very same file as CLAUDE.md, so a case-variant agent-config path
