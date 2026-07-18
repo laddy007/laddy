@@ -50,18 +50,32 @@ def _gates(
     )
 
 
-def test_path_guard_allows_task_artifacts_specs_and_docs() -> None:
+def test_path_guard_allows_task_artifacts_and_markdown_specs() -> None:
     ok, offending = path_guard(
         "t1",
         [
             f"{TARGET_DIR_NAME}/tasks/t1/report.md",
             f"{TARGET_DIR_NAME}/tasks/t1/findings.json",
             f"{TARGET_DIR_NAME}/specs/t1-fix.md",
-            "docs/development/notes.md",
         ],
     )
     assert ok is True
     assert offending == []
+
+
+def test_path_guard_blocks_docs_tree_and_non_md_spec_files() -> None:
+    # LOW (C2+C3 audit): docs/ admitted executable files (docs/conftest.py runs
+    # at every host pytest after merge; there is no docs/ tree by design), and
+    # a non-.md file under the spec dir is not an inert proposal. Both out.
+    for path in (
+        "docs/conftest.py",
+        "docs/development/notes.md",
+        f"{TARGET_DIR_NAME}/specs/evil.py",
+        f"{TARGET_DIR_NAME}/specs/conftest.py",
+    ):
+        ok, offending = path_guard("t1", [path])
+        assert ok is False, path
+        assert offending == [path], path
 
 
 def test_path_guard_blocks_source_files() -> None:
@@ -424,6 +438,24 @@ def test_blast_radius_l1_safe_by_construction() -> None:
     # an empty changed set is an anomaly (a failed diff-gather), not "safe" -
     # it holds for a human (L3), it must never fail open into L1 auto-merge.
     assert classify_blast_radius([]) == L3
+
+
+def test_spec_files_are_never_l1_even_as_pure_markdown() -> None:
+    # H2: a spec is an executable task description, not inert markdown - a
+    # merged `status: ready` spec runs autonomously on the next kickoff. An
+    # all-markdown diff adding a spec must never ride the L1 no-review lane;
+    # it falls to L2 so the security panel + rw2 gate it.
+    from dataclasses import replace
+
+    from orchestrator.policy import L2
+
+    spec = f"{TARGET_DIR_NAME}/specs/next.md"
+    assert classify_blast_radius([spec]) == L2
+    # even mixed with genuinely inert markdown, the spec pulls the diff to L2
+    assert classify_blast_radius(["README.md", spec]) == L2
+    # engine guard: a target's safe_globs cannot re-admit the spec dir to L1
+    pol = replace(_POL, safe_globs=(f"{TARGET_DIR_NAME}/specs/*.md",))
+    assert _policy.classify_blast_radius(pol, [spec]) == L2
 
 
 def test_added_test_files_are_not_safe_by_construction() -> None:

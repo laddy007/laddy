@@ -292,6 +292,50 @@ def test_report_only_own_spec_may_be_nondraft() -> None:
     assert policy.nondraft_report_specs("t1", [own], reader) == []
 
 
+def test_report_only_own_spec_flipped_executable_is_refused() -> None:
+    # H3: the own-spec exemption is by FILENAME, so without a content check a
+    # report-only task could rewrite specs/<task>.md into a runnable non-report
+    # task (report_only -> off) and land a self-authored executable spec.
+    own = f"{TARGET_DIR_NAME}/specs/t1.md"
+    reader = _spec_reader(
+        {own: "---\ntype: feature\nstatus: ready\n---\n# injected instructions\n"}
+    )
+    nondraft = policy.nondraft_report_specs("t1", [own], reader)
+    assert nondraft == [own]
+    d = policy.report_only_decision(
+        task_id="t1", changed_files=[own], verify_confirmed=True, nondraft_specs=nondraft
+    )
+    assert d.decision == "stop_before_merge"
+    assert any("nondraft_spec" in r for r in d.reasons)
+
+
+def test_report_only_own_spec_promoted_to_ready_is_refused() -> None:
+    # H3: still report-only in type, but promoted to a runnable status - the
+    # merged spec would re-run autonomously on a later kickoff/enqueue.
+    own = f"{TARGET_DIR_NAME}/specs/t1.md"
+    reader = _spec_reader(
+        {own: "---\ntype: audit\nstatus: ready\n---\n# injected instructions\n"}
+    )
+    assert policy.nondraft_report_specs("t1", [own], reader) == [own]
+
+
+def test_report_only_own_spec_unparseable_is_refused() -> None:
+    # an unparseable own spec cannot be certified still-report-only: fail closed
+    own = f"{TARGET_DIR_NAME}/specs/t1.md"
+    reader = _spec_reader({own: "---\ntype: audit\nno front matter close\n"})
+    assert policy.nondraft_report_specs("t1", [own], reader) == [own]
+
+
+def test_report_only_own_spec_may_stay_report_only_nondraft() -> None:
+    # the legitimate own-spec edits (clarify appends a ## Clarifications block,
+    # wording tweaks) keep type/status untouched and must stay exempt.
+    own = f"{TARGET_DIR_NAME}/specs/t1.md"
+    reader = _spec_reader(
+        {own: "---\ntype: audit\n---\n# t1 audit\n\n## Clarifications\n- a: b\n"}
+    )
+    assert policy.nondraft_report_specs("t1", [own], reader) == []
+
+
 def test_report_only_all_drafts_auto_merges() -> None:
     fix = f"{TARGET_DIR_NAME}/specs/t1-fix.md"
     reader = _spec_reader({fix: "---\nstatus: draft-proposal\n---\n# fix\n"})

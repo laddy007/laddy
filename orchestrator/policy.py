@@ -16,7 +16,7 @@ from fnmatch import fnmatch
 from typing import Any
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.spec import SpecError, parse_spec_text
+from orchestrator.spec import DONE_STATUS, DRAFT_STATUS, SpecError, parse_spec_text
 from orchestrator.target_policy import TargetPolicy
 
 # Product-specific policy (sensitive/security/invariant paths, coverage package,
@@ -35,23 +35,31 @@ def touches_invariant_tests(
 
 # --- Report-only path guard (design S8) --------------------------------------
 
-# A report-only task (audit/investigate) may only touch its own artifacts,
-# spec drafts, and docs. Any source file in the diff is a policy violation.
+# A report-only task (audit/investigate) may only touch its own artifacts and
+# markdown spec drafts. Any source file in the diff is a policy violation.
+# Deliberately NOT here: the docs/ subtree (a prefix admits executable files
+# like docs/conftest.py, and there is no docs/ tree by design) and non-.md
+# files under the spec dir (only markdown specs are inert enough; path_guard
+# enforces the .md suffix for the spec dir separately).
 REPORT_ALLOWED_PREFIXES = (
     f"{TARGET_DIR_NAME}/tasks/{{task}}/",
-    f"{TARGET_DIR_NAME}/specs/",
-    "docs/",
 )
+
+_SPEC_PREFIX = f"{TARGET_DIR_NAME}/specs/"
 
 
 def path_guard(task_id: str, changed_files: Sequence[str]) -> tuple[bool, list[str]]:
     """Returns (ok, offending_paths) for a report-only diff."""
     allowed = tuple(p.format(task=task_id) for p in REPORT_ALLOWED_PREFIXES)
-    offending = [f for f in changed_files if not f.startswith(allowed)]
+    offending = [
+        f
+        for f in changed_files
+        if not (
+            f.startswith(allowed)
+            or (f.startswith(_SPEC_PREFIX) and f.endswith(".md"))
+        )
+    ]
     return (not offending, offending)
-
-
-_SPEC_PREFIX = f"{TARGET_DIR_NAME}/specs/"
 
 
 def nondraft_report_specs(
@@ -62,23 +70,39 @@ def nondraft_report_specs(
     A report-only task may PROPOSE fix specs, but only as drafts: a merged
     non-draft spec runs autonomously on the next kickoff, so an investigator
     that writes ``specs/<other>.md`` with ``status: ready`` would auto-merge a
-    self-authored runnable task. The task's OWN spec (``specs/<task>.md``) is
-    exempt - it is the runnable input being executed, not a new proposal. Any
-    other changed spec must be a draft; a non-draft, missing status, or a parse
-    error is a violation (the loop's ``_force_draft_status`` only covers the
-    fix-spec it writes itself, not files the agent writes directly).
+    self-authored runnable task. Any changed spec must be a draft; a non-draft,
+    missing status, or a parse error is a violation (the loop's
+    ``_force_draft_status`` only covers the fix-spec it writes itself, not
+    files the agent writes directly).
+
+    The task's OWN spec (``specs/<task>.md``) is the runnable input being
+    executed, not a new proposal, so it is exempt from the draft requirement -
+    but only while its NEW content stays a report-only task that will not
+    re-run autonomously (H3). Legitimate edits (the clarify gate appends a
+    ``## Clarifications`` block) keep type and status untouched; flipping the
+    type to an executable composition (report_only -> off), promoting the
+    status (e.g. ``status: ready``), or making the spec unparseable would land
+    a self-authored runnable task through the report-only lane, so each is a
+    violation.
     """
     own = f"{_SPEC_PREFIX}{task_id}.md"
     offending: list[str] = []
     for f in changed_files:
-        if f == own or not (f.startswith(_SPEC_PREFIX) and f.endswith(".md")):
-            continue
+        if not (f.startswith(_SPEC_PREFIX) and f.endswith(".md")):
+            continue  # non-.md spec-dir files are path_guard violations already
         try:
             spec = parse_spec_text(read_text(f))
         except (SpecError, OSError):
-            offending.append(f)  # an unparseable spec cannot be certified a draft
+            offending.append(f)  # an unparseable spec cannot be certified safe
             continue
-        if not spec.is_draft:
+        if f == own:
+            if not spec.report_only or spec.status not in (
+                None,
+                DRAFT_STATUS,
+                DONE_STATUS,
+            ):
+                offending.append(f)
+        elif not spec.is_draft:
             offending.append(f)
     return offending
 
@@ -182,7 +206,16 @@ def _is_safe_by_construction(policy: TargetPolicy, path: str) -> bool:
     and an added ``conftest.py`` can neutralize the gate through collection
     hooks. Code is never safe-by-construction; added tests go to L2 so the
     agents review them (NÁLEZ 3).
+
+    Task specs are excluded for the same reason even though they are markdown
+    (H2): ``<agent-dir>/specs/*.md`` is an EXECUTABLE task description - a
+    merged non-draft spec runs autonomously on the next kickoff/enqueue - so a
+    spec never rides the L1 no-review lane; it falls through to L2 where the
+    agents gate it. The exclusion is engine-side and unconditional: a target's
+    ``safe_globs`` cannot re-admit the spec dir.
     """
+    if path.startswith(_SPEC_PREFIX):
+        return False
     return any(fnmatch(path, g) for g in policy.all_safe_globs)
 
 
