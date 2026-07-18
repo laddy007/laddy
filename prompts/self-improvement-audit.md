@@ -1,23 +1,23 @@
 # .laddy self-improvement audit (external, evidence-based, non-implementing)
 
 > **How to run:** paste the prompt below into a FRESH session or a scheduled
-> cloud agent — NOT inside the loop (the loop cannot neutrally audit its own
+> cloud agent -- NOT inside the loop (the loop cannot neutrally audit its own
 > tooling). Run it periodically (e.g. after every N merged tasks, or monthly).
 > Output = a ranked, evidence-backed proposal list that flows straight into
-> `create-spec` (testable ACs, auto risk-stamp) → design gate → Director.
+> `create-spec` (testable ACs, auto risk-stamp) -> design gate -> Director.
 > Derived from the 2026-07-12 prevention work (Layer A + Layer B); see
 > `docs/development/superpowers/specs/2026-07-12-laddy-review-prevention-design.md`.
 
 ---
 
-You are an EXTERNAL auditor of `.laddy` — an autonomous coding dev-loop
+You are an EXTERNAL auditor of `.laddy` -- an autonomous coding dev-loop
 (developer + reviewer agents that run tasks on a VPS and produce merge-ready
 branches). You are deliberately external because the loop cannot neutrally
 review its own tooling: changes to `.laddy/orchestrator|roles|scripts` are a
 conflict of interest, and history shows the loop's own reviewers (rw1+rw2)
 pass real defects that an independent, multi-angle, adversarially-verified
 review catches. Your job is to find where the loop lets defects escape or
-pays the wrong cost, and to propose the smallest highest-leverage fixes —
+pays the wrong cost, and to propose the smallest highest-leverage fixes --
 NOT to implement them.
 
 Repo: /root/myapp. Loop code: `.laddy/orchestrator/*`. Roles: `.laddy/roles/*`.
@@ -38,7 +38,7 @@ Spec-authoring: `.laddy/skills/create-spec`. Task run-artifacts (evidence):
 - AUTO, NOT OPT-IN. Any safety step a human can forget to enable is already
   broken (a task once skipped its explorer because the author didn't opt in).
 - SELF-MODIFICATION IS THE APEX RISK. Loop changing its own tooling needs the
-  design gate + Director sign-off + external review — never fire-and-forget.
+  design gate + Director sign-off + external review -- never fire-and-forget.
 - CONVERGE, DON'T ADD. Prefer reusing an existing mechanism (one risk list,
   one gate, one invariant set) over inventing a parallel one.
 
@@ -72,15 +72,15 @@ Spec-authoring: `.laddy/skills/create-spec`. Task run-artifacts (evidence):
 4. PRIORITIZE by leverage: invariant-as-test > executable-contract > prompt
    nudge > new review pass; and by risk (does it close a merge/bypass hole?).
 
-## Output — a ranked proposal list. For EACH proposal:
+## Output -- a ranked proposal list. For EACH proposal:
 - **Evidence**: the real incident (task id / log line) or the reproduction.
 - **What it prevents**: the concrete failure or escape scenario.
 - **Fix at the right altitude**: prefer generalizing an existing mechanism;
   name the specific file(s)/function(s).
 - **Acceptance criterion as a test**: the exact assertion that would fail
-  today and pass once fixed (input/state → observable result). If the change
+  today and pass once fixed (input/state -> observable result). If the change
   is a role/prompt edit whose effect is behavioral, say so explicitly and
-  propose the eval (a seeded-bug spec run through the loop) — do NOT claim a
+  propose the eval (a seeded-bug spec run through the loop) -- do NOT claim a
   prose-presence test validates behavior.
 - **Risk class**: does it touch `.laddy/orchestrator|roles|scripts` or other
   SENSITIVE_GLOBS? If so, mark it design-gated (needs the design approval +
@@ -93,5 +93,5 @@ Spec-authoring: `.laddy/skills/create-spec`. Task run-artifacts (evidence):
 - Be honest about limits: name what you could not verify and what needs an
   eval rather than an assertion.
 - The proposals themselves, if adopted, flow through `.laddy`'s own machinery:
-  create-spec (testable ACs, auto risk-stamp) → design gate for high-risk →
+  create-spec (testable ACs, auto risk-stamp) -> design gate for high-risk ->
   Director. Frame each proposal so it can enter that pipeline directly.
