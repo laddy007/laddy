@@ -692,6 +692,76 @@ def test_engine_reverify_is_sequential() -> None:
     assert order == ["verify:a", "merge:a", "verify:b", "merge:b"]
 
 
+def test_engine_isolates_one_broken_task_and_processes_the_rest() -> None:
+    # M7 AC1: an unexpected exception on ONE task - e.g. a truncated committed
+    # merge-decision.json raising JSONDecodeError out of the verify path -
+    # holds THAT task BROKEN and the batch continues: the other ready tasks
+    # still process to completion ("a hold never blocks the others").
+    import json
+
+    from orchestrator.local_merge import BROKEN
+
+    def verify(t: str) -> GateResults:
+        if t == "b":
+            raise json.JSONDecodeError("Expecting value", '{"decision": "auto_m', 20)
+        return _gates(blast=L2)
+
+    merged: list[str] = []
+    reported: list[str] = []
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a", "b", "c"],
+        verify_one=verify,
+        merge_one=lambda request: (merged.append(request.task_id) or True),
+        on_verdict=lambda v: reported.append(v.task_id),
+        confirm=lambda v: True,
+    )
+    results = engine.run()
+    assert [(v.task_id, v.decision) for v in results] == [
+        ("a", "merge"),
+        ("b", "hold"),
+        ("c", "merge"),
+    ]
+    assert results[1].kind == BROKEN
+    assert merged == ["a", "c"]  # the broken middle task blocked nothing
+    assert reported == ["a", "b", "c"]  # and it is still reported, not lost
+
+
+def test_engine_isolation_records_why_as_an_engine_side_failure() -> None:
+    # M7 AC2 (derive-don't-store): the BROKEN hold RECORDS the failure - the
+    # exception repr rides on reasons and digest, and the digest says plainly
+    # this is an ENGINE-side failure (no gate verdict exists), not a policy
+    # stop - so a programming error is never swallowed invisibly.
+    from orchestrator.local_merge import BROKEN
+
+    def verify(t: str) -> GateResults:
+        raise ValueError("truncated artifact: Expecting value: line 1 column 21")
+
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a"], verify_one=verify, merge_one=lambda request: True,
+    )
+    [v] = engine.run()
+    assert v.decision == "hold" and v.kind == BROKEN
+    assert any("ValueError" in r and "truncated artifact" in r for r in v.reasons)
+    assert "ValueError" in v.digest and "truncated artifact" in v.digest
+    assert "engine" in v.digest.lower()  # engine-side, not a verdict on the code
+    assert "NOT merged" in v.digest
+    assert "Merge `a` into main?" not in v.digest  # a broken hold offers no merge
+
+
+def test_engine_isolation_never_masks_operator_abort() -> None:
+    # The isolation catches Exception, not BaseException: Ctrl-C (and an
+    # explicit SystemExit) still aborts the whole run instead of being
+    # laundered into a BROKEN hold on the current task.
+    def verify(t: str) -> GateResults:
+        raise KeyboardInterrupt
+
+    engine = LocalMergeEngine(
+        list_ready=lambda: ["a", "b"], verify_one=verify, merge_one=lambda request: True,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        engine.run()
+
+
 # --- H4: EVERY merge side-effect requires the merge-safety confirmation ------
 
 

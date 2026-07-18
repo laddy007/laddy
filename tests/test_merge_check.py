@@ -239,6 +239,44 @@ def test_check_fails_on_honest_deleted_test_stop(
     assert "test_files_deleted" in message
 
 
+def test_check_fails_cleanly_on_truncated_merge_decision(
+    remote: Path, tmp_path: Path
+) -> None:
+    # M7 (boundary layer): a truncated/malformed committed merge-decision.json
+    # is a FAILED check - (1, reason) with the parse failure recorded - never a
+    # raised JSONDecodeError that would abort the caller's whole merge batch.
+    seed = tmp_path / "trunc-decision"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", "t7")
+    art = TaskArtifacts(seed, "t7")
+    art.write_text(MERGE_DECISION, '{"decision": "auto_m')  # truncated JSON
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "truncated decision")
+    code, message = check(seed, base="origin/main", task_id="t7")
+    assert code == 1
+    assert "unparseable_merge_decision" in message
+    assert "JSONDecodeError" in message  # the parse failure itself is recorded
+
+
+def test_check_fails_cleanly_on_truncated_state(remote: Path, tmp_path: Path) -> None:
+    # M7 (boundary layer): same contract for the other committed JSON artifact
+    # check() parses - a garbled state.json fails closed with the reason, it
+    # does not raise.
+    seed = tmp_path / "trunc-state"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", "t1")
+    art = TaskArtifacts(seed, "t1")
+    art.write_json(
+        MERGE_DECISION, {"decision": "auto_merge", "risk_level": "low", "reasons": []}
+    )
+    art.write_text(STATE, '{"head_sha": "ab')  # truncated JSON
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "truncated state")
+    code, message = check(seed, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "unparseable_state" in message
+
+
 def test_check_fails_on_missing_artifacts(remote: Path, tmp_path: Path) -> None:
     seed = tmp_path / "bare-branch"
     _git("clone", str(remote), str(seed))

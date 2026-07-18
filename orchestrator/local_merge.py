@@ -507,6 +507,35 @@ class MergePreparationError(RuntimeError):
 MergeOne = Callable[[MergeRequest], bool]
 
 
+def _engine_failure_verdict(task_id: str, exc: Exception) -> MergeVerdict:
+    """BROKEN hold for a task the ENGINE failed to process (M7).
+
+    One malformed branch - e.g. a truncated committed merge-decision.json
+    raising JSONDecodeError out of the verify path - must never abort the
+    batch. The failure is RECORDED on this task's verdict: reason and digest
+    carry the exception repr, so a programming error is never swallowed
+    invisibly, and the digest says plainly this is an engine-side failure -
+    no gate verdict exists for the change - not a policy stop.
+    """
+    safe_exc = untrusted_inline(repr(exc))
+    safe_task = untrusted_inline(task_id)
+    reasons = (f"engine failure while processing this task: {safe_exc}",)
+    digest = (
+        f"# Merge hold: {safe_task}  (broken - engine failure)\n\n"
+        "## What failed\n\n"
+        f"- {safe_exc}\n\n"
+        "The merge ENGINE failed while processing this task - an engine-side\n"
+        "error (e.g. a malformed committed artifact), NOT a policy stop and\n"
+        "NOT a gate verdict on the change: no gate result exists for it.\n\n"
+        "## What is needed\n\n"
+        "Inspect the error above and the branch's committed artifacts; push a\n"
+        "fixed revision of the branch (or fix the engine defect) and re-run.\n"
+        "The other ready tasks were processed normally.\n\n"
+        f"`{safe_task}` is NOT merged and NOT deleted.\n"
+    )
+    return MergeVerdict(task_id, "hold", BROKEN, reasons, digest)
+
+
 @dataclass
 class LocalMergeEngine:
     list_ready: ListReady
@@ -543,98 +572,115 @@ class LocalMergeEngine:
         AUTO_MERGE decision as well as an L3 RISK_DECISION (H4); interactively
         that means typing the exact task id. A declined task merges nothing
         and the batch continues; a dry run never confirms and never merges.
+
+        Per-task isolation (M7): an UNEXPECTED exception while judging one
+        task (e.g. a truncated committed merge-decision.json raising out of
+        verify_one) becomes a BROKEN hold for THAT task, with the failure
+        recorded on its verdict, and the batch continues - the fail-closed
+        reading of "a hold never blocks the others". Exception (never
+        BaseException) is the isolation boundary: KeyboardInterrupt and
+        SystemExit still abort the whole run.
         """
         results: list[MergeVerdict] = []
         for task_id in self.list_ready():
-            gates = self.verify_one(task_id)
-            verdict = decide(task_id, gates, advisory_mode=self.advisory_mode)
-            if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
-                if self.confirm(verdict):
-                    # replace() (not a fresh 3-arg construct) so verdict.advisory
-                    # survives the L3 confirm - else an advisory L3 merge would
-                    # silently drop its record (AC5). kind stays RISK_DECISION.
-                    verdict = replace(verdict, decision="merge")
-            elif verdict.merged and not self.dry_run and not self.confirm(verdict):
-                # AUTO_MERGE (L1/L2): the merge side-effect needs the SAME
-                # merge-safety confirmation as L3 (H4) - auto-merge means "no
-                # review required", never "no human at the merge". A dry run is
-                # excluded here only because it never merges at all (the swap
-                # below), so there is nothing to confirm and nothing prompts.
+            try:
+                verdict = self._judge_one(task_id)
+            except Exception as exc:  # noqa: BLE001 - per-task isolation (M7)
+                verdict = _engine_failure_verdict(task_id, exc)
+            self.on_verdict(verdict)
+            results.append(verdict)
+        return results
+
+    def _judge_one(self, task_id: str) -> MergeVerdict:
+        """Judge (and, when confirmed, merge) ONE ready task - the loop body
+        run() isolates per task (M7)."""
+        gates = self.verify_one(task_id)
+        verdict = decide(task_id, gates, advisory_mode=self.advisory_mode)
+        if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
+            if self.confirm(verdict):
+                # replace() (not a fresh 3-arg construct) so verdict.advisory
+                # survives the L3 confirm - else an advisory L3 merge would
+                # silently drop its record (AC5). kind stays RISK_DECISION.
+                verdict = replace(verdict, decision="merge")
+        elif verdict.merged and not self.dry_run and not self.confirm(verdict):
+            # AUTO_MERGE (L1/L2): the merge side-effect needs the SAME
+            # merge-safety confirmation as L3 (H4) - auto-merge means "no
+            # review required", never "no human at the merge". A dry run is
+            # excluded here only because it never merges at all (the swap
+            # below), so there is nothing to confirm and nothing prompts.
+            reasons = (
+                "merge not confirmed (the exact task id was not typed); "
+                "nothing merged",
+            )
+            verdict = MergeVerdict(
+                task_id, "hold", DECLINED, reasons,
+                f"# Merge hold: {untrusted_inline(task_id)} (not confirmed)\n\n"
+                "The merge-safety confirmation declined this merge: the exact\n"
+                "task id was not typed. Nothing was merged and no state was\n"
+                "changed; the branch stays ready. Re-run merge-verified.sh to\n"
+                "be asked again.\n",
+            )
+        if verdict.merged and self.dry_run:
+            # dry run: record what WOULD auto-merge, but touch nothing. The
+            # advisory tuple is CARRIED (not dropped): the whole point of the
+            # preview is to inspect before committing to --advisory, so a
+            # branch that would waive judgment findings must read differently
+            # from a fully-clean one (constraint 5 - honest labeling).
+            if verdict.advisory:
                 reasons = (
-                    "merge not confirmed (the exact task id was not typed); "
-                    "nothing merged",
+                    "would merge under --advisory (dry run: --no-input, "
+                    "nothing changed); judgment gates WOULD be waived:",
+                    *verdict.advisory,
+                )
+                digest = (
+                    f"# Dry run (--advisory): {untrusted_inline(task_id)}\n\n"
+                    "Would merge into local main under --advisory, WAIVING the "
+                    "judgment-gate findings below and recording them in "
+                    "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
+                    "## Judgment-gate findings that WOULD be waived\n\n"
+                    + "\n".join(f"- {r}" for r in verdict.advisory)
+                    + "\n\nRe-run without --no-input to apply.\n"
+                )
+            else:
+                reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
+                digest = (
+                    f"# Dry run: {untrusted_inline(task_id)}\n\n"
+                    "Would auto-merge into local main; "
+                    "re-run without --no-input to apply.\n"
+                )
+            verdict = MergeVerdict(
+                task_id, "hold", DRY_RUN, reasons, digest,
+                advisory=verdict.advisory,
+            )
+        if verdict.merged:
+            request = MergeRequest(task_id, gates.head_sha, verdict.advisory)
+            try:
+                merged = self.merge_one(request)
+            except MergePreparationError as exc:
+                reasons = (
+                    "merge preparation failed before commit; nothing landed: "
+                    + untrusted_inline(str(exc)),
                 )
                 verdict = MergeVerdict(
-                    task_id, "hold", DECLINED, reasons,
-                    f"# Merge hold: {untrusted_inline(task_id)} (not confirmed)\n\n"
-                    "The merge-safety confirmation declined this merge: the exact\n"
-                    "task id was not typed. Nothing was merged and no state was\n"
-                    "changed; the branch stays ready. Re-run merge-verified.sh to\n"
-                    "be asked again.\n",
+                    task_id,
+                    "hold",
+                    BROKEN,
+                    reasons,
+                    build_digest(task_id, gates, BROKEN, reasons),
                 )
-            if verdict.merged and self.dry_run:
-                # dry run: record what WOULD auto-merge, but touch nothing. The
-                # advisory tuple is CARRIED (not dropped): the whole point of the
-                # preview is to inspect before committing to --advisory, so a
-                # branch that would waive judgment findings must read differently
-                # from a fully-clean one (constraint 5 - honest labeling).
-                if verdict.advisory:
-                    reasons = (
-                        "would merge under --advisory (dry run: --no-input, "
-                        "nothing changed); judgment gates WOULD be waived:",
-                        *verdict.advisory,
-                    )
-                    digest = (
-                        f"# Dry run (--advisory): {untrusted_inline(task_id)}\n\n"
-                        "Would merge into local main under --advisory, WAIVING the "
-                        "judgment-gate findings below and recording them in "
-                        "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
-                        "## Judgment-gate findings that WOULD be waived\n\n"
-                        + "\n".join(f"- {r}" for r in verdict.advisory)
-                        + "\n\nRe-run without --no-input to apply.\n"
-                    )
-                else:
-                    reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
-                    digest = (
-                        f"# Dry run: {untrusted_inline(task_id)}\n\n"
-                        "Would auto-merge into local main; "
-                        "re-run without --no-input to apply.\n"
-                    )
-                verdict = MergeVerdict(
-                    task_id, "hold", DRY_RUN, reasons, digest,
-                    advisory=verdict.advisory,
-                )
-            if verdict.merged:
-                request = MergeRequest(task_id, gates.head_sha, verdict.advisory)
-                try:
-                    merged = self.merge_one(request)
-                except MergePreparationError as exc:
-                    reasons = (
-                        "merge preparation failed before commit; nothing landed: "
-                        + untrusted_inline(str(exc)),
-                    )
+            else:
+                if not merged:
                     verdict = MergeVerdict(
                         task_id,
                         "hold",
                         BROKEN,
-                        reasons,
-                        build_digest(task_id, gates, BROKEN, reasons),
+                        ("branch no longer applies cleanly to main after a "
+                         "prior merge; re-run the task",),
+                        f"# Merge hold: {untrusted_inline(task_id)}\n\n"
+                        "Branch no longer applies cleanly to main. Re-run "
+                        "the task on the VPS.\n",
                     )
-                else:
-                    if not merged:
-                        verdict = MergeVerdict(
-                            task_id,
-                            "hold",
-                            BROKEN,
-                            ("branch no longer applies cleanly to main after a "
-                             "prior merge; re-run the task",),
-                            f"# Merge hold: {untrusted_inline(task_id)}\n\n"
-                            "Branch no longer applies cleanly to main. Re-run "
-                            "the task on the VPS.\n",
-                        )
-            self.on_verdict(verdict)
-            results.append(verdict)
-        return results
+        return verdict
 
 
 # --- real gatherers (trusted local infra; the CLI wires these) ---------------

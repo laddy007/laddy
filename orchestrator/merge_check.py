@@ -16,6 +16,7 @@ authority's policy gate (H1).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -41,10 +42,20 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     task = task_id
     artifacts = TaskArtifacts(repo, task_id)
 
-    committed: Any = artifacts.read_json(MERGE_DECISION)
+    # A truncated/garbled committed artifact is a FAILED check, not a crash
+    # (M7): return (1, reason) with the parse failure recorded, so the caller
+    # holds THIS task and the rest of its batch keeps processing. The branch
+    # authored these files, so unparseable JSON is its defect - fail closed.
+    try:
+        committed: Any = artifacts.read_json(MERGE_DECISION)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return 1, f"reason=unparseable_merge_decision: {exc!r}"
     if not isinstance(committed, dict):
         return 1, "reason=missing_merge_decision"
-    state: Any = artifacts.read_json(STATE)
+    try:
+        state: Any = artifacts.read_json(STATE)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return 1, f"reason=unparseable_state: {exc!r}"
 
     try:
         spec = parse_spec(repo / TARGET_DIR_NAME / "specs" / f"{task}.md")
