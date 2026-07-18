@@ -60,10 +60,33 @@ class TaskSpec:
 
 _LIST_RE = re.compile(r"^\[(.*)\]$")
 
+_BOM = "\ufeff"
+
 
 def _parse_front_matter(text: str) -> dict[str, str]:
+    # Fail CLOSED on a defeated opening fence (M-D4-1). A UTF-8 BOM or a leading
+    # blank/whitespace line shifts the '---' off line 0; str.strip() does not
+    # remove a BOM, so the old fence test silently returned {} and defaults fell
+    # to the MOST-privileged interpretation (type=feature -> not report_only,
+    # not draft). A genuinely front-matter-less markdown file stays valid.
+    if text.startswith(_BOM):
+        raise SpecError("spec begins with a UTF-8 BOM (LF + ASCII-only required)")
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not lines:
+        return {}
+    if lines[0].strip() != "---":
+        # No fence on line 0: either genuine plain markdown (fine, defaults
+        # apply) or a fence pushed off line 0 by a leading blank/whitespace
+        # line (a defeated fence -> fail closed).
+        for line in lines:
+            if not line.strip():
+                continue
+            if line.strip() == "---":
+                raise SpecError(
+                    "front matter fence '---' must be the first line; a leading "
+                    "blank or whitespace line defeats it"
+                )
+            break  # first content line is not a fence -> no front matter
         return {}
     fields: dict[str, str] = {}
     for line in lines[1:]:
@@ -74,7 +97,12 @@ def _parse_front_matter(text: str) -> dict[str, str]:
         if ":" not in line:
             raise SpecError(f"front matter line is not 'key: value': {line!r}")
         key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
+        key = key.strip()
+        if key in fields:
+            # Front matter is deliberately not YAML; a repeated key is a
+            # last-wins spoofing surface (L-D4-2) -> reject rather than overwrite.
+            raise SpecError(f"duplicate front matter key {key!r}")
+        fields[key] = value.strip()
     raise SpecError("front matter block not closed with '---'")
 
 
