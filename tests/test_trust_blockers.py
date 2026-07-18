@@ -17,6 +17,8 @@ from orchestrator import TARGET_DIR_NAME, agents, policy, testgate, verdict
 from orchestrator.agents import AgentResult
 from orchestrator.local_merge import (
     DRY_RUN,
+    ArtifactAttestation,
+    ArtifactAttestationState,
     GateResults,
     LocalMergeEngine,
     decide,
@@ -166,8 +168,7 @@ def test_recorded_terminal_none_mid_run() -> None:
 def _green_l1() -> GateResults:
     return GateResults(
         blast="L1",
-        policy_ok=True,
-        policy_reason="",
+        artifact_attestation=ArtifactAttestation(ArtifactAttestationState.PASSED),
         tests_passed=True,
         tests_tail="",
         coverage_ok=True,
@@ -186,7 +187,9 @@ def test_green_l1_auto_merges_without_dry_run() -> None:
     engine = LocalMergeEngine(
         list_ready=lambda: ["t1"],
         verify_one=lambda t: _green_l1(),
-        merge_one=lambda t, sha: (merged.append((t, sha)) or True),
+        merge_one=lambda request: (
+            merged.append((request.task_id, request.verified_sha)) or True
+        ),
     )
     results = engine.run()
     assert merged == [("t1", "abc123def456")]
@@ -198,7 +201,9 @@ def test_dry_run_holds_green_l1_and_merges_nothing() -> None:
     engine = LocalMergeEngine(
         list_ready=lambda: ["t1"],
         verify_one=lambda t: _green_l1(),
-        merge_one=lambda t, sha: (merged.append((t, sha)) or True),
+        merge_one=lambda request: (
+            merged.append((request.task_id, request.verified_sha)) or True
+        ),
         dry_run=True,
     )
     results = engine.run()

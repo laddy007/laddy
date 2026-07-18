@@ -8,13 +8,14 @@ failing test: a needed fix is a new VPS task, not this tool's job.
 
 ``--local <ref>`` is the trusted-machine escape hatch for a task the local
 gate held BROKEN: the Director authors the fix by hand with ordinary git and
-this tool judges that locally-committed revision through the IDENTICAL gate
+this tool judges that locally-committed revision through the same applicable gate
 (no fetch of the remote branch, no VPS round trip). It stays fix-free - the
 only new capability is sourcing the judged/merged commit from a local ref
 instead of a fetched one. It does not trust the code more, it trusts the
-route: the Director is the trusted author, the same gate judges the diff, and
-the judged sha is the merged sha (dirty-tree guarded), so nothing unverified
-slips in. A stopgap until bounce-to-VPS exists.
+route: the Director is the trusted author, the same applicable trusted-local
+gate judges the diff, and the judged sha is the merged sha (dirty-tree guarded),
+so nothing unverified slips in. The inherited VPS artifact attestation is N/A
+for that newer commit. A stopgap until bounce-to-VPS exists.
 
 Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L1 safe-by-construction : merge after the mechanical gates, no review
@@ -22,8 +23,9 @@ Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L3 sensitive surface    : never auto-merge; digest -> human Y/N
 
 Deterministic gates (block on red): local full test re-run, diff-coverage,
-semgrep, gitleaks, and the recomputed merge_check policy. Judgment gates
-(escalate, never silently block): rw2 re-run, the security panel.
+semgrep, gitleaks, and (for a fetched VPS tip) artifact attestation via
+merge_check. Judgment gates (escalate, never silently block): rw2 re-run, the
+security panel.
 """
 
 from __future__ import annotations
@@ -32,10 +34,12 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
 from orchestrator.agents import AgentRunner
+from orchestrator.human_text import untrusted_inline
 
 # Re-exported for backward-compat call sites (tests/fakes.py, historical
 # imports) - the implementation lives in orchestrator.merge_subject, a leaf
@@ -52,8 +56,12 @@ from orchestrator.testgate import BindingGate, BindingResult, restored_infra_pat
 from orchestrator.verdict import Verdict, VerdictError, request_verdict
 
 __all__ = [
+    "ArtifactAttestation",
+    "ArtifactAttestationState",
     "GateResults",
     "LocalMergeEngine",
+    "MergePreparationError",
+    "MergeRequest",
     "MergeVerdict",
     "_MERGE_SUBJECT",
     "decide",
@@ -69,13 +77,40 @@ MergeCheckFn = Callable[[Path, str, str], tuple[int, str]]
 # --- results & verdict -------------------------------------------------------
 
 
+class ArtifactAttestationState(str, Enum):
+    """Whether the VPS artifact chain describes the commit under judgment."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class ArtifactAttestation:
+    """Result of checking the VPS-authored state/decision artifact chain.
+
+    The check is applicable to a fetched VPS task tip: its committed artifacts
+    must describe that exact code history. It is deliberately not applicable
+    to ``--local`` because a Director-authored code commit makes those inherited
+    artifacts stale by construction; the fresh trusted-local gates judge that
+    commit instead. Keeping this as a typed state avoids laundering N/A into a
+    fake successful policy check.
+    """
+
+    state: ArtifactAttestationState
+    detail: str = ""
+
+    @property
+    def failed(self) -> bool:
+        return self.state is ArtifactAttestationState.FAILED
+
+
 @dataclass(frozen=True)
 class GateResults:
     """Everything the local gate gathered for one branch."""
 
     blast: str  # L1 | L2 | L3
-    policy_ok: bool
-    policy_reason: str
+    artifact_attestation: ArtifactAttestation
     tests_passed: bool
     tests_tail: str
     coverage_ok: bool
@@ -143,14 +178,17 @@ def build_digest(
     ``advisory`` (non-empty only on an --advisory RISK_DECISION) lists the
     judgment-gate findings being WAIVED, so the Y/N prompt is honest: it never
     claims "all gates passed" for a change the panel objected to."""
-    lines = [f"# Merge hold: {task_id}  (blast {gates.blast}, {kind})", ""]
+    safe_task = untrusted_inline(task_id)
+    lines = [f"# Merge hold: {safe_task}  (blast {gates.blast}, {kind})", ""]
 
     if kind == RISK_DECISION:
         lines += ["## Sensitive surface touched", ""]
-        lines += [f"- `{p}`" for p in gates.sensitive_files] or ["- (sensitive path)"]
+        lines += [f"- `{untrusted_inline(p)}`" for p in gates.sensitive_files] or [
+            "- (sensitive path)"
+        ]
         if advisory:
             lines += ["", "## Waived judgment-gate findings (--advisory)", ""]
-            lines += [f"- {r}" for r in advisory]
+            lines += [f"- {untrusted_inline(r)}" for r in advisory]
             lines += [
                 "",
                 "The deterministic gates passed, but the security panel / rw2",
@@ -160,7 +198,7 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{task_id}` into main under --advisory? (y/N) - you decide",
+                f"Merge `{safe_task}` into main under --advisory? (y/N) - you decide",
                 "on this summary, not by reading the diff.",
                 "",
             ]
@@ -172,7 +210,7 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{task_id}` into main? (y/N) - you decide on this",
+                f"Merge `{safe_task}` into main? (y/N) - you decide on this",
                 "summary, not by reading the diff.",
                 "",
             ]
@@ -180,14 +218,25 @@ def build_digest(
 
     # BROKEN: diagnostic, no merge offer
     lines += ["## What failed", ""]
-    lines += [f"- {r}" for r in reasons]
+    lines += [f"- {untrusted_inline(r)}" for r in reasons]
     sec = _security_blockers(gates)
     if sec:
-        lines += ["", "## Security panel findings", ""] + [f"- {s}" for s in sec]
+        lines += ["", "## Security panel findings", ""] + [
+            f"- {untrusted_inline(s)}" for s in sec
+        ]
     if gates.rw2 is not None and gates.rw2.blockers:
-        lines += ["", "## rw2 findings", ""] + [f"- {f.summary}" for f in gates.rw2.blockers]
+        lines += ["", "## rw2 findings", ""] + [
+            f"- {untrusted_inline(f.summary)}" for f in gates.rw2.blockers
+        ]
     if not gates.tests_passed:
-        lines += ["", "## Local test failure (tail)", "", "```", gates.tests_tail[-1500:], "```"]
+        lines += [
+            "",
+            "## Local test failure (tail)",
+            "",
+            "```",
+            untrusted_inline(gates.tests_tail[-1500:], limit=1500),
+            "```",
+        ]
     lines += ["", "## What is needed", ""]
     if gates.infra_overridden:
         # A branch must not supply the container it is judged in, so the gate
@@ -213,12 +262,13 @@ def build_digest(
             "commit the fix ON TOP of this branch with ordinary git, then run",
             "`merge-verified.sh <task> --local <ref>` (a sha, branch, or worktree",
             "path). --local does not trust the code more - it trusts the route:",
-            "you are the trusted author and the IDENTICAL gate still judges the",
-            "diff, and the judged sha is the merged sha, so nothing unverified",
+            "you are the trusted author and the same applicable gate still judges",
+            "the diff (the historical VPS artifact attestation is N/A),",
+            "and the judged sha is the merged sha, so nothing unverified",
             "slips in. It is a stopgap until bounce-to-VPS exists (and a",
             "legitimate escape hatch after).",
         ]
-    lines += ["", f"`{task_id}` is NOT merged and NOT deleted.", ""]
+    lines += ["", f"`{safe_task}` is NOT merged and NOT deleted.", ""]
     return "\n".join(lines)
 
 
@@ -239,16 +289,21 @@ def decide(
     judgment: list[str] = []
 
     # deterministic hard gates - any red is BROKEN and can NEVER be waived
-    if not gates.policy_ok:
-        deterministic.append(f"policy recompute failed/mismatch: {gates.policy_reason}")
+    if gates.artifact_attestation.failed:
+        deterministic.append(
+            "VPS artifact attestation failed/mismatch: "
+            + untrusted_inline(gates.artifact_attestation.detail)
+        )
     if not gates.tests_passed:
         deterministic.append("local full test suite is red")
     if not gates.coverage_ok:
-        deterministic.append(f"diff-coverage below threshold: {gates.coverage_detail}")
+        deterministic.append(
+            "diff-coverage below threshold: " + untrusted_inline(gates.coverage_detail)
+        )
     if gates.scan_findings:
         deterministic.append(
             f"security scan flagged {len(gates.scan_findings)} item(s): "
-            + "; ".join(gates.scan_findings[:5])
+            + "; ".join(untrusted_inline(item) for item in gates.scan_findings[:5])
         )
     # Not a defect in the branch - a limit of what this gate can say about it.
     # It still blocks: the alternative is merging a gate-infra change no gate
@@ -256,14 +311,22 @@ def decide(
     if gates.infra_overridden:
         deterministic.append(
             "gate infra changed by this branch was NOT verified - the gate ran "
-            "trusted main's copy of: " + ", ".join(gates.infra_overridden)
+            "trusted main's copy of: "
+            + ", ".join(untrusted_inline(path) for path in gates.infra_overridden)
         )
     # judgment gates - waivable under --advisory (recorded, never silently lost)
     if sec := _security_blockers(gates):
-        judgment.append(f"security panel blocker(s): {'; '.join(sec[:5])}")
+        judgment.append(
+            "security panel blocker(s): "
+            + "; ".join(untrusted_inline(summary) for summary in sec[:5])
+        )
     if gates.rw2 is not None and gates.rw2.blockers:
         judgment.append(
-            "rw2 blocker(s): " + "; ".join(f.summary for f in gates.rw2.blockers[:5])
+            "rw2 blocker(s): "
+            + "; ".join(
+                untrusted_inline(finding.summary)
+                for finding in gates.rw2.blockers[:5]
+            )
         )
 
     # The blocking set is the deterministic reasons ALWAYS, plus the judgment
@@ -303,18 +366,19 @@ def render_advisory(task_id: str, advisory: Sequence[str]) -> str:
     findings below and they were waived by an explicit --advisory merge - the
     file says so plainly so it is never mistaken for a fully-verified merge."""
     lines = [
-        f"# Advisory merge: {task_id}",
+        f"# Advisory merge: {untrusted_inline(task_id)}",
         "",
         "This branch was merged under `--advisory`. The deterministic gates",
-        "(policy recompute, local test suite, diff-coverage, secret/FS scan, and",
-        "the infra-override guard) all passed, but the JUDGMENT gates below were",
+        "(VPS artifact attestation when applicable, local test suite,",
+        "diff-coverage, secret/FS scan, and the infra-override guard) all passed,",
+        "but the JUDGMENT gates below were",
         "WAIVED, not cleared. This is NOT a fully-verified merge: the findings",
         "were recorded and the branch merged anyway, for later cleanup.",
         "",
         "## Waived judgment-gate findings (security panel / rw2)",
         "",
     ]
-    lines += [f"- {r}" for r in advisory] or ["- (none recorded)"]
+    lines += [f"- {untrusted_inline(r)}" for r in advisory] or ["- (none recorded)"]
     lines += [""]
     return "\n".join(lines)
 
@@ -381,13 +445,29 @@ def _abstention_blocker(member: str, reason: str = "") -> Verdict:
 # Injected collaborators (real impls in the CLI; fakes in tests):
 #   list_ready() -> task ids with a complete pushed branch ready to merge
 #   verify_one(task_id) -> GateResults   (gathers all gates on trusted infra)
-#   merge_one(task_id)  -> bool          (integrate into local main; False if
-#                                         the branch no longer applies cleanly)
+#   merge_one(request)  -> bool          (atomically integrate code and any
+#                                         advisory record into local main)
 ListReady = Callable[[], Sequence[str]]
 VerifyOne = Callable[[str], GateResults]
-# (task_id, verified_sha) -> merged? The sha is the exact commit the gates
-# saw; merging by sha (not by branch ref) closes the verify->merge TOCTOU.
-MergeOne = Callable[[str, str], bool]
+
+
+@dataclass(frozen=True)
+class MergeRequest:
+    """Everything the mutating merge boundary needs for one atomic commit."""
+
+    task_id: str
+    verified_sha: str
+    advisory: tuple[str, ...] = ()
+
+
+class MergePreparationError(RuntimeError):
+    """The uncommitted merge was aborted before trusted main moved."""
+
+
+# The sha is the exact commit the gates saw; merging by sha (not by branch ref)
+# closes the verify->merge TOCTOU. Advisory findings travel in the same request
+# so the executor can stage their durable record before it creates the commit.
+MergeOne = Callable[[MergeRequest], bool]
 
 
 @dataclass
@@ -407,14 +487,8 @@ class LocalMergeEngine:
     # --advisory: waive the judgment gates (security panel + rw2), recording
     # their findings on the verdict instead of holding BROKEN. Deterministic
     # gates still fail closed (decide() enforces this - the engine only forwards
-    # the flag). Default off: behavior is byte-identical to today without it.
+    # the flag). Default off: judgment-gate decision semantics stay unchanged.
     advisory_mode: bool = field(default=False)
-    # Called AFTER a successful merge whose verdict carries a non-empty advisory,
-    # on BOTH the auto-merge and the RISK_DECISION->confirmed paths - the durable
-    # write of merge-advisory.md lives here (injected), never in the pure
-    # decide(). Default is a no-op so tests/fakes that ignore advisory are
-    # unaffected.
-    record_advisory: Callable[[MergeVerdict], None] = field(default=lambda v: None)
 
     def run(self) -> list[MergeVerdict]:
         """Process every ready branch sequentially.
@@ -451,7 +525,7 @@ class LocalMergeEngine:
                         *verdict.advisory,
                     )
                     digest = (
-                        f"# Dry run (--advisory): {task_id}\n\n"
+                        f"# Dry run (--advisory): {untrusted_inline(task_id)}\n\n"
                         "Would merge into local main under --advisory, WAIVING the "
                         "judgment-gate findings below and recording them in "
                         "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
@@ -462,7 +536,8 @@ class LocalMergeEngine:
                 else:
                     reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
                     digest = (
-                        f"# Dry run: {task_id}\n\nWould auto-merge into local main; "
+                        f"# Dry run: {untrusted_inline(task_id)}\n\n"
+                        "Would auto-merge into local main; "
                         "re-run without --no-input to apply.\n"
                     )
                 verdict = MergeVerdict(
@@ -470,22 +545,33 @@ class LocalMergeEngine:
                     advisory=verdict.advisory,
                 )
             if verdict.merged:
-                if not self.merge_one(task_id, gates.head_sha):
+                request = MergeRequest(task_id, gates.head_sha, verdict.advisory)
+                try:
+                    merged = self.merge_one(request)
+                except MergePreparationError as exc:
+                    reasons = (
+                        "merge preparation failed before commit; nothing landed: "
+                        + untrusted_inline(str(exc)),
+                    )
                     verdict = MergeVerdict(
                         task_id,
                         "hold",
                         BROKEN,
-                        ("branch no longer applies cleanly to main after a "
-                         "prior merge; re-run the task",),
-                        f"# Merge hold: {task_id}\n\nBranch no longer applies "
-                        "cleanly to main. Re-run the task on the VPS.\n",
+                        reasons,
+                        build_digest(task_id, gates, BROKEN, reasons),
                     )
-                elif verdict.advisory:
-                    # Merge landed AND judgment gates were waived: write the
-                    # durable record. On main after merge_branch, so it commits
-                    # to main. Fires on both merge paths (keyed on the verdict,
-                    # not on which branch above produced it).
-                    self.record_advisory(verdict)
+                else:
+                    if not merged:
+                        verdict = MergeVerdict(
+                            task_id,
+                            "hold",
+                            BROKEN,
+                            ("branch no longer applies cleanly to main after a "
+                             "prior merge; re-run the task",),
+                            f"# Merge hold: {untrusted_inline(task_id)}\n\n"
+                            "Branch no longer applies cleanly to main. Re-run "
+                            "the task on the VPS.\n",
+                        )
             self.on_verdict(verdict)
             results.append(verdict)
         return results
@@ -763,10 +849,10 @@ def gather_gates(
 
     ``local_ref`` selects --local mode: source the worktree from the local sha
     that ``local_ref`` resolves to (no fetch of the remote branch) instead of
-    the fetched remote tip. Everything downstream - trial-merge into current
-    main, merge_check, policy from trusted base_branch, binding gate, security
-    panel, rw2, and the ``head_sha`` TOCTOU pin - is byte-identical, so --local
-    runs the SAME gate set; only the commit's provenance differs.
+    the fetched remote tip. The trusted policy/classification, trial merge,
+    binding gate, security panel, rw2, and ``head_sha`` TOCTOU pin are identical.
+    Only the VPS artifact attestation is N/A: state.json and the VPS log describe
+    the older task tip by construction once the Director adds a local code fix.
     """
     wt = (
         _local_worktree(repo, task_id, work_root, local_ref)
@@ -775,8 +861,19 @@ def gather_gates(
     )
     try:
         verified_sha = _worktree_sha(wt)
-        code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
-        policy_ok = code == 0
+        if local_ref is None:
+            code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
+            artifact_attestation = ArtifactAttestation(
+                ArtifactAttestationState.PASSED
+                if code == 0
+                else ArtifactAttestationState.FAILED,
+                msg,
+            )
+        else:
+            artifact_attestation = ArtifactAttestation(
+                ArtifactAttestationState.NOT_APPLICABLE,
+                "Director-authored --local commit is judged by fresh trusted-local gates",
+            )
 
         from orchestrator.gitops import GitOps
 
@@ -820,8 +917,7 @@ def gather_gates(
 
         return GateResults(
             blast=blast,
-            policy_ok=policy_ok,
-            policy_reason=msg,
+            artifact_attestation=artifact_attestation,
             tests_passed=binding.tests_passed,
             tests_tail=binding.tests_tail,
             coverage_ok=binding.coverage_ok,
@@ -857,6 +953,7 @@ def merge_branch(
     base_branch: str = "main",
     branch_remote: str = "origin",
     fetch: bool = True,
+    advisory: Sequence[str] = (),
 ) -> bool:
     """Merge the VERIFIED commit of <task> into local main.
 
@@ -872,6 +969,12 @@ def merge_branch(
     remote at all. The sha is still the one the gates pinned, so judged ==
     merged holds identically.
 
+    When ``advisory`` is non-empty, its durable record is written and staged
+    while the merge is still uncommitted. Code and record then enter trusted
+    main in one merge commit. Any preparation or commit failure aborts the
+    merge, leaving the original main commit in place; there is no post-merge
+    callback and no destructive reset rollback.
+
     ``branch_remote`` is where task branches live (see discover_ready); the
     merge target ``base_branch`` is always integrated locally and later
     pushed to "origin" (GitHub) by push_and_cleanup, regardless of
@@ -882,17 +985,69 @@ def merge_branch(
     if fetch:
         _git(repo, "fetch", branch_remote, task_id)
     _git(repo, "checkout", base_branch)
+    _, original_head = _git(repo, "rev-parse", "HEAD")
     code, _ = _git(
         repo,
         "-c", "user.name=myapp-merge",
         "-c", "user.email=merge@myapp.local",
-        "merge", "--no-ff", verified_sha,
-        "-m", merge_subject(task_id, verified_sha),
+        "merge", "--no-ff", "--no-commit", verified_sha,
         check=False,
     )
     if code != 0:
         _git(repo, "merge", "--abort", check=False)
         return False
+
+    merge_head_code, _ = _git(
+        repo, "rev-parse", "--verify", "MERGE_HEAD", check=False
+    )
+    if merge_head_code != 0:
+        return False
+
+    try:
+        if advisory:
+            from orchestrator.artifacts import TaskArtifacts
+
+            relative_record = (
+                f"{TARGET_DIR_NAME}/tasks/{task_id}/merge-advisory.md"
+            )
+            record = repo / relative_record
+            try:
+                record.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                # A task is merged once. An existing record either came from
+                # the untrusted branch or was already present on trusted main;
+                # overwriting either would destroy provenance, so fail closed.
+                raise MergePreparationError(
+                    f"advisory record path already exists: {relative_record}"
+                )
+            TaskArtifacts(repo, task_id).write_text(
+                "merge-advisory.md", render_advisory(task_id, advisory)
+            )
+            _git(repo, "add", "--", relative_record)
+
+        commit_code, commit_output = _git(
+            repo,
+            "-c", "user.name=myapp-merge",
+            "-c", "user.email=merge@myapp.local",
+            "commit", "-m", merge_subject(task_id, verified_sha),
+            check=False,
+        )
+        if commit_code != 0:
+            raise MergePreparationError(
+                "git could not create the atomic merge commit: " + commit_output
+            )
+    except Exception as exc:
+        _git(repo, "merge", "--abort", check=False)
+        _, restored_head = _git(repo, "rev-parse", "HEAD")
+        if restored_head != original_head:
+            raise RuntimeError(
+                "merge abort did not restore the original trusted main commit"
+            ) from exc
+        if isinstance(exc, MergePreparationError):
+            raise
+        raise MergePreparationError(str(exc)) from exc
     return True
 
 
@@ -966,7 +1121,9 @@ def _default_tools(config: object) -> GateTools:
 def _interactive_confirm(v: MergeVerdict) -> bool:
     """RISK_DECISION (L3) prompt: show what is sensitive, ask y/N."""
     print("\n" + v.digest)
-    return input(f"[risk] merge {v.task_id} into main? (y/N) > ").strip().lower() == "y"
+    # Keep the authorization prompt itself entirely static. All dynamic,
+    # attacker-influenced context is rendered safely above it.
+    return input("[risk] authorize this merge into main? (y/N) > ").strip().lower() == "y"
 
 
 def _ask(prompt: str) -> bool:
@@ -1006,8 +1163,8 @@ def main(
         action="store_true",
         help="waive the JUDGMENT gates (security panel + rw2): record their "
         "findings to merge-advisory.md (committed into local main) and merge "
-        "anyway. Deterministic gates (policy/tests/coverage/scan/infra) still "
-        "fail closed. Opt-in; off by default.",
+        "anyway. Deterministic gates (VPS attestation when applicable, tests, "
+        "coverage, scan, and infra) still fail closed. Opt-in; off by default.",
     )
     parser.add_argument("task", nargs="*", help="task ids; default = all ready")
     args = parser.parse_args(argv)
@@ -1074,65 +1231,53 @@ def main(
     )
     merged: list[str] = []
 
-    def _record_advisory(v: MergeVerdict) -> None:
-        # Post-merge, on the trusted machine: the repo is on main (merge_branch
-        # checked it out), so this file + follow-up commit land ON main and
-        # survive task-branch deletion (constraint 3). Add ONLY the one path
-        # (never `add -A`), so an unrelated dirty tree is not swept into main.
-        art = TaskArtifacts(repo, v.task_id)
-        rel = f"{TARGET_DIR_NAME}/tasks/{v.task_id}/merge-advisory.md"
-        art.write_text("merge-advisory.md", render_advisory(v.task_id, v.advisory))
-        _git(repo, "add", "--", rel)
-        _git(
-            repo,
-            "-c", "user.name=myapp-merge",
-            "-c", "user.email=merge@myapp.local",
-            "commit", "-m", f"advisory record: {v.task_id} (judgment gates waived)",
-        )
-
     def _report(v: MergeVerdict) -> None:
+        safe_task = untrusted_inline(v.task_id)
         if v.merged:
             merged.append(v.task_id)
             if v.advisory:
                 # Honest labeling (constraint 5): an advisory merge is visibly
                 # distinct and never presented as a fully-verified merge.
                 print(
-                    f"[merge*] {v.task_id}: MERGED under --advisory - judgment "
+                    f"[merge*] {safe_task}: MERGED under --advisory - judgment "
                     "gates WAIVED, NOT fully verified"
                 )
                 print(
                     f"         waived findings recorded in {TARGET_DIR_NAME}/tasks/"
-                    f"{v.task_id}/merge-advisory.md"
+                    f"{safe_task}/merge-advisory.md"
                 )
             else:
-                print(f"[merge] {v.task_id}: MERGED into local main")
+                print(f"[merge] {safe_task}: MERGED into local main")
             return
         art = TaskArtifacts(repo, v.task_id)
         art.write_text("merge-hold.md", v.digest)
         if v.kind == BROKEN:
             # diagnostic: what failed, why, what is needed (no merge offer)
-            print(f"[broken] {v.task_id}: {'; '.join(v.reasons)}")
-            print(f"         see {TARGET_DIR_NAME}/tasks/{v.task_id}/merge-hold.md")
+            print(
+                f"[broken] {safe_task}: "
+                + "; ".join(untrusted_inline(reason) for reason in v.reasons)
+            )
+            print(f"         see {TARGET_DIR_NAME}/tasks/{safe_task}/merge-hold.md")
         elif v.kind == DRY_RUN:
             if v.advisory:
                 # Preview must flag an advisory-eligible branch distinctly, never
                 # as a clean auto-merge (constraint 5): a real run would waive
                 # these findings and commit them into main.
                 print(
-                    f"[dry-run*] {v.task_id}: WOULD merge under --advisory - "
+                    f"[dry-run*] {safe_task}: WOULD merge under --advisory - "
                     "judgment gates WOULD be WAIVED (nothing changed)"
                 )
-                print(f"           see {TARGET_DIR_NAME}/tasks/{v.task_id}/merge-hold.md")
+                print(f"           see {TARGET_DIR_NAME}/tasks/{safe_task}/merge-hold.md")
             else:
-                print(f"[dry-run] {v.task_id}: WOULD auto-merge (nothing changed)")
+                print(f"[dry-run] {safe_task}: WOULD auto-merge (nothing changed)")
         else:
-            print(f"[hold]  {v.task_id}: declined / not confirmed")
+            print(f"[hold]  {safe_task}: declined / not confirmed")
 
     if args.advisory:
         print("[ADVISORY] --advisory is ON. The security panel and rw2 judgment")
         print("gates are WAIVED: their findings are recorded to merge-advisory.md")
         print("(committed into local main) and the branch merges anyway. The")
-        print("deterministic gates (policy/tests/coverage/scan/infra) STILL block.")
+        print("deterministic gates (attestation/tests/coverage/scan/infra) STILL block.")
 
     engine = LocalMergeEngine(
         # --local processes only the one named task (discovery bypassed): the
@@ -1150,15 +1295,16 @@ def main(
             branch_remote=config.branch_remote, base_branch=config.default_branch,
             **({"local_ref": local_ref} if local_ref is not None else {}),
         ),
-        merge_one=lambda t, sha: merge_branch(
-            repo, t, sha, branch_remote=config.branch_remote,
+        merge_one=lambda request: merge_branch(
+            repo, request.task_id, request.verified_sha,
+            branch_remote=config.branch_remote,
             fetch=local_ref is None,
+            advisory=request.advisory,
         ),
         on_verdict=_report,
         confirm=_confirm,
         dry_run=args.no_input,
         advisory_mode=args.advisory,
-        record_advisory=_record_advisory,
     )
     results = engine.run()
     held = [v for v in results if not v.merged]
@@ -1169,10 +1315,16 @@ def main(
         f"[push] push main to origin and delete {len(merged)} merged branch(es)? (y/N) > "
     ):
         _push(repo, merged)
-        print(f"[push] main pushed; deleted: {', '.join(merged)}")
+        print(
+            "[push] main pushed; deleted: "
+            + ", ".join(untrusted_inline(task) for task in merged)
+        )
     elif merged:
-        print(f"[push] not pushed. Merged locally: {', '.join(merged)}. "
-              "Push with: git push origin main")
+        print(
+            "[push] not pushed. Merged locally: "
+            + ", ".join(untrusted_inline(task) for task in merged)
+            + ". Push with: git push origin main"
+        )
 
     return 1 if held else 0
 
