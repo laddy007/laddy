@@ -7,6 +7,7 @@ resume purely from these files after a crash.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
@@ -90,6 +91,56 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return entries
 
 
+class ArtifactPathError(Exception):
+    """A task-artifact path is a symlink and was refused, not followed.
+
+    The task dir (<agent-dir>/tasks/<task>/) and its files are BRANCH-controlled
+    content: a merged branch could ship the dir - or an individual artifact - as
+    a symlink pointing anywhere on the trusted merge machine, so a bare write
+    would land through the link onto an arbitrary file. Every write below fails
+    closed instead. Mirrors queue.py's O_NOFOLLOW lock-file discipline."""
+
+
+def _refuse_symlink(path: Path, exc: OSError) -> None:
+    """Re-raise an O_NOFOLLOW ELOOP as the typed refusal; pass anything else
+    through unchanged (same shape as queue.py's guard for the lock file)."""
+    if exc.errno == errno.ELOOP:
+        raise ArtifactPathError(
+            f"artifact path {path} is a symlink - refusing to follow it "
+            "(possible attack or corrupted state; remove it by hand)"
+        ) from exc
+    raise exc
+
+
+def write_text_nofollow(path: Path, text: str) -> None:
+    """Write ``text`` to ``path``, refusing to follow a symlink at the final
+    component. O_NOFOLLOW makes the open itself fail (ELOOP) if ``path`` is a
+    symlink, rather than truncating whatever it points to - a bare
+    Path.write_text() would happily write through an attacker-planted link.
+    Callers are expected to have vetted the parent dir (see ``_ensure``)."""
+    try:
+        fd = os.open(
+            path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o644
+        )
+    except OSError as exc:
+        _refuse_symlink(path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises on ELOOP
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def write_bytes_nofollow(path: Path, data: bytes) -> None:
+    """Bytes counterpart of :func:`write_text_nofollow` (same O_NOFOLLOW
+    refusal); used where the payload is copied verbatim (e.g. a spec file)."""
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        _refuse_symlink(path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises on ELOOP
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
 class TaskArtifacts:
     """Typed accessors for one task's artifact directory."""
 
@@ -118,6 +169,22 @@ class TaskArtifacts:
         return self.dir / LOG
 
     def _ensure(self) -> Path:
+        """Create the task dir, first refusing any symlinked component.
+
+        mkdir(exist_ok=True) silently accepts a path that is a symlink to a
+        directory, so later writes would land through the link. The task dir is
+        branch-controlled (a merged branch could ship <task>/ - or an ancestor -
+        as a symlink), so check every component from repo_root down with lstat
+        (is_symlink never follows) and fail closed. Nonexistent components are
+        not symlinks; mkdir then creates them as real dirs."""
+        cur = self.repo_root
+        for part in self.dir.relative_to(self.repo_root).parts:
+            cur = cur / part
+            if cur.is_symlink():
+                raise ArtifactPathError(
+                    f"artifact path component {cur} is a symlink - refusing to "
+                    "follow it (possible attack or corrupted state; remove by hand)"
+                )
         self.dir.mkdir(parents=True, exist_ok=True)
         return self.dir
 
@@ -168,11 +235,9 @@ class TaskArtifacts:
         return read_jsonl(self.dir / LOG)
 
     def write_json(self, name: str, obj: Any) -> None:
-        path = self._ensure() / name
-        path.write_text(
+        write_text_nofollow(
+            self._ensure() / name,
             json.dumps(obj, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-            newline="\n",
         )
 
     def read_json(self, name: str) -> Any | None:
@@ -182,7 +247,7 @@ class TaskArtifacts:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def write_text(self, name: str, text: str) -> None:
-        (self._ensure() / name).write_text(text, encoding="utf-8", newline="\n")
+        write_text_nofollow(self._ensure() / name, text)
 
     def read_text(self, name: str) -> str | None:
         path = self.dir / name
@@ -192,4 +257,4 @@ class TaskArtifacts:
 
     def copy_spec(self, src: Path) -> None:
         self._ensure()
-        self.spec_path.write_bytes(src.read_bytes())
+        write_bytes_nofollow(self.spec_path, src.read_bytes())

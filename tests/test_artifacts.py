@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.artifacts import LOG, TaskArtifacts
+from orchestrator.artifacts import LOG, SPEC, ArtifactPathError, TaskArtifacts
 
 
 def _artifacts(tmp_path: Path) -> TaskArtifacts:
@@ -104,3 +104,68 @@ def test_copy_spec(tmp_path: Path) -> None:
     art = _artifacts(tmp_path)
     art.copy_spec(src)
     assert art.spec_path.read_text(encoding="utf-8") == "# Spec\nbody\n"
+
+
+# --- symlink safety: task-dir artifacts are branch-controlled -----------------
+# The task dir and its files can arrive from a merged (untrusted) branch. A
+# planted symlink must never redirect a write onto an arbitrary file on the
+# trusted merge machine - every writer fails closed (O_NOFOLLOW / lstat guard)
+# rather than following the link. See ArtifactPathError.
+
+
+def test_write_text_refuses_a_symlinked_file(tmp_path: Path) -> None:
+    art = _artifacts(tmp_path)
+    art.append_log(action="developer", outcome="ok")  # materialize the real dir
+    outside = tmp_path / "outside.txt"
+    outside.write_text("original\n", encoding="utf-8")
+    (art.dir / "merge-advisory.md").symlink_to(outside)
+    with pytest.raises(ArtifactPathError):
+        art.write_text("merge-advisory.md", "advisory\n")
+    assert outside.read_text(encoding="utf-8") == "original\n"  # not written through
+
+
+def test_write_json_refuses_a_symlinked_file(tmp_path: Path) -> None:
+    art = _artifacts(tmp_path)
+    art.append_log(action="developer", outcome="ok")
+    outside = tmp_path / "outside.json"
+    outside.write_text("original\n", encoding="utf-8")
+    (art.dir / "findings.json").symlink_to(outside)
+    with pytest.raises(ArtifactPathError):
+        art.write_json("findings.json", {"x": 1})
+    assert outside.read_text(encoding="utf-8") == "original\n"
+
+
+def test_copy_spec_refuses_a_symlinked_target(tmp_path: Path) -> None:
+    art = _artifacts(tmp_path)
+    art.append_log(action="developer", outcome="ok")
+    outside = tmp_path / "outside_spec.md"
+    outside.write_text("original\n", encoding="utf-8")
+    (art.dir / SPEC).symlink_to(outside)
+    src = tmp_path / "src.md"
+    src.write_text("# new\n", encoding="utf-8")
+    with pytest.raises(ArtifactPathError):
+        art.copy_spec(src)
+    assert outside.read_text(encoding="utf-8") == "original\n"
+
+
+def test_write_refuses_a_symlinked_task_dir(tmp_path: Path) -> None:
+    # The whole <task>/ dir shipped as a symlink: mkdir(exist_ok=True) would
+    # silently accept it, so _ensure's lstat walk must reject it up front.
+    art = _artifacts(tmp_path)
+    tasks = tmp_path / TARGET_DIR_NAME / "tasks"
+    tasks.mkdir(parents=True)
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    (tasks / "t1").symlink_to(evil, target_is_directory=True)
+    with pytest.raises(ArtifactPathError):
+        art.write_text("merge-advisory.md", "advisory\n")
+    assert not (evil / "merge-advisory.md").exists()
+
+
+def test_write_text_overwrites_a_regular_file(tmp_path: Path) -> None:
+    # O_NOFOLLOW only blocks symlinks: a branch may legitimately ship a regular
+    # merge-advisory.md, and overwriting a real file must still work.
+    art = _artifacts(tmp_path)
+    art.write_text("merge-advisory.md", "first\n")
+    art.write_text("merge-advisory.md", "second\n")
+    assert (art.dir / "merge-advisory.md").read_text(encoding="utf-8") == "second\n"

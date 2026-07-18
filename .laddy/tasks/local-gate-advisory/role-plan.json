@@ -1,0 +1,9 @@
+{
+  "task": "local-gate-advisory",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "tests/test_local_merge.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "--advisory --no-input dry-run preview now carries the waived judgment-gate findings instead of dropping them",
+      "evidence": "local_merge.py:441-467: the dry-run swap now branches on verdict.advisory, building distinct reasons/digest naming the waived findings, and preserves advisory=verdict.advisory on the rebuilt MergeVerdict. Reproduced directly: LocalMergeEngine(dry_run=True, advisory_mode=True) on an L1 branch with a security-panel blocker now returns kind='dry_run', reasons=('would merge under --advisory ... judgment gates WOULD be waived:', 'security panel blocker(s): IDOR'), advisory=('security panel blocker(s): IDOR',).",
+      "verified": true
+    },
+    {
+      "claim": "CLI report distinguishes the advisory dry-run preview from a clean one",
+      "evidence": "local_merge.py:1117-1127: DRY_RUN branch now prints '[dry-run*] ... WOULD be WAIVED ...' and points to merge-hold.md when v.advisory is set, vs the plain '[dry-run] ... WOULD auto-merge' otherwise.",
+      "verified": true
+    },
+    {
+      "claim": "New tests cover the previously-missing combination",
+      "evidence": "tests/test_local_merge.py:408 test_engine_dry_run_advisory_preview_carries_waived_findings, :434 test_engine_dry_run_clean_branch_keeps_the_plain_preview, and a CLI-level test_cli_advisory_dry_run_preview_is_honest_and_mutates_nothing at :1020; full suite tests/test_local_merge.py + tests/test_trust_blockers.py: 120 passed.",
+      "verified": true
+    },
+    {
+      "claim": "Gate clean",
+      "evidence": "ruff check: All checks passed; basedpyright: 0 errors, 84 warnings (pre-existing, non-blocking).",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "The previously-missing dry-run+advisory interaction is now directly covered at both the engine level (advisory-present and advisory-absent cases) and the CLI level (asserting the preview mutates nothing and names the waived findings honestly).",
+  "residual_risks": [
+    "--advisory + --local combination remains untested, as previously noted; no concrete failure identified.",
+    "_record_advisory's git commit on a byte-identical re-run remains a theoretical, previously-noted residual risk, unrelated to this finding."
+  ]
+}

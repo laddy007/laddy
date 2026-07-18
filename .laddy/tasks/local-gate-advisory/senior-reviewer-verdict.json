@@ -1,0 +1,49 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/local_merge.py",
+    "tests/test_local_merge.py",
+    "orchestrator/artifacts.py",
+    ".laddy/specs/local-gate-advisory.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "The trust invariant holds: --advisory can waive ONLY the judgment gates, never a deterministic one (constraint 1, AC2)",
+      "evidence": "local_merge.py:272 `blocking = deterministic + ([] if advisory_mode else judgment)` — advisory_mode gates only the `judgment` addend; the `deterministic` list (policy :242, tests :244, coverage :246, scan :248, infra_overridden :256) is unconditionally part of `blocking`, so any red deterministic gate returns BROKEN at :279 regardless of the flag. This is a structural guarantee, not a conditional that could be inverted by a later edit.",
+      "verified": true
+    },
+    {
+      "claim": "Opt-in, default off, byte-identical without the flag (constraint 2)",
+      "evidence": "decide() keyword-only `advisory_mode=False` (:226); when False, `advisory = ()` (:285) and `blocking` includes all judgment reasons — identical to prior behavior. Engine field and CLI arg default off; full prior suite green per both reviewers (729/732 passed, 3 pre-existing fork warnings).",
+      "verified": true
+    },
+    {
+      "claim": "Durable record committed into local main, on BOTH merge paths, keyed on the verdict (constraint 3, AC3, AC5)",
+      "evidence": "run() calls self.record_advisory(verdict) at :488 only after merge_one succeeds and only when verdict.advisory is non-empty — placed after the branch that produced the merge, so it fires for the auto-merge path and the L3-confirm path alike. AC5 drop-trap closed: :440 `replace(verdict, decision='merge')` preserves advisory (kind stays RISK_DECISION). _record_advisory (:1082-1091) writes the file, `git add -- rel` (single path, never add -A), commits on main (repo is on main post-merge_branch).",
+      "verified": true
+    },
+    {
+      "claim": "Honest labeling on every surface, including the dry-run preview (constraint 5)",
+      "evidence": "render_advisory :311 ('This is NOT a fully-verified merge'); report :1100 '[merge*] ... WAIVED, NOT fully verified'; L3 digest carries advisory (:290); dry-run swap (:447-471) carries verdict.advisory and builds a distinct 'WOULD be waived / NOT a fully-verified merge' digest, with report :1122 '[dry-run*] ... WOULD be WAIVED' — the rw2 round-1 blocker, now resolved and covered by three new tests.",
+      "verified": true
+    },
+    {
+      "claim": "No push / origin change from --advisory (constraint 4)",
+      "evidence": "The flag reaches only decide() and the local-main record/merge. Push stays behind the separate _ask_fn Y/N (:1168) and the merge target is local main only; no push path is conditioned on advisory.",
+      "verified": true
+    },
+    {
+      "claim": "This is additive, not test-weakening: no invariant/architecture-contract test was relaxed",
+      "evidence": "The change adds a new opt-in code path and new tests that pin the invariant per-gate (AC2 exercises all five deterministic gates under advisory_mode=True → BROKEN). Existing decide() tests remain green under the keyword-only default. No test assertion was loosened.",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "Coverage is complete against all five acceptance criteria and pins the security-sensitive invariant directly: AC2 has one test per deterministic gate proving advisory cannot waive it; AC5's replace()-drop-trap is guarded at both engine and CLI levels; AC3 asserts the committed main tree from a checkout that never had the branch; the dry-run+advisory honesty gap raised in round 1 is now covered at engine and CLI level. The security-panel objection that this 'weakens the gate' is the expected friction the spec (Notes) anticipates; the correct question — does the trust invariant hold — is answered yes by the structure of decide().",
+  "residual_risks": [
+    "--advisory + --local is not tested as a combination; it composes correctly (single task, local_ref passthrough, fetch=False merge, record via _ensure mkdir) and no concrete failure is identified.",
+    "_record_advisory's post-merge commit is not wrapped in error handling; a freshly-staged new file is not expected to fail to commit, but a theoretical failure would leave the merge on main without the record. Non-blocking, previously noted by both reviewers.",
+    "Landing this change is the intended last bootstrap hand-merge per the spec; my APPROVED verdict overrides the security panel's expected 'gate became waivable' objection because the deterministic gates still fail closed and only panel/rw2 are waived-and-recorded."
+  ]
+}

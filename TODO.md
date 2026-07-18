@@ -1,5 +1,16 @@
 # TODO
 
+- Symlink-safe artifact writes now EXIST: `artifacts.write_text_nofollow` /
+  `write_bytes_nofollow` (O_NOFOLLOW) + `TaskArtifacts._ensure`'s lstat walk that
+  rejects a symlinked task-dir component (raises `ArtifactPathError`). All
+  `TaskArtifacts.write_text/write_json/copy_spec` route through them, so every
+  task-dir artifact (advisory record, merge-hold, reports, verdicts, spec copy)
+  fails closed on a branch-planted symlink. USE THESE wherever a
+  branch-controlled path is written on the trusted machine instead of a bare
+  `Path.write_text`/`write_bytes`. Still bare (tighten when touched): the LOG
+  append (`append_jsonl` -> `path.open("a")`, dir is guarded but the file is
+  not O_NOFOLLOW); direct `spec_path.write_text` in clarify.py:60 / run.py:197 /
+  loop.py:1076 / oracle. Folds into the `report-path-guard-md` spec's theme.
 - Dead role fixtures in tests/test_run_cli.py:39 and tests/test_oracle_evalrun.py:117 - pass via real ENGINE_DIR/roles instead.
 - basedpyright warnings (~1500, non-blocking by design - failOnWarnings=false) - burn down opportunistically.
 - Report-only `path_guard` (orchestrator/policy.py REPORT_ALLOWED_PREFIXES) allows ANY file under `<agent-dir>/specs/`, not only `*.md` - a report-only task could commit `specs/x.py`. Not collected by pytest (testpaths=["tests"]) so low risk, but tighten the guard to spec markdown once C3's draft-status check has settled.
