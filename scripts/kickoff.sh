@@ -29,6 +29,12 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Self-wrap in tmux so the foreground clarify/design gates survive an SSH
+# drop; no-op when headless / already wrapped / LADDY_NO_TMUX=1 (see lib).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/tmux_wrap.sh"
+laddy_tmux_wrap "${1:-kickoff}" "$@"
+
 TASK="${1:-}"
 [ -n "$TASK" ] || die "Usage: kickoff.sh <task> [--new] [--skip-clarify] [--code-ready] | <task> --resume --reason \"<what changed>\""
 [[ "$TASK" =~ ^[a-zA-Z0-9._-]+$ ]] || die "Invalid task name: $TASK"

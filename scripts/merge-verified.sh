@@ -27,11 +27,19 @@ REPO_DIR="$(pwd)"
 git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || { echo "ERROR: run merge-verified.sh from inside the target repo" >&2; exit 1; }
 
-ENV_FILE="$ENGINE_DIR/env.local"
+# env.local: the TARGET's own file wins (local-onboard.sh writes it into the
+# target checkout); the engine's is the fallback (engine-as-target / legacy).
+# Before this, the generated per-target env.local was never read at all.
+ENV_FILE="$REPO_DIR/env.local"
+ENV_REPO="$REPO_DIR"
+if [ ! -f "$ENV_FILE" ]; then
+  ENV_FILE="$ENGINE_DIR/env.local"
+  ENV_REPO="$ENGINE_DIR"
+fi
 if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/lib/env_guard.sh"
-  laddy_refuse_tracked_env "$ENGINE_DIR" "$ENV_FILE"
+  laddy_refuse_tracked_env "$ENV_REPO" "$ENV_FILE"
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
