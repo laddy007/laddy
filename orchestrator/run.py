@@ -77,8 +77,8 @@ def default_roles_dir() -> Path:
 
 
 SPEC_AUTHOR_PROMPT = """\
-You are co-authoring a task spec with the Director for the myapp agent
-dev-loop. The file {spec_rel} already exists with just a headline. Discuss
+You are co-authoring a task spec with the Director for the laddy agent
+dev-loop over this target repo. The file {spec_rel} already exists with just a headline. Discuss
 what the task should do, then fill in the rest of that file (Markdown;
 optional front matter with type/roles above the headline). Do not implement
 anything - only author the spec. Keep asking until the Director is

@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TASK="${1:-}"
-[ -n "$TASK" ] || die "Usage: kickoff.sh <task> [--new] [--skip-clarify]"
+[ -n "$TASK" ] || die "Usage: kickoff.sh <task> [--new] [--skip-clarify] [--code-ready] | <task> --resume --reason \"<what changed>\""
 [[ "$TASK" =~ ^[a-zA-Z0-9._-]+$ ]] || die "Invalid task name: $TASK"
 [ "$TASK" != "main" ] || die "task id 'main' is reserved (hub closed namespace)"
 shift || true
