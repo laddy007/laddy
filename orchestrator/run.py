@@ -44,7 +44,7 @@ from orchestrator.flags import (
 )
 from orchestrator.gitops import GitOps
 from orchestrator.handoff import NtfyNotifier
-from orchestrator.loop import Orchestrator
+from orchestrator.loop import Orchestrator, last_terminal_state
 from orchestrator.policy import spec_is_high_risk
 from orchestrator.queue import (
     QueueError,
@@ -56,7 +56,7 @@ from orchestrator.queue import (
 from orchestrator.quota import QuotaPolicy
 from orchestrator.spec import SpecError, TaskSpec, parse_spec
 from orchestrator.target_policy import load_target_policy
-from orchestrator.terminals import terminal_spec
+from orchestrator.terminals import clears_terminal, terminal_spec
 from orchestrator.testgate import (
     DockerGate,
     ShellRunner,
@@ -374,6 +374,79 @@ def _phase_flags(config: OrchestratorConfig, task_ids: Sequence[str]) -> int:
     if not any_open:
         print("no open flags")
     return 0
+
+
+def _phase_resume(
+    config: OrchestratorConfig, task_id: str, deps: Deps, reason: str | None
+) -> int:
+    """Director resume channel (director-resume): un-stick a finished task, hand
+    the developer a written note, and continue the loop.
+
+    Validation is all-or-nothing - NOTHING is appended until every check passes:
+    a non-empty ``--reason``; the task exists and reached a terminal; that
+    terminal is one ``director_resume`` clears (PATH_GUARD_VIOLATION and unknown
+    states are refused - a poisoned/unknown tree is discarded, not resumed).
+    Only then is one ``director_resume`` event appended (with the reason and a
+    ``spec_sha`` receipt) and committed, and the loop started with clarify/design
+    skipped (the task is already under way). This path never pushes to origin,
+    never merges, never skips a reviewer - the resumed loop re-traverses every
+    gate exactly as a fresh run.
+    """
+    text = (reason or "").strip()
+    if not text:
+        print("ERROR: --phase resume requires a non-empty --reason", file=sys.stderr)
+        return 2
+    gitops = deps.make_gitops(config)
+    wt = gitops.task_worktree(task_id)
+    spec, rc = _load_spec(wt, task_id)
+    if rc != 0 or spec is None:
+        return rc
+    artifacts = TaskArtifacts(wt, task_id)
+    state = last_terminal_state(artifacts.read_log())
+    if state is None:
+        print(
+            f"ERROR: {task_id} has no recorded terminal to resume - it never "
+            "started or is still running; kickoff/queue it normally instead.",
+            file=sys.stderr,
+        )
+        return 2
+    if not clears_terminal("director_resume", state):
+        # Two distinct refusals: a RETRYABLE terminal (QUOTA_TIMEOUT /
+        # INTERNAL_ERROR) is not poisoned - it already resumes on a plain
+        # re-kickoff, so pointing at "discard the branch" would be wrong. A
+        # sticky non-table state (PATH_GUARD_VIOLATION / unknown) IS the
+        # discard-and-restart case.
+        if not terminal_spec(state).sticky:
+            print(
+                f"ERROR: terminal {state} is transient and already resumable - "
+                "just re-kickoff the task normally (no --phase resume needed).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: terminal {state} is not resumable by --phase resume "
+                "(PATH_GUARD_VIOLATION and unknown states are excluded by design: "
+                "the tree is poisoned - discard the branch and restart).",
+                file=sys.stderr,
+            )
+        return 2
+    # Only now that the task is a validated, resumable terminal (not still
+    # running, not poisoned) do we touch the tree: sync the persisted worktree to
+    # the branch tip on origin. The Director corrects the ask by editing + pushing
+    # the spec from a separate clone (USAGE.md §8), but task_worktree reuses this
+    # worktree WITHOUT fetching - skip this and the developer reads the stale
+    # pre-correction spec, spec_sha records the wrong blob, and the resumed run's
+    # final push is rejected non-fast-forward. Done AFTER validation so a resume
+    # of a still-running task (refused above) never hard-resets a live worktree.
+    gitops.sync_worktree_to_origin(wt, task_id)
+    spec_sha = gitops.blob_sha(wt, _spec_rel(task_id))
+    artifacts.append_log(
+        action="director_resume", outcome="ok", reason=text, spec_sha=spec_sha
+    )
+    gitops.commit_all(wt, f"Director resume for {task_id}")
+    print(f"[resume] {task_id}: un-stuck {state}; starting loop")
+    # The task already cleared clarify/design on its first run; skip them.
+    return _phase_loop(config, task_id, deps, skip_clarify=True)
 
 
 def _phase_loop(config: OrchestratorConfig, task_id: str, deps: Deps, skip_clarify: bool) -> int:
@@ -734,13 +807,16 @@ def main(
     parser.add_argument(
         "--phase",
         choices=(
-            "new", "clarify", "design", "loop", "all", "enqueue", "queue",
+            "new", "clarify", "design", "loop", "all", "resume", "enqueue", "queue",
             "queue-list", "status", "flag", "flags",
         ),
         default="all",
     )
     parser.add_argument("--new", action="store_true", help="author the spec interactively first")
     parser.add_argument("--skip-clarify", action="store_true")
+    parser.add_argument(
+        "--reason", help="resume phase: the Director's note (why the task is resumed)"
+    )
     # --phase flag: raise (--kind/--summary/...) or resolve (--resolve) a flag
     parser.add_argument(
         "--kind", choices=LOOP_FLAG_KINDS,
@@ -769,7 +845,7 @@ def main(
     )
     args = parser.parse_args(argv)
 
-    single_task_phases = ("new", "clarify", "design", "loop", "all", "flag")
+    single_task_phases = ("new", "clarify", "design", "loop", "all", "resume", "flag")
     if args.phase in single_task_phases and len(args.task_ids) != 1:
         parser.error(f"--phase {args.phase} requires exactly one task id")
     if (args.pick or args.enqueue_all) and args.phase != "enqueue":
@@ -843,6 +919,8 @@ def main(
             return rc
     if args.phase == "design":
         return _phase_design(config, task_id, deps)
+    if args.phase == "resume":
+        return _phase_resume(config, task_id, deps, args.reason)
     return _phase_loop(config, task_id, deps, skip_clarify=args.skip_clarify)
 
 

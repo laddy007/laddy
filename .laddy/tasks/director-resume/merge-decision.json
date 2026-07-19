@@ -1,0 +1,9 @@
+{
+  "decision": "stop_before_merge",
+  "risk_level": "high",
+  "reasons": [
+    "policy_sensitive_paths: orchestrator/gitops.py, orchestrator/handoff.py, orchestrator/loop.py, orchestrator/run.py, orchestrator/terminals.py",
+    "security_auth_paths: orchestrator/gitops.py, orchestrator/terminals.py",
+    "high_risk"
+  ]
+}

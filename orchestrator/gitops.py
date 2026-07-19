@@ -101,6 +101,36 @@ class GitOps:
         )
         return wt
 
+    def sync_worktree_to_origin(self, wt: Path, task_id: str) -> bool:
+        """Fast-forward an EXISTING task worktree to the branch tip on origin
+        (fetch first). Returns True when a sync happened, False when origin has
+        no such branch (a purely local task - nothing to sync onto).
+
+        ``task_worktree`` reuses an existing worktree WITHOUT fetching, so a
+        persisted worktree stays at the commit its last run left. A resume must
+        build on the branch as the hub has it NOW: the Director may have pushed a
+        spec correction from a separate clone since (director-resume's whole
+        point). Skip this and the developer reads the pre-correction spec AND the
+        resumed run's final push is rejected non-fast-forward, stranding the task.
+        A run that reached a (resumable) terminal committed + pushed everything,
+        so the worktree is clean and a hard reset onto ``origin/<task>`` is safe -
+        the same reasoning ``refresh_base`` uses to reset the base clone."""
+        branch = self._branch(task_id)
+        git_out(["git", "-C", str(wt), "fetch", "origin"])
+        remote_ref = f"origin/{branch}"
+        has_remote = (
+            subprocess.run(
+                ["git", "-C", str(wt), "rev-parse", "--verify", "--quiet", remote_ref],
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not has_remote:
+            return False
+        git_out(["git", "-C", str(wt), "reset", "--hard", remote_ref])
+        return True
+
     def commit_all(self, wt: Path, message: str) -> str | None:
         """Stage and commit everything; None when the tree is clean."""
         if not git_out(["git", "-C", str(wt), "status", "--porcelain"]):
@@ -108,6 +138,15 @@ class GitOps:
         git_out(["git", "-C", str(wt), "add", "-A"])
         git_out(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
         return self.head_sha(wt)
+
+    def blob_sha(self, wt: Path, rel_path: str) -> str:
+        """The git blob SHA of a working-tree file (``git hash-object``).
+
+        Used as a receipt for the spec at director-resume time: recorded so the
+        handback shows whether the ask changed. It is a RECORD only - nothing
+        branches on it (that would make it a trust input on a VPS-written log).
+        """
+        return git_out(["git", "-C", str(wt), "hash-object", rel_path])
 
     def push(self, wt: Path, task_id: str) -> None:
         """Push the task branch. The ONLY remote write this module performs."""

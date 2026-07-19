@@ -1,0 +1,81 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "high",
+  "files_reviewed": [
+    "orchestrator/terminals.py",
+    "orchestrator/loop.py",
+    "orchestrator/run.py",
+    "orchestrator/gitops.py",
+    "orchestrator/handoff.py",
+    "scripts/kickoff.sh",
+    "tests/test_gitops.py",
+    "tests/test_loop_director_resume.py",
+    "tests/test_loop_policy.py",
+    "tests/test_terminals.py",
+    "tests/test_run_cli.py",
+    "tests/test_handoff.py",
+    "tests/test_kickoff_wiring.py",
+    "USAGE.md",
+    "SECURITY.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Round 6 sync_worktree_to_origin hard-reset is safe: every resumable terminal pushes to origin, so origin/<task> holds the terminal commit and the reset discards no pushed history",
+      "evidence": "orchestrator/terminals.py:39-43 (PUSHED/CAP_REACHED/ESCALATED_DEADLOCK push=True; MERGE_DECIDED->PUSHED spec); orchestrator/gitops.py:123-149 fetch+reset --hard origin/<branch>",
+      "verified": true
+    },
+    {
+      "claim": "The sync runs only AFTER validation, so a refused resume (still-running / PATH_GUARD_VIOLATION / retryable) never hard-resets the worktree",
+      "evidence": "orchestrator/run.py:419-427 (sync after all return-2 gates); tests/test_run_cli.py:test_resume_does_not_sync_worktree_when_validation_fails asserts synced==[] and rc==2 for PATH_GUARD_VIOLATION",
+      "verified": true
+    },
+    {
+      "claim": "spec_sha is computed AFTER the sync, so the receipt and the developer read the Director's pushed spec correction, and the final push is fast-forward",
+      "evidence": "orchestrator/run.py:428-431 (sync -> blob_sha -> append); tests/test_run_cli.py:test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone asserts the corrected spec is in the worktree post-resume; tests/test_gitops.py:test_sync_worktree_to_origin_fast_forwards_to_pushed_tip",
+      "verified": true
+    },
+    {
+      "claim": "sync is a no-op (returns False, worktree untouched) for a purely local task with no origin branch",
+      "evidence": "orchestrator/gitops.py:139-147; tests/test_gitops.py:test_sync_worktree_to_origin_is_noop_when_branch_absent_on_origin asserts head unchanged and returns False",
+      "verified": true
+    },
+    {
+      "claim": "Prior blockers remain resolved: resuming PUSHED/MERGE_DECIDED/CAP_REACHED-at-cap/ESCALATED_DEADLOCK runs one real developer round via _resume_developer_point, delivering the note, then self-clears",
+      "evidence": "orchestrator/loop.py:_resume_developer_point + _run_phases:799-817 (unchanged since prior APPROVED); tests/test_loop_policy.py:test_resumed_merge_decided_runs_a_developer_round + tests/test_loop_director_resume.py resumed_* integration tests drive orch.run() to convergence",
+      "verified": true
+    },
+    {
+      "claim": "Un-stick rule remains table-driven; retryable-vs-poisoned refusal messages are distinguished",
+      "evidence": "orchestrator/loop.py:100-117; orchestrator/run.py:405-425 branches on terminal_spec(state).sticky; tests/test_run_cli.py:test_resume_refuses_retryable_terminal_with_rekickoff_hint",
+      "verified": true
+    },
+    {
+      "claim": "Trust intact: resume never pushes to origin/merges/skips a reviewer; the resumed developer round changes code_sha and re-triggers SHA-keyed review; spec_sha is inert in decision logic",
+      "evidence": "grep spec_sha -> only written (run.py:429-431); gate_states/_decide_merge ignore director_resume (loop.py:905-922); tests/test_run_cli.py:test_resume_path_does_not_push_or_merge_or_skip_review passes",
+      "verified": true
+    },
+    {
+      "claim": "Suite green, ruff clean, basedpyright 0 errors for touched scope",
+      "evidence": "pytest -q -> 733 passed; ruff check orchestrator/ tests/ -> All checks passed; basedpyright touched -> 0 errors, 234 pre-existing reportAny warnings",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "advisory",
+      "category": "quality",
+      "file": "orchestrator/loop.py",
+      "line": 153,
+      "summary": "AC4's grep clause ('no event name hardcoded in loop.py') is enforced by test only against _recorded_terminal; _director_note (loop.py:153) legitimately names 'director_resume' because the note-render is the director channel's own feature, not the shared un-stick rule (which is correctly table-driven). A one-line comment distinguishing 'the rule' (table-driven) from 'the note render' (event-specific) would forestall a future reader mistaking it for the bespoke-if the spec warns against.",
+      "failure_scenario": ""
+    }
+  ],
+  "test_assessment": "AC1-3,5 covered by test_terminals.py + test_loop_director_resume.py. AC4 by a table-driven test + source-grep on _recorded_terminal. AC6 (derive untouched) covered. AC7 by _director_note unit tests + note-delivery integration. AC8/AC9 by CLI validation tests (empty/missing reason, PATH_GUARD_VIOLATION, retryable-hint, no-terminal, unknown task, no-sync-on-failure, happy-path with spec_sha) each asserting nothing-written where applicable. AC10 (receipt) covered. AC11 (trust) by a source-inspection guard + gate re-derivation. AC12 (crash-safe) covered. AC13 verified (733 passed, ruff clean, basedpyright 0 errors). Round-6 additions are well covered: sync_worktree_to_origin has three gitops unit tests (fast-forward, absent-branch no-op, and the separate-clone correction) plus a CLI end-to-end confirming the corrected spec reaches the worktree and the sync is gated behind validation. Every new function (_resume_developer_point, sync_worktree_to_origin, _phase_resume, _director_note, clears_terminal, last_terminal_state, blob_sha, _resume_section) has failure-mode / boundary coverage.",
+  "residual_risks": [
+    "sync_worktree_to_origin uses `git reset --hard`, which silently discards UNCOMMITTED edits made directly in the VPS worktree. The documented workflow (USAGE.md §8) has the Director edit+push the spec from a separate clone, so the reset is the mechanism that pulls that correction; a Director who instead edits in-place on the VPS worktree would lose those edits. Acceptable given the documented flow, but a sharp edge worth keeping in the docs.",
+    "The sync + director_resume append + commit run before _phase_loop acquires run_lock; a concurrent loop racing on the same worktree during the hard reset could interfere. Low-probability (Director orchestrates kickoffs serially per task) and consistent with how other pre-loop phase work is unlocked.",
+    "A `git fetch origin` failure (network blip) during resume raises before anything is appended — fail-closed (nothing written), surfacing as a traceback in the detached log; the Director simply retries.",
+    "One-event-one-run is preserved: the forced developer round is round=rounds_used+1, so a resumed run that fails to converge re-caps/re-deadlocks at its next terminal and a second --resume is required — intended and tested.",
+    "Trust surface holds: director_resume/spec_sha are inert in gate derivation and merge decisions; a forged resume from a compromised VPS only buys more of its own compute, cannot merge, push to origin, or skip a reviewer."
+  ]
+}

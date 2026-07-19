@@ -146,6 +146,41 @@ def test_sensitive_path_stops_before_merge(
     assert _git("-C", str(remote), "rev-parse", "refs/heads/t1")
 
 
+def test_resumed_merge_decided_runs_a_developer_round(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    """director-resume flagship (the spec's cited mcp example): a task that
+    ended MERGE_DECIDED:stop_before_merge, whose tail is push:ok (so the pure
+    derivation yields 'done'), must - once resumed - run a REAL developer round
+    that receives the Director note, NOT silently re-record the same terminal via
+    the 'done' branch. Drives the resumed task through the full _run_phases with
+    policy enabled (the coverage the un-stick-only tests could not give)."""
+    # 1. first run stops before merge (sensitive path touched).
+    dev1 = TouchingRunner(["done"], "myapp/models.py", "STATE = 2\n")
+    orch1 = _orch(remote, tmp_path, roles_dir, dev1,
+                  FakeRunner([verdict_json("APPROVED")]), NtfyNotifier(None))
+    assert orch1.run("t1") == "MERGE_DECIDED:stop_before_merge"
+
+    wt = orch1.gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    # 2. Director resumes with a corrected ask.
+    art.append_log(action="director_resume", outcome="ok",
+                   reason="models change needs a migration guard")
+
+    # 3. second run (fresh fakes): the resume must DEVELOP, not re-record.
+    dev2 = TouchingRunner(["reworked per the note"], "myapp/api_helper.py", "y = 2\n")
+    orch2 = _orch(remote, tmp_path, roles_dir, dev2,
+                  FakeRunner([verdict_json("APPROVED")]), NtfyNotifier(None))
+    terminal = orch2.run("t1")
+
+    assert terminal.startswith("MERGE_DECIDED:")  # productive re-run reached a decision
+    log = art.read_log()
+    idx = max(i for i, e in enumerate(log) if e.get("action") == "director_resume")
+    dev_after = [e for e in log[idx + 1:] if e.get("action") == "developer"]
+    assert len(dev_after) == 1  # exactly one developer round ran after the resume
+    assert "models change needs a migration guard" in dev2.calls[0].prompt  # note delivered
+
+
 def test_artifact_commits_do_not_invalidate_approvals(
     remote: Path, tmp_path: Path, roles_dir: Path
 ) -> None:

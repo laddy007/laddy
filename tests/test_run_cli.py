@@ -980,3 +980,191 @@ def test_loop_refuses_high_risk_without_design_approval(remote: Path, tmp_path: 
     _mark_clarified(env, "hr3")
     rc = main(["hr3", "--phase", "loop", "--skip-clarify"], env=env, deps=_deps([]))
     assert rc == 2  # refused: high-risk, no design/approved marker
+
+
+# --- director resume channel (--phase resume) --------------------------------
+
+
+def _seed_terminal(env: dict[str, str], task_id: str, state: str) -> None:
+    """Give a task a recorded terminal, as a finished run leaves it."""
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree(task_id)
+    art = TaskArtifacts(wt, task_id)
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome=state)
+
+
+def _resume_events(env: dict[str, str], task_id: str) -> list[dict[str, object]]:
+    return [e for e in _task_log(env, task_id) if e.get("action") == "director_resume"]
+
+
+def test_resume_empty_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume", "--reason", "   "], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_missing_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_path_guard_violation_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    rc = main(["t1", "--phase", "resume", "--reason", "fix it"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_retryable_terminal_with_rekickoff_hint(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # a transient/retryable terminal (QUOTA_TIMEOUT) is NOT poisoned - it already
+    # resumes on a plain re-kickoff, so the refusal must say that, not "discard".
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "QUOTA_TIMEOUT")
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+    err = capsys.readouterr().err
+    assert "re-kickoff" in err and "poisoned" not in err
+
+
+def test_resume_refuses_task_with_no_terminal_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    # t1 exists on main but never ran (no terminal) -> refuse, nothing written
+    env = _env(remote, tmp_path)
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_unknown_task_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    rc = main(["nope", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "nope") == []
+
+
+def test_resume_does_not_sync_worktree_when_validation_fails(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The origin sync (a hard reset of the worktree) must run ONLY after the
+    # terminal is confirmed resumable - never for a refused resume (e.g. a still-
+    # running or PATH_GUARD_VIOLATION task), so a live worktree is never reset.
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    synced: list[str] = []
+    monkeypatch.setattr(
+        GitOps, "sync_worktree_to_origin",
+        lambda self, wt, tid: synced.append(tid) or False,
+    )
+    rc = main(["t1", "--phase", "resume", "--reason", "x"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert synced == []  # tree untouched for a non-resumable terminal
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_happy_path_appends_one_event_and_starts_loop(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+
+    # stub the loop so the test asserts the append + that the loop is entered
+    # with clarify skipped, without running a full round.
+    from orchestrator import run as run_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_loop(config: object, task_id: str, deps: object, skip_clarify: bool) -> int:
+        calls.append((task_id, skip_clarify))
+        return 0
+
+    monkeypatch.setattr(run_mod, "_phase_loop", fake_loop)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    assert events[0]["reason"] == "added throttling"
+    assert events[0]["outcome"] == "ok"
+    assert events[0].get("spec_sha")  # a recorded receipt sha is present
+    assert calls == [("t1", True)]  # loop entered, clarify skipped
+
+
+def test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The documented Director workflow (USAGE.md §8): correct the spec on the
+    # task branch from a SEPARATE clone and push it, then --resume on the VPS,
+    # whose persisted worktree is still at its pre-terminal commit. The resume
+    # must fetch that correction, or the developer reads the stale spec and the
+    # final push is rejected non-fast-forward (rw2 blocker).
+    env = _env(remote, tmp_path)
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    # 1. VPS worktree finishes a run at CAP_REACHED; branch pushed to origin/t1.
+    wt = gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome="CAP_REACHED")
+    gitops.commit_all(wt, "CAP_REACHED for t1")
+    gitops.push(wt, "t1")
+    stale_spec = (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8")
+
+    # 2. Director edits + pushes the spec correction from a separate clone.
+    clone = tmp_path / "director-clone"
+    _git("clone", str(remote), str(clone))
+    _git("-C", str(clone), "checkout", "t1")
+    corrected = "# t1\n\nNOW WITH THE THROTTLING REQUIREMENT THE SPEC OMITTED\n"
+    (clone / TARGET_DIR_NAME / "specs" / "t1.md").write_text(corrected, encoding="utf-8")
+    _git("-C", str(clone), *IDENTITY, "commit", "-am", "spec: add throttling")
+    _git("-C", str(clone), "push", "origin", "HEAD:t1")
+    director_tip = _git("-C", str(remote), "rev-parse", "t1")
+    # the VPS worktree is still stale before the resume
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == stale_spec
+
+    # 3. resume (loop stubbed): must sync the worktree to origin first.
+    from orchestrator import run as run_mod
+    monkeypatch.setattr(run_mod, "_phase_loop", lambda *a, **k: 0)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+
+    # the corrected spec is now in the worktree, and spec_sha reflects it
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == corrected
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    corrected_sha = _git("-C", str(clone), "hash-object", f"{TARGET_DIR_NAME}/specs/t1.md")
+    assert events[0]["spec_sha"] == corrected_sha
+    # the resume commit builds ON TOP of the Director's correction, so the
+    # eventual gitops.push fast-forwards instead of being rejected
+    assert _git("-C", str(wt), "merge-base", "HEAD", director_tip) == director_tip
+
+
+def test_resume_path_does_not_push_or_merge_or_skip_review(remote: Path, tmp_path: Path) -> None:
+    # AC11 (trust): the resume CLI itself un-sticks + notes only. It never pushes
+    # to origin, decides a merge, or bypasses a reviewer - the resumed loop
+    # re-traverses every gate. Guard the source so a future edit can't sneak a
+    # push/merge onto this path.
+    import inspect
+
+    from orchestrator.run import _phase_resume
+
+    src = inspect.getsource(_phase_resume)
+    assert ".push(" not in src
+    assert "merge_decision" not in src and "MERGE_DECISION" not in src
+    assert "code_sha" not in src
+    # it delegates to the normal loop (which re-runs rw1/rw2/authoritative)
+    assert "_phase_loop(" in src
