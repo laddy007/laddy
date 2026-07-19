@@ -1,0 +1,38 @@
+# laddy-phone.service - per-USER systemd unit for the phone control server.
+#
+# Runs as the same unprivileged VPS user that owns the engine and the loop
+# (never root: the server deliberately has exactly that user's authority and
+# no more). Install per user, like monitoring/ documents for its units:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/laddy/phone/laddy-phone.service ~/.config/systemd/user/
+#   # Edit ExecStart below if the engine dir is not ~/laddy.
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now laddy-phone
+#   loginctl enable-linger "$USER"   # keep it running without an SSH session
+#
+# Config (LADDY_PHONE_TOKEN, LADDY_PHONE_BIND, ...) comes from the engine's
+# env.vps, which scripts/phone.sh sources itself - no Environment= lines are
+# needed here, and the token stays out of the unit file.
+#
+# Status / logs:
+#   systemctl --user status laddy-phone
+#   journalctl --user -u laddy-phone -f
+
+[Unit]
+Description=laddy phone control server (tailnet-only PWA)
+After=network.target
+
+[Service]
+Type=exec
+ExecStart=%h/laddy/scripts/phone.sh
+Restart=on-failure
+RestartSec=5s
+# Exit 2 = missing LADDY_PHONE_TOKEN: a config error, not a crash - do not
+# restart-loop on it.
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

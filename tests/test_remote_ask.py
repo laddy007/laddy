@@ -34,7 +34,7 @@ def _ask(tmp_path: Path, clock: FakeClock, posts: list[tuple[str, str]]) -> Remo
     )
 
 
-def _answer_on_first_sleep(ask: RemoteAsk, tmp_path: Path, answer: dict) -> None:
+def _answer_on_first_sleep(ask: RemoteAsk, tmp_path: Path, answer: dict[str, str]) -> None:
     inner = ask.sleep
 
     def sleep(seconds: float) -> None:
@@ -51,7 +51,7 @@ def test_ask_writes_question_notifies_and_returns_answer(tmp_path: Path) -> None
     posts: list[tuple[str, str]] = []
     ask = _ask(tmp_path, clock, posts)
 
-    seen: dict = {}
+    seen: dict[str, object] = {}
     inner = ask.sleep
 
     def sleep(seconds: float) -> None:

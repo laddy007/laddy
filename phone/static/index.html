@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101418">
+<title>laddy phone</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>laddy</h1>
+  <input id="token" type="password" placeholder="access token" autocomplete="off">
+</header>
+
+<main>
+  <section id="questions-section">
+    <div class="section-head">
+      <h2>Questions</h2>
+      <span id="questions-badge" class="badge" hidden>0</span>
+    </div>
+    <div id="questions"><p class="muted">No pending questions.</p></div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Status</h2>
+      <button id="status-refresh">Refresh</button>
+    </div>
+    <pre id="status-out" class="out"></pre>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Queue</h2>
+      <button id="queue-refresh">Refresh</button>
+    </div>
+    <pre id="queue-out" class="out"></pre>
+    <div class="row">
+      <input id="enqueue-tasks" placeholder="task ids (space-separated)">
+    </div>
+    <div class="row">
+      <label class="check"><input id="enqueue-chain" type="checkbox"> chain</label>
+      <button id="enqueue-btn">Enqueue</button>
+    </div>
+    <div class="row">
+      <input id="resume-task" placeholder="task id">
+      <input id="resume-reason" placeholder="reason">
+      <button id="resume-btn">Resume</button>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Log</h2>
+    </div>
+    <div class="row">
+      <input id="log-task" placeholder="task id">
+      <button id="log-btn">Show</button>
+    </div>
+    <pre id="log-out" class="out"></pre>
+  </section>
+</main>
+
+<footer><span id="flash" class="muted"></span></footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -7,9 +7,8 @@
   task-dir artifact (advisory record, merge-hold, reports, verdicts, spec copy)
   fails closed on a branch-planted symlink. USE THESE wherever a
   branch-controlled path is written on the trusted machine instead of a bare
-  `Path.write_text`/`write_bytes`. Still bare (tighten when touched): the LOG
-  append (`append_jsonl` -> `path.open("a")`, dir is guarded but the file is
-  not O_NOFOLLOW); direct `spec_path.write_text` in clarify.py:60 / run.py:197 /
+  `Path.write_text`/`write_bytes`. DONE 2026-07-19: append_jsonl now opens O_NOFOLLOW. Still bare (tighten
+  when touched): direct `spec_path.write_text` in clarify.py:60 / run.py:197 /
   loop.py:1076 / oracle. Folds into the `report-path-guard-md` spec's theme.
 - Dead role fixtures in tests/test_run_cli.py:39 and tests/test_oracle_evalrun.py:117 - pass via real ENGINE_DIR/roles instead.
 - basedpyright warnings (~1500, non-blocking by design - failOnWarnings=false) - burn down opportunistically.
@@ -23,8 +22,12 @@
 - Config ergonomics: let LADDY_USERS take just a PROJECT name and derive user/ssh-alias(`vps-<project>`)/engine-path(`/home/<project>/laddy`) by convention (they are 1:1 today), keeping explicit 4-field overrides optional. Change lives in lib/laddy_users.sh.
 - Role -> vendor binding is HALF hardcoded: the CLI *commands* are config (env.vps CLAUDE_CMD/CODEX_CMD/SENIOR_CMD/REVIEW_*/RW2_CMD), but WHICH vendor runs each role is fixed in run.py (developer/rw1/clarify/senior/rw2 -> ClaudeRunner). Make the role->runner mapping config-driven so any role's vendor is swappable without editing run.py, and wire it into onboarding/env.vps. Overlaps with the config-driven toolset item above - do together.
   - CURRENT STATE: rw2 now runs **Claude (Sonnet)** by default (DEFAULT_RW2_CMD, override with RW2_CMD), NOT Codex - this deployment has no codex login, so rw1 and rw2 are both Claude and the cross-vendor guarantee is dropped. The LOCAL merge-panel rw2 (config.review_codex_cmd, run by merge-verified.sh) still defaults to codex - revisit when codex is back or make it config-driven too.
-- kickoff reuses a stale task worktree: a failed `--new` (authoring added nothing) leaves wt/<task> with a headline-only spec, and a later `kickoff <task>` (no --new) REUSES it (run.py:276 only creates wt if absent) - so clarify sees the stub, not the spec pushed to the hub. kickoff should detect an empty/stub spec in a reused worktree (or a spec on the hub newer than the worktree base) and refresh, or at least warn. Workaround: `rm -rf <AGENT_WORK_ROOT>/wt/<task>` before re-running.
-- kickoff/fullrun interactive gates die on a dropped/closed terminal - auto-wrap in tmux. `scripts/kickoff.sh` runs the `clarify` and `design` (approve) gates in the FOREGROUND - only the loop is `nohup`'d - so an SSH drop (`client_loop: send disconnect: Broken pipe`) kills them before the loop ever detaches, and the task silently never starts. Seen live on `fullrun-s0`: policy classified it high-risk despite `risk: medium` frontmatter (it edits `orchestrator/run.py`), the design gate engaged, ran the explorer (~4 min), then blocked on "Approve this approach?" while SSH was already gone -> design exited on EOF -> kickoff bailed "not detaching" -> no loop, no log, no lock. Fix: a shared `scripts/lib/tmux_wrap.sh` self-wrap that both `kickoff.sh` (VPS) and the future `fullrun.sh` (local driver, fullrun slice S3) source at the very top: `exec tmux new-session -A -s <name> -- "$0" "$@"` (attach-or-create) only when interactive (`$TMUX` unset, `[ -t 1 ]`, tmux present), with a `*_NO_TMUX` escape hatch for CI/headless. The `[ -t 1 ]` guard self-corrects at the boundary: when `fullrun` drives `kickoff` over SSH (no TTY) the kickoff wrap is a no-op, so the two never nest. Wire the `fullrun` half as an acceptance criterion in the fullrun S3 (driver) slice so it is built in, not bolted on afterwards.
+- ~~kickoff reuses a stale task worktree~~ DONE 2026-07-19 (_refresh_stub_spec:
+  clarify pulls the hub spec over an exact --new stub and commits). Original: a failed `--new` (authoring added nothing) leaves wt/<task> with a headline-only spec, and a later `kickoff <task>` (no --new) REUSES it (run.py:276 only creates wt if absent) - so clarify sees the stub, not the spec pushed to the hub. kickoff should detect an empty/stub spec in a reused worktree (or a spec on the hub newer than the worktree base) and refresh, or at least warn. Workaround: `rm -rf <AGENT_WORK_ROOT>/wt/<task>` before re-running.
+- ~~kickoff gates die on a dropped terminal~~ DONE 2026-07-19: scripts/lib/
+  tmux_wrap.sh + kickoff self-wrap (LADDY_NO_TMUX escape hatch); wire the
+  fullrun half when fullrun S3 lands. ALSO: LADDY_ASK_REMOTE=1 makes the gate
+  block on a file, not a TTY. Original: `scripts/kickoff.sh` runs the `clarify` and `design` (approve) gates in the FOREGROUND - only the loop is `nohup`'d - so an SSH drop (`client_loop: send disconnect: Broken pipe`) kills them before the loop ever detaches, and the task silently never starts. Seen live on `fullrun-s0`: policy classified it high-risk despite `risk: medium` frontmatter (it edits `orchestrator/run.py`), the design gate engaged, ran the explorer (~4 min), then blocked on "Approve this approach?" while SSH was already gone -> design exited on EOF -> kickoff bailed "not detaching" -> no loop, no log, no lock. Fix: a shared `scripts/lib/tmux_wrap.sh` self-wrap that both `kickoff.sh` (VPS) and the future `fullrun.sh` (local driver, fullrun slice S3) source at the very top: `exec tmux new-session -A -s <name> -- "$0" "$@"` (attach-or-create) only when interactive (`$TMUX` unset, `[ -t 1 ]`, tmux present), with a `*_NO_TMUX` escape hatch for CI/headless. The `[ -t 1 ]` guard self-corrects at the boundary: when `fullrun` drives `kickoff` over SSH (no TTY) the kickoff wrap is a no-op, so the two never nest. Wire the `fullrun` half as an acceptance criterion in the fullrun S3 (driver) slice so it is built in, not bolted on afterwards.
 
 odlogovat z roota
 
@@ -49,8 +52,7 @@ dva specy merge-hold.md
   the server is ever exposed), and saved notes defaulting to group/other-readable.
   Its spec asked for neither, so no reviewer would ever have caught them - see the
   `decide()` item below.
-- `requirements-dev.txt` pins nothing (pytest/ruff/basedpyright/mcp all floating)
-  and the gate image installs it on the TRUSTED machine. Pin them.
+- ~~`requirements-dev.txt` pins nothing~~ DONE 2026-07-19: pinned.
 - **fullrun-s2 is the safe hand-merge, but it now owns the gate.** Its red suite was
   only the branch-vs-restore mismatch and goes green once the ruleset IS main's. But
   both new rules are trivially bypassable (Rule A by precomputed flags, Rule B by any
@@ -75,7 +77,8 @@ dva specy merge-hold.md
   read them from local.conf/env.local instead.)
 
 
-proč merge-verified.sh nevypisuje co se děje?
+~~proč merge-verified.sh nevypisuje co se děje?~~ DONE 2026-07-19: [gate]
+progress lines in gather_gates.
 ~~merger-verified funguje asi jen na vps branche ... co když to upravím ručně~~
 DONE/ANSWERED 2026-07-19: presne tohle je `merge-verified.sh <task> --local
 <sha|branch|worktree>` - soudí lokálně commitnutou revizi stejnou gate, bez
@@ -99,11 +102,9 @@ kod pro ntfy vytáhout mimo git a odrotovat
   DIVERGED from the live `.laddy/docker/`; root security/ is a byte-identical
   copy of `.laddy/security/`. setup.md now points new targets at the `.laddy/`
   copies; delete the root dirs or refresh them consciously.
-- `local-onboard.sh` writes `<target>/env.local`, but `merge-verified.sh`
-  sources only `<engine>/env.local` (and Python reads no env file itself) -
-  for any target != engine the generated file is never read. Decide the
-  contract (per-target env.local sourced from the target CWD?) and align
-  script + docs.
+- ~~local-onboard/merge-verified env.local contract mismatch~~ DONE
+  2026-07-19: merge-verified.sh prefers the TARGET's env.local, engine's is
+  the fallback.
 - monitoring/README.md installs from `/root/myapp-trusted/.laddy/monitoring/`
   as root - pre-split paths and an unreconciled monitor-as-root story; rewrite
   against the engine `monitoring/` + unprivileged-user topology.
