@@ -78,3 +78,6 @@ merger-verified funguje asi jen na vps branche ... ale co když něco neprojde, 
 
 
 kod pro ntfy vytáhout mimo git a odrotovat
+
+přidat možnost řetězení tasků
+
