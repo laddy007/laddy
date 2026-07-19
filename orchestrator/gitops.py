@@ -126,6 +126,20 @@ class GitOps:
         )
         return wt
 
+    def fetch_origin(self, wt: Path) -> None:
+        git_out(["git", "-C", str(wt), "fetch", "origin"])
+
+    def show_file(self, wt: Path, ref: str, rel_path: str) -> str | None:
+        """Content of ``rel_path`` at ``ref`` (e.g. ``origin/main``), or None
+        when the ref or path does not exist there."""
+        result = subprocess.run(
+            ["git", "-C", str(wt), "show", f"{ref}:{rel_path}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout if result.returncode == 0 else None
+
     def sync_worktree_to_origin(self, wt: Path, task_id: str) -> bool:
         """Fast-forward an EXISTING task worktree to the branch tip on origin
         (fetch first). Returns True when a sync happened, False when origin has

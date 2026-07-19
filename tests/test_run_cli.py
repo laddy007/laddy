@@ -102,6 +102,47 @@ def _mark_clarified(env: dict[str, str], task_id: str) -> None:
     TaskArtifacts(wt, task_id).append_log(action="clarify", outcome="ok")
 
 
+def test_clarify_refreshes_stub_spec_from_hub(remote: Path, tmp_path: Path) -> None:
+    # TODO 2026-07: a failed --new (authoring added nothing) leaves a
+    # headline-only stub in the reused worktree; a later plain kickoff must
+    # read the REAL spec pushed to the hub since, not the stub.
+    from dataclasses import replace
+
+    env = _env(remote, tmp_path)
+    deps_new = replace(_deps([]), author_spec=lambda wt, t, rel: None)
+    assert main(["t9", "--phase", "new"], env=env, deps=deps_new) == 2
+    wt = tmp_path / "work" / "wt" / "t9"
+    spec = wt / TARGET_DIR_NAME / "specs" / "t9.md"
+    assert spec.read_text(encoding="utf-8") == "# t9\n"  # the stub leftover
+
+    _push_spec(remote, tmp_path, "t9", "# t9\n\n## Goal\nthe real ask\n")
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t9", "--phase", "clarify"], env=env, deps=deps) == 0
+    refreshed = spec.read_text(encoding="utf-8")
+    assert "the real ask" in refreshed
+
+
+def test_clarify_leaves_non_stub_spec_alone(remote: Path, tmp_path: Path) -> None:
+    # The refresh is surgical: anything beyond the exact --new seed is the
+    # task's own spec line and must never be clobbered by hub content.
+    env = _env(remote, tmp_path)
+    _push_spec(remote, tmp_path, "t8", "# t8\n\n## Goal\nlocal truth\n")
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t8", "--phase", "clarify"], env=env, deps=deps) == 0
+    seed = tmp_path / "seed-t8"  # reuse the _push_spec clone for the rewrite
+    (seed / TARGET_DIR_NAME / "specs" / "t8.md").write_text(
+        "# t8\n\n## Goal\nhub rewrite\n", encoding="utf-8"
+    )
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "rewrite t8")
+    _git("-C", str(seed), "push", "origin", "HEAD:main")
+    deps2 = _deps([json.dumps({"questions": []})])
+    assert main(["t8", "--phase", "clarify"], env=env, deps=deps2) == 0
+    wt = tmp_path / "work" / "wt" / "t8"
+    spec = (wt / TARGET_DIR_NAME / "specs" / "t8.md").read_text(encoding="utf-8")
+    assert "local truth" in spec and "hub rewrite" not in spec
+
+
 def test_phase_clarify_runs_gate_and_commits(remote: Path, tmp_path: Path) -> None:
     deps = _deps([json.dumps({"questions": ["Scope?"]})])
     rc = main(["t1", "--phase", "clarify"], env=_env(remote, tmp_path), deps=deps)
