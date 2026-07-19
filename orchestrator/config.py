@@ -145,6 +145,10 @@ class OrchestratorConfig:
     # *_cmd knobs above remain the backward-compat fallbacks.
     role_bindings: Mapping[str, RoleBinding] = field(default_factory=dict)
     ntfy_topic: str | None = None
+    # LADDY_ASK_REMOTE=1: interactive gate questions go through the file+ntfy
+    # channel (orchestrator.remote_ask) instead of stdin - answerable from the
+    # phone; the gate no longer dies with the SSH session.
+    ask_remote: bool = False
     # --- Quota-window handling (spec: quota-resume-queue) --------------------
     quota_reset_buffer_s: int = 120
     quota_backoff_minutes: tuple[int, ...] = (15, 30, 60)
@@ -213,6 +217,7 @@ class OrchestratorConfig:
             ),
             role_bindings=_parse_role_bindings(env),
             ntfy_topic=env.get("NTFY_TOPIC") or None,
+            ask_remote=env.get("LADDY_ASK_REMOTE") == "1",
             quota_reset_buffer_s=_positive_int("QUOTA_RESET_BUFFER_SECONDS", "120"),
             quota_backoff_minutes=quota_backoff,
             quota_max_wait_hours=_positive_int("QUOTA_MAX_WAIT_HOURS", "30"),
