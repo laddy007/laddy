@@ -266,3 +266,58 @@ def test_gitops_module_has_no_merge_operation() -> None:
 
     source = Path(gitops_module.__file__).read_text(encoding="utf-8")
     assert "merge" not in source.lower()
+
+
+# --- chained worktrees (queue --chain) ---------------------------------------
+
+
+def _push_branch_commit(remote: Path, tmp_path: Path, branch: str, fname: str) -> str:
+    """Push one commit on <branch>; returns its sha."""
+    seed = tmp_path / f"seed-{branch}"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", branch)
+    (seed / fname).write_text(f"{branch}\n", encoding="utf-8")
+    _git("-C", str(seed), "add", fname)
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", f"work on {branch}")
+    _git("-C", str(seed), "push", "origin", branch)
+    return _git("-C", str(seed), "rev-parse", "HEAD")
+
+
+def test_task_worktree_chain_base_starts_from_predecessor_branch(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    tip = _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    wt = gitops.task_worktree("t2", base_task="t1")
+    assert _git("-C", str(wt), "rev-parse", "HEAD") == tip  # built on t1's tip
+    assert _git("-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD") == "t2"
+
+
+def test_task_worktree_chain_base_missing_is_a_hard_error(gitops: GitOps) -> None:
+    # The predecessor never pushed: silently basing t2 on main would ship it
+    # without the code it was ordered after - refuse instead.
+    with pytest.raises(GitError, match="chain base branch"):
+        gitops.task_worktree("t2", base_task="t1")
+
+
+def test_task_worktree_existing_remote_branch_wins_over_chain_base(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    # t2 already has its own pushed branch (a resumed task): the chain base
+    # must NOT re-point it.
+    _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    t2_tip = _push_branch_commit(remote, tmp_path, "t2", "two.txt")
+    wt = gitops.task_worktree("t2", base_task="t1")
+    assert _git("-C", str(wt), "rev-parse", "HEAD") == t2_tip
+
+
+def test_chain_base_satisfied_true_on_descendant_false_on_stale(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    chained = gitops.task_worktree("t2", base_task="t1")
+    assert gitops.chain_base_satisfied(chained, "t1")
+    # a worktree cut from main (no t1 content) does not satisfy the chain
+    stale = gitops.task_worktree("t3")
+    assert not gitops.chain_base_satisfied(stale, "t1")
+    # an unknown predecessor ref is not satisfied either (no exception)
+    assert not gitops.chain_base_satisfied(stale, "never-pushed")

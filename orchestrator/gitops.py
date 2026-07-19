@@ -76,25 +76,50 @@ class GitOps:
             )
         return task_id
 
-    def task_worktree(self, task_id: str) -> Path:
+    def task_worktree(self, task_id: str, base_task: str | None = None) -> Path:
         """Worktree at the bare `<task>` branch: resume the remote branch if
-        it exists, otherwise branch off origin/<default_branch>."""
+        it exists, otherwise branch off origin/<default_branch>.
+
+        ``base_task`` (chained queue runs) changes ONLY the fresh-start ref:
+        a brand-new task branches off the PREDECESSOR task's pushed branch
+        instead of the default branch, so chained work builds on the chain's
+        code before it lands. An existing worktree or an existing remote
+        `<task>` branch wins over the chain base (the task is already under
+        way on its own line); a MISSING predecessor branch is a hard error -
+        silently basing a chained task on the default branch would ship it
+        without the code it was ordered after.
+        """
         branch = self._branch(task_id)
         base = self.ensure_base()
         wt = self.work_root / "wt" / task_id
         if (wt / ".git").exists():
             return wt
         git_out(["git", "-C", str(base), "worktree", "prune"])
+
+        def _remote_ref_exists(ref: str) -> bool:
+            return (
+                subprocess.run(
+                    ["git", "-C", str(base), "rev-parse", "--verify", "--quiet", ref],
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+
         remote_ref = f"origin/{branch}"
-        has_remote = (
-            subprocess.run(
-                ["git", "-C", str(base), "rev-parse", "--verify", "--quiet", remote_ref],
-                capture_output=True,
-                check=False,
-            ).returncode
-            == 0
-        )
-        start = remote_ref if has_remote else f"origin/{self.default_branch}"
+        if _remote_ref_exists(remote_ref):
+            start = remote_ref
+        elif base_task is not None:
+            chain_ref = f"origin/{self._branch(base_task)}"
+            if not _remote_ref_exists(chain_ref):
+                raise GitError(
+                    f"chain base branch {chain_ref} not found on origin - "
+                    f"predecessor task {base_task!r} has not pushed; run it "
+                    "first (or drop the chain link)"
+                )
+            start = chain_ref
+        else:
+            start = f"origin/{self.default_branch}"
         wt.parent.mkdir(parents=True, exist_ok=True)
         git_out(
             ["git", "-C", str(base), "worktree", "add", "-B", branch, str(wt), start]
@@ -138,6 +163,30 @@ class GitOps:
         git_out(["git", "-C", str(wt), "add", "-A"])
         git_out(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
         return self.head_sha(wt)
+
+    def chain_base_satisfied(self, wt: Path, base_task: str) -> bool:
+        """True iff the predecessor's pushed branch tip is contained in this
+        worktree's HEAD - i.e. the chained task really builds on it.
+
+        Guards the chained-queue invariant for a REUSED worktree: task_worktree
+        only applies the chain base to a fresh worktree, so one created earlier
+        (a clarify run, a plain kickoff) may sit on the default branch or on an
+        outdated predecessor tip. The caller fetches (ensure_base) first so
+        ``origin/<base>`` is current. Containment is read as "no commit is
+        reachable from the base tip that HEAD lacks" (rev-list), a read-only
+        ancestry question - this module still performs no history-joining
+        operation (spec acceptance 6).
+        """
+        ref = f"origin/{self._branch(base_task)}"
+        proc = subprocess.run(
+            ["git", "-C", str(wt), "rev-list", "--count", ref, "^HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return False  # unknown ref -> the chain base is not satisfied
+        return proc.stdout.strip() == "0"
 
     def blob_sha(self, wt: Path, rel_path: str) -> str:
         """The git blob SHA of a working-tree file (``git hash-object``).

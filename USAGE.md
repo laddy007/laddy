@@ -227,6 +227,52 @@ converged task still pushes its own `<task>` branch to the hub. Merge
 them exactly as below — `merge-verified.sh` with no args processes
 every ready branch at once.
 
+**Chained batch (`--chain`).** When the tasks build on each other,
+enqueue them in dependency order with `--chain`:
+
+```bash
+python -m orchestrator.run --phase enqueue step-1 step-2 step-3 --chain
+```
+
+Each chained task's worktree starts from its **predecessor's pushed
+branch** (not from main), so `step-2` reviews and extends `step-1`'s
+code before anything merges. Semantics:
+
+- The chain is exactly the argument order of ONE enqueue call.
+- A link that fails (cap, quota, any non-success terminal) **stops the
+  chain**: its descendants stay queued untouched, with a `[queue]`
+  warning naming why; independent (non-chained) items keep running.
+  Fix or resume the failed link, then `--phase queue` again.
+- A chained task whose worktree already exists but does not contain the
+  predecessor's branch tip (e.g. created earlier from main by a clarify
+  run) is refused, not silently run on the wrong tree — remove
+  `<work_root>/wt/<task>` for a fresh start from the chain base.
+- Merge the results in chain order (`merge-verified.sh` with no args
+  discovers them alphabetically — name chained tasks so the order
+  sorts, or pass them explicitly in order).
+
+### 5b. Start a task from finished code (`--code-ready`)
+
+When you (or another session) already WROTE the code and only want the
+loop's review chain + gates, commit it on the bare `<task>` branch,
+push it to the hub, and kick off with `--code-ready`:
+
+```bash
+# from any clone wired to the hub:
+git checkout -b <task> && git commit -a -m "finished code" \
+  && git push <hub-remote> <task>
+# on the VPS:
+scripts/kickoff.sh <task> --code-ready --skip-clarify
+```
+
+The loop adopts the committed code as round 1's developer output and
+starts directly at fast tests -> rw1 -> rw2 -> the authoritative gate
+-> push. Nothing else changes: clarify/design gates still apply, every
+reviewer still runs, and a rework round (a reviewer's change request)
+still goes to the developer. Refused on a task that already has a
+developer round or a terminal (use `--resume` / a plain re-kickoff for
+those), and on an empty diff (nothing to review).
+
 ### 6. Merge it (on your machine, from the target repo)
 
 Pull nothing, trust nothing from the VPS — just run, from inside the

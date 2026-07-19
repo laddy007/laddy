@@ -1275,3 +1275,138 @@ def test_code_ready_rejected_on_queue_family_phases(
     with pytest.raises(SystemExit):
         main(["t1", "--phase", "resume", "--reason", "x", "--code-ready"],
              env=_env(remote, tmp_path), deps=_deps([]))
+
+
+# --- chained queue runs (enqueue --chain) ------------------------------------
+
+
+def _queued(env: dict[str, str]) -> list[tuple[str, str | None]]:
+    return [
+        (i.task_id, i.base_task)
+        for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()
+    ]
+
+
+def test_enqueue_chain_links_tasks_in_given_order(remote: Path, tmp_path: Path) -> None:
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    _push_spec(remote, tmp_path, "qt3", "# qt3\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "qt3", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert _queued(env) == [("qt1", None), ("qt2", "qt1"), ("qt3", "qt2")]
+
+
+def test_enqueue_chain_creates_no_worktrees(remote: Path, tmp_path: Path) -> None:
+    # A fresh worktree cut from main at enqueue time would later SHADOW the
+    # chain base (an existing worktree wins in task_worktree) - chain
+    # validation must therefore never create one.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert not (Path(env["AGENT_WORK_ROOT"]) / "wt" / "qt1").exists()
+    assert not (Path(env["AGENT_WORK_ROOT"]) / "wt" / "qt2").exists()
+
+
+def test_enqueue_chain_argparse_guards(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    with pytest.raises(SystemExit):  # fewer than two tasks
+        main(["qt1", "--phase", "enqueue", "--chain"], env=env, deps=_deps([]))
+    with pytest.raises(SystemExit):  # only explicit lists can be chained
+        main(["--phase", "enqueue", "--all", "--chain"], env=env, deps=_deps([]))
+    with pytest.raises(SystemExit):  # chain is an enqueue concept
+        main(["qt1", "--phase", "loop", "--chain"], env=env, deps=_deps([]))
+
+
+def test_queue_chain_second_task_builds_on_first_tasks_branch(
+    remote: Path, tmp_path: Path
+) -> None:
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    deps = _deps(
+        ["qt1 dev", verdict_json("APPROVED"), "qt2 dev", verdict_json("APPROVED")],
+        shell=FakeShell(results=[(0, "ok")] * 4),
+        rw2_outputs=[verdict_json("APPROVED"), verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == []
+    # qt2's pushed branch must CONTAIN qt1's tip (it was built on it)
+    qt1_tip = _git("-C", str(remote), "rev-parse", "refs/heads/qt1")
+    contains = subprocess.run(
+        ["git", "-C", str(remote), "rev-list", "refs/heads/qt2"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert qt1_tip in contains
+
+
+def test_queue_chain_failure_stops_descendants_but_not_independents(
+    remote: Path, tmp_path: Path
+) -> None:
+    # qt1 (chain head) dies on a developer error with MAX_LOOPS=1 ->
+    # CAP_REACHED (rc 1, removed from queue). Chained qt2 must be LEFT queued
+    # and never run; independent qt3 must still run to its terminal.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    _push_spec(remote, tmp_path, "qt3", "# qt3\n")
+    env = _env(remote, tmp_path)
+    env["MAX_LOOPS"] = "1"
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert main(["qt3", "--phase", "enqueue", "--skip-clarify"], env=env, deps=_deps([])) == 0
+    deps = _deps(
+        [
+            AgentResult(text="boom", session_id="s1", exit_reason="error", returncode=1),
+            "qt3 dev",
+            verdict_json("APPROVED"),
+        ],
+        shell=FakeShell(results=[(0, "ok")] * 4),
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == [("qt2", "qt1")]  # chain stopped, qt2 kept
+    # the independent qt3 still ran and pushed
+    assert _git("-C", str(remote), "rev-parse", "refs/heads/qt3")
+
+
+def test_queue_chain_stale_worktree_blocks_the_link(
+    remote: Path, tmp_path: Path
+) -> None:
+    # qt2's worktree already exists (cut from main by an earlier clarify) and
+    # does NOT contain qt1's branch: the runner must refuse to run qt2 on the
+    # wrong tree - it stays queued with the chain stopped.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    _mark_clarified(env, "qt2")  # side effect: creates qt2's worktree from main
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    deps = _deps(
+        ["qt1 dev", verdict_json("APPROVED")],
+        shell=FakeShell(results=[(0, "ok")] * 2),
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == [("qt2", "qt1")]  # left queued, chain stopped

@@ -36,6 +36,11 @@ class QueueItem:
     task_id: str
     enqueued_at: str
     skip_clarify: bool
+    # Chain link (enqueue --chain): the IMMEDIATE predecessor task this one
+    # builds on. The queue runner starts this task's worktree from the
+    # predecessor's pushed branch and refuses to run it while the predecessor
+    # has not succeeded. None = independent task (bases on the default branch).
+    base_task: str | None = None
 
 
 class TaskQueue:
@@ -53,6 +58,7 @@ class TaskQueue:
         task_id: str,
         *,
         skip_clarify: bool = False,
+        base_task: str | None = None,
         now_fn: Callable[[], str] = utc_now,
     ) -> QueueItem:
         """Append a task to the FIFO under the single-flight queue lock.
@@ -66,16 +72,16 @@ class TaskQueue:
             if any(item.task_id == task_id for item in self.items()):
                 raise QueueError(f"task {task_id} is already queued")
             path = self.dir / f"{self._next_seq():04d}-{task_id}.json"
-            item = QueueItem(path, task_id, now_fn(), skip_clarify)
+            item = QueueItem(path, task_id, now_fn(), skip_clarify, base_task)
+            payload: dict[str, object] = {
+                "task_id": task_id,
+                "enqueued_at": item.enqueued_at,
+                "skip_clarify": skip_clarify,
+            }
+            if base_task is not None:
+                payload["base_task"] = base_task
             path.write_text(
-                json.dumps(
-                    {
-                        "task_id": task_id,
-                        "enqueued_at": item.enqueued_at,
-                        "skip_clarify": skip_clarify,
-                    }
-                )
-                + "\n",
+                json.dumps(payload) + "\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -90,12 +96,14 @@ class TaskQueue:
             key=lambda p: int(p.name.split("-", 1)[0]),
         ):
             data = json.loads(path.read_text(encoding="utf-8"))
+            base_task = data.get("base_task")
             out.append(
                 QueueItem(
                     path=path,
                     task_id=str(data["task_id"]),
                     enqueued_at=str(data["enqueued_at"]),
                     skip_clarify=bool(data.get("skip_clarify", False)),
+                    base_task=str(base_task) if base_task is not None else None,
                 )
             )
         return out

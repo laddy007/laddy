@@ -42,7 +42,7 @@ from orchestrator.flags import (
     raise_flag,
     resolve_flag,
 )
-from orchestrator.gitops import GitOps
+from orchestrator.gitops import GitError, GitOps
 from orchestrator.handoff import NtfyNotifier
 from orchestrator.loop import Orchestrator, last_terminal_state
 from orchestrator.policy import spec_is_high_risk
@@ -455,11 +455,13 @@ def _phase_loop(
     deps: Deps,
     skip_clarify: bool,
     code_ready: bool = False,
+    base_task: str | None = None,
 ) -> int:
     try:
         with run_lock(config.work_root, task_id):
             return _phase_loop_locked(
-                config, task_id, deps, skip_clarify, code_ready=code_ready
+                config, task_id, deps, skip_clarify,
+                code_ready=code_ready, base_task=base_task,
             )
     except QueueLocked as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -601,9 +603,10 @@ def _phase_loop_locked(
     deps: Deps,
     skip_clarify: bool,
     code_ready: bool = False,
+    base_task: str | None = None,
 ) -> int:
     gitops = deps.make_gitops(config)
-    wt = gitops.task_worktree(task_id)
+    wt = gitops.task_worktree(task_id, base_task=base_task)
     artifacts = TaskArtifacts(wt, task_id)
     if not skip_clarify and not has_clarify(artifacts.read_log()):
         print(
@@ -644,13 +647,23 @@ def _phase_loop_locked(
 
 
 def _phase_enqueue(
-    config: OrchestratorConfig, task_ids: Sequence[str], deps: Deps, skip_clarify: bool
+    config: OrchestratorConfig,
+    task_ids: Sequence[str],
+    deps: Deps,
+    skip_clarify: bool,
+    chain: bool = False,
 ) -> int:
     """Queue READY tasks: spec exists, not draft, clarify already answered
     (a queued task may start at 3am with nobody to ask) - or the Director
     explicitly opts out with --skip-clarify. Validation is all-or-nothing:
     one invalid task means nothing is queued (no surprising partial state).
-    A status: done spec IS allowed here - a deliberate re-run."""
+    A status: done spec IS allowed here - a deliberate re-run.
+
+    ``chain`` links the listed tasks in the given order: each task's worktree
+    starts from its predecessor's pushed branch, and the queue runner stops
+    the chain's remainder when a link fails (the items stay queued for the
+    Director). The chain is exactly the argument order - one enqueue call,
+    one chain."""
     gitops = deps.make_gitops(config)
     queue = TaskQueue(config.work_root)
     already = {item.task_id for item in queue.items()}
@@ -666,17 +679,32 @@ def _phase_enqueue(
             file=sys.stderr,
         )
         return 2
+    # Chain mode must NOT create task worktrees during validation: a fresh
+    # worktree would be cut from the default branch NOW and would later shadow
+    # the chain base (an existing worktree wins over it in task_worktree).
+    # Chain specs are validated from the base clone; the per-task log
+    # (clarify/design markers) is read from an EXISTING worktree only.
+    scan = gitops.refresh_base() if chain else None
     for task_id in task_ids:
-        wt = gitops.task_worktree(task_id)
-        spec, rc = _load_spec(wt, task_id)
+        if scan is not None:
+            root = scan
+            existing_wt = config.work_root / "wt" / task_id
+            entries = (
+                TaskArtifacts(existing_wt, task_id).read_log()
+                if (existing_wt / ".git").exists()
+                else []
+            )
+        else:
+            root = gitops.task_worktree(task_id)
+            entries = TaskArtifacts(root, task_id).read_log()
+        spec, rc = _load_spec(root, task_id)
         if rc != 0:
             print(f"ERROR: {task_id}: invalid spec, nothing queued", file=sys.stderr)
             return rc
         if task_id in already:
             print(f"ERROR: {task_id}: already queued, nothing queued", file=sys.stderr)
             return 2
-        artifacts = TaskArtifacts(wt, task_id)
-        if not skip_clarify and not has_clarify(artifacts.read_log()):
+        if not skip_clarify and not has_clarify(entries):
             print(
                 f"ERROR: {task_id}: clarify gate has not run - run "
                 "`--phase clarify` first, or enqueue with --skip-clarify "
@@ -689,10 +717,10 @@ def _phase_enqueue(
         # _phase_enqueue_all pre-checks, so an explicit-id enqueue cannot slip a
         # high-risk task past the design-approval gate into the queue.
         if spec is not None:
-            spec_text = (wt / _spec_rel(task_id)).read_text(encoding="utf-8")
-            if spec_is_high_risk(load_target_policy(wt), spec_text, spec.risk) and not any(
+            spec_text = (root / _spec_rel(task_id)).read_text(encoding="utf-8")
+            if spec_is_high_risk(load_target_policy(root), spec_text, spec.risk) and not any(
                 e.get("action") == "design" and e.get("outcome") == "approved"
-                for e in artifacts.read_log()
+                for e in entries
             ):
                 print(
                     f"ERROR: {task_id}: high-risk task requires design approval "
@@ -700,9 +728,12 @@ def _phase_enqueue(
                     file=sys.stderr,
                 )
                 return 2
-    for task_id in task_ids:
+    for pos, task_id in enumerate(task_ids):
+        base_task = task_ids[pos - 1] if chain and pos > 0 else None
         try:
-            item = queue.enqueue(task_id, skip_clarify=skip_clarify)
+            item = queue.enqueue(
+                task_id, skip_clarify=skip_clarify, base_task=base_task
+            )
         except QueueError as exc:
             # only reachable via a race with another queue writer between the
             # validation loop above and here - all-or-nothing still holds for
@@ -823,7 +854,15 @@ def _phase_enqueue_pick(config: OrchestratorConfig, deps: Deps, skip_clarify: bo
 def _phase_queue(config: OrchestratorConfig, deps: Deps) -> int:
     """Single-flight queue runner: process items FIFO until empty. An item
     is removed after ANY terminal state (a failed task is not re-queued -
-    the Director gets the ntfy + handback exactly as with a direct run)."""
+    the Director gets the ntfy + handback exactly as with a direct run).
+
+    Chain semantics (enqueue --chain): an item carrying ``base_task`` runs
+    only after that predecessor SUCCEEDED in this pass (pushed its branch).
+    When a link fails, is deferred, or is missing, every transitive descendant
+    is left in the queue with a warning - chained tasks build on their
+    predecessor's code, so running them without it would review the wrong
+    tree. Independent items keep running; the Director decides about the
+    stopped chain (fix + re-run --phase queue, or dequeue by hand)."""
     queue = TaskQueue(config.work_root)
     # rc==4 means the task's per-task run lock is held by a concurrent direct
     # run: it was SKIPPED, not run to a terminal, so it must stay in the queue
@@ -831,6 +870,8 @@ def _phase_queue(config: OrchestratorConfig, deps: Deps) -> int:
     # Track deferred ids so we skip past them to the next runnable item instead
     # of busy-looping on items[0], and stop when only deferred items remain.
     deferred: set[str] = set()
+    # task_id -> why its chain descendants must not run in this pass
+    blocked: dict[str, str] = {}
     try:
         with queue.lock():
             while True:
@@ -839,22 +880,74 @@ def _phase_queue(config: OrchestratorConfig, deps: Deps) -> int:
                     if deferred:
                         print(
                             f"[queue] {len(deferred)} task(s) left in queue "
-                            "(run lock held elsewhere); re-run --phase queue later"
+                            "(run lock held / chain stopped); re-run "
+                            "--phase queue later"
                         )
                     else:
                         print("[queue] empty, done")
                     return 0
                 item = items[0]
-                print(f"[queue] running {item.task_id}")
-                rc = _phase_loop(config, item.task_id, deps, skip_clarify=True)
+                if item.base_task is not None and item.base_task in blocked:
+                    print(
+                        f"[queue] WARNING: {item.task_id} LEFT in queue - "
+                        f"chain stopped: predecessor {item.base_task} "
+                        f"{blocked[item.base_task]}"
+                    )
+                    blocked[item.task_id] = (
+                        f"blocked (upstream {item.base_task} "
+                        f"{blocked[item.base_task]})"
+                    )
+                    deferred.add(item.task_id)
+                    continue
+                # Chained item with a REUSED worktree: task_worktree applies
+                # the chain base only to a fresh one, so a worktree created
+                # earlier (clarify, a plain kickoff) may not contain the
+                # predecessor's tip - running it would review the wrong tree.
+                # Fail closed: leave it queued and stop the chain.
+                existing_wt = config.work_root / "wt" / item.task_id
+                if item.base_task is not None and (existing_wt / ".git").exists():
+                    gitops = deps.make_gitops(config)
+                    gitops.ensure_base()  # fetch: origin/<base> must be current
+                    if not gitops.chain_base_satisfied(existing_wt, item.base_task):
+                        print(
+                            f"[queue] WARNING: {item.task_id} LEFT in queue - "
+                            f"existing worktree {existing_wt} does not contain "
+                            f"chain base '{item.base_task}'; remove the "
+                            "worktree for a fresh start from the chain base"
+                        )
+                        blocked[item.task_id] = "failed (stale worktree without chain base)"
+                        deferred.add(item.task_id)
+                        continue
+                print(
+                    f"[queue] running {item.task_id}"
+                    + (f" (chained on {item.base_task})" if item.base_task else "")
+                )
+                try:
+                    rc = _phase_loop(
+                        config, item.task_id, deps,
+                        skip_clarify=True, base_task=item.base_task,
+                    )
+                except GitError as exc:
+                    # e.g. the chain base branch is missing on origin: the
+                    # item never ran, so it STAYS queued and stops its chain.
+                    print(f"ERROR: {item.task_id}: {exc}", file=sys.stderr)
+                    blocked[item.task_id] = "failed (chain base unavailable)"
+                    deferred.add(item.task_id)
+                    continue
                 print(f"[queue] {item.task_id} finished rc={rc}")
                 if rc == 4:
                     print(
                         f"[queue] WARNING: {item.task_id} skipped and LEFT in "
                         "queue - another loop holds its run lock"
                     )
+                    blocked[item.task_id] = "deferred (run lock held elsewhere)"
                     deferred.add(item.task_id)
                     continue
+                if rc != 0:
+                    # The task reached a terminal (ntfy + handback fired), so
+                    # per queue semantics it leaves the queue - but its branch
+                    # is not a trustworthy chain base, so descendants stop.
+                    blocked[item.task_id] = f"failed (rc={rc})"
                 queue.remove(item)
     except QueueLocked as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -868,7 +961,8 @@ def _phase_queue_list(config: OrchestratorConfig) -> int:
         return 0
     for pos, item in enumerate(items, 1):
         flags = ", skip-clarify" if item.skip_clarify else ""
-        print(f"{pos:2d}. {item.task_id}  (enqueued {item.enqueued_at}{flags})")
+        chain = f", chained on {item.base_task}" if item.base_task else ""
+        print(f"{pos:2d}. {item.task_id}  (enqueued {item.enqueued_at}{flags}{chain})")
     return 0
 
 
@@ -896,6 +990,13 @@ def main(
         help="loop phase: the finished code is already committed on the task "
         "branch - adopt it as round 1's developer output and start at the "
         "review chain (fast tests -> rw1 -> ...)",
+    )
+    parser.add_argument(
+        "--chain",
+        action="store_true",
+        help="enqueue phase: link the listed tasks in the given order - each "
+        "task's worktree starts from its predecessor's pushed branch, and a "
+        "failed link stops the chain's remainder (items stay queued)",
     )
     parser.add_argument(
         "--reason", help="resume phase: the Director's note (why the task is resumed)"
@@ -967,6 +1068,12 @@ def main(
             parser.error(
                 "--phase enqueue takes EXACTLY ONE of: explicit task ids, --pick, --all"
             )
+        if args.chain and not args.task_ids:
+            parser.error("--chain requires an explicit ordered task list")
+        if args.chain and len(args.task_ids) < 2:
+            parser.error("--chain needs at least two tasks to link")
+    elif args.chain:
+        parser.error("--chain is only valid with --phase enqueue")
     if args.phase in ("queue", "queue-list", "status") and args.task_ids:
         parser.error(f"--phase {args.phase} takes no task id")
     # kickoff.sh forwards the same args to clarify/design/loop, so those
@@ -985,7 +1092,10 @@ def main(
             return _phase_enqueue_all(config, deps, skip_clarify=args.skip_clarify)
         if args.pick:
             return _phase_enqueue_pick(config, deps, skip_clarify=args.skip_clarify)
-        return _phase_enqueue(config, args.task_ids, deps, skip_clarify=args.skip_clarify)
+        return _phase_enqueue(
+            config, args.task_ids, deps,
+            skip_clarify=args.skip_clarify, chain=args.chain,
+        )
     if args.phase == "queue":
         return _phase_queue(config, deps)
     if args.phase == "queue-list":
