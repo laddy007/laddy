@@ -1168,3 +1168,110 @@ def test_resume_path_does_not_push_or_merge_or_skip_review(remote: Path, tmp_pat
     assert "code_sha" not in src
     # it delegates to the normal loop (which re-runs rw1/rw2/authoritative)
     assert "_phase_loop(" in src
+
+
+# --- code-ready kickoff (--code-ready) ---------------------------------------
+
+
+def _push_task_branch_code(remote: Path, tmp_path: Path, task_id: str) -> None:
+    """Commit finished code on the bare <task> branch, as the Director would
+    before a kickoff --code-ready."""
+    seed = tmp_path / f"code-{task_id}"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", task_id)
+    (seed / "feature.py").write_text("X = 1\n", encoding="utf-8")
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "finished code")
+    _git("-C", str(seed), "push", "origin", task_id)
+
+
+def test_code_ready_adopts_branch_code_and_starts_at_review_chain(
+    remote: Path, tmp_path: Path
+) -> None:
+    # Finished code sits committed on the t1 branch. --code-ready must adopt it
+    # as round 1's developer output: the FIRST runner call is rw1 (its verdict
+    # is the only scripted output - a developer call would consume it and fail),
+    # and the run converges to a terminal push.
+    env = _env(remote, tmp_path)
+    _push_task_branch_code(remote, tmp_path, "t1")
+    deps = _deps(
+        [verdict_json("APPROVED")],  # rw1 ONLY - no developer output scripted
+        shell=FakeShell(results=[(0, "ok"), (0, "ok")]),  # fast + docker gate
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=deps,
+    )
+    assert rc == 0
+    log = _task_log(env, "t1")
+    devs = [e for e in log if e.get("action") == "developer"]
+    assert len(devs) == 1
+    assert devs[0]["round"] == 1
+    assert "code-ready" in str(devs[0].get("detail"))
+    assert any(e.get("action") == "rw1" for e in log)  # review chain ran
+
+
+def test_code_ready_refuses_fresh_task_without_branch_code(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # No committed change on the t1 branch -> nothing to review; refuse before
+    # any event is appended and before any runner is consulted.
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    assert "no committed change" in capsys.readouterr().err
+    assert [e for e in _task_log(env, "t1") if e.get("action") == "developer"] == []
+
+
+def test_code_ready_refuses_task_already_under_way(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # A developer round already ran: --code-ready must not re-label history.
+    env = _env(remote, tmp_path)
+    _push_task_branch_code(remote, tmp_path, "t1")
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("t1")
+    TaskArtifacts(wt, "t1").append_log(action="developer", outcome="ok", round=1)
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "already has a developer round" in err
+    log = _task_log(env, "t1")
+    assert len([e for e in log if e.get("action") == "developer"]) == 1  # unchanged
+
+
+def test_code_ready_refuses_finished_task_points_at_resume(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("t1")
+    TaskArtifacts(wt, "t1").append_log(action="terminal", outcome="CAP_REACHED")
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    assert "resume" in capsys.readouterr().err
+
+
+def test_code_ready_rejected_on_queue_family_phases(
+    remote: Path, tmp_path: Path
+) -> None:
+    # kickoff forwards the same args to clarify/design/loop (accepted there);
+    # the queue family and resume must refuse it - their start semantics differ.
+    with pytest.raises(SystemExit):
+        main(["t1", "--phase", "enqueue", "--code-ready"],
+             env=_env(remote, tmp_path), deps=_deps([]))
+    with pytest.raises(SystemExit):
+        main(["t1", "--phase", "resume", "--reason", "x", "--code-ready"],
+             env=_env(remote, tmp_path), deps=_deps([]))

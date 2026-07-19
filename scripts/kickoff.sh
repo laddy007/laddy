@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# kickoff.sh <task> [--new] [--skip-clarify]
+# kickoff.sh <task> [--new] [--skip-clarify] [--code-ready]
 # kickoff.sh <task> --resume --reason "<what changed>"
 #
 # VPS entrypoint for the Python dev-loop orchestrator (design doc S11).
@@ -13,6 +13,11 @@ set -euo pipefail
 # it skips clarify/design (the task is already under way), appends one logged
 # director_resume event carrying --reason, and detaches the loop. All policy
 # (which terminals are resumable, the mandatory reason) lives in Python.
+#
+# --code-ready starts a FRESH task on code already committed on the '<task>'
+# branch: the loop adopts that code as round 1's developer output and begins
+# at the review chain (fast tests -> rw1 -> ...). Clarify/design gates still
+# apply; rides along in REST (the Python loop phase owns the validation).
 #
 # Config comes from <engine-dir>/env.vps (exported here verbatim); see
 # env.vps.example for the knobs (AGENT_REPO_URL, AGENT_WORK_ROOT,

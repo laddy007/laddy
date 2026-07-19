@@ -449,13 +449,78 @@ def _phase_resume(
     return _phase_loop(config, task_id, deps, skip_clarify=True)
 
 
-def _phase_loop(config: OrchestratorConfig, task_id: str, deps: Deps, skip_clarify: bool) -> int:
+def _phase_loop(
+    config: OrchestratorConfig,
+    task_id: str,
+    deps: Deps,
+    skip_clarify: bool,
+    code_ready: bool = False,
+) -> int:
     try:
         with run_lock(config.work_root, task_id):
-            return _phase_loop_locked(config, task_id, deps, skip_clarify)
+            return _phase_loop_locked(
+                config, task_id, deps, skip_clarify, code_ready=code_ready
+            )
     except QueueLocked as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 4
+
+
+def _adopt_code_ready(gitops: GitOps, wt: Path, task_id: str) -> int:
+    """--code-ready: adopt ALREADY-COMMITTED code on the task branch as round
+    1's developer output, so the loop starts at the review chain (fast tests ->
+    rw1 -> ...) instead of writing code (kickoff-on-finished-code).
+
+    Validation is all-or-nothing - NOTHING is appended until every check
+    passes: the task must be FRESH (no developer round, no recorded terminal -
+    a task already under way resumes by re-kickoff or --phase resume, never by
+    re-labeling its history), and the synced branch must actually differ from
+    the base branch (an empty diff means there is nothing to review - refusing
+    beats burning a review chain on it). Only then is one ``developer`` event
+    appended (round 1, with a detail naming this adoption) and committed; the
+    pure derivation then routes to fast_tests exactly as if a developer round
+    had converged. No reviewer, gate, or policy step is skipped.
+    """
+    artifacts = TaskArtifacts(wt, task_id)
+    entries = artifacts.read_log()
+    if any(e.get("action") == "developer" for e in entries):
+        print(
+            f"ERROR: {task_id} already has a developer round - --code-ready "
+            "adopts pre-existing code on a FRESH task only; re-kickoff or "
+            "--phase resume continues an existing one.",
+            file=sys.stderr,
+        )
+        return 2
+    if last_terminal_state(entries) is not None:
+        print(
+            f"ERROR: {task_id} already reached a terminal - --code-ready "
+            "adopts pre-existing code on a FRESH task only; use --phase "
+            "resume to continue a finished task.",
+            file=sys.stderr,
+        )
+        return 2
+    # The finished code lives on the hub branch (committed there by the
+    # Director); the reused worktree may predate that push, so sync first -
+    # same reasoning as the resume channel's sync.
+    gitops.sync_worktree_to_origin(wt, task_id)
+    if not gitops.changed_files(wt, task_id):
+        print(
+            f"ERROR: {task_id} has no committed change against "
+            f"{gitops.default_branch} - --code-ready needs the finished code "
+            f"committed on the '{task_id}' branch (push it to the hub first).",
+            file=sys.stderr,
+        )
+        return 2
+    artifacts.append_log(
+        action="developer",
+        outcome="ok",
+        round=1,
+        detail="code-ready kickoff: pre-existing committed code adopted; "
+        "developer phase skipped, review chain runs in full",
+    )
+    gitops.commit_all(wt, f"Adopt pre-existing code for {task_id} (--code-ready)")
+    print(f"[code-ready] {task_id}: adopted committed code; starting at the review chain")
+    return 0
 
 
 def _build_orchestrator(
@@ -531,7 +596,11 @@ def _phase_design(config: OrchestratorConfig, task_id: str, deps: Deps) -> int:
 
 
 def _phase_loop_locked(
-    config: OrchestratorConfig, task_id: str, deps: Deps, skip_clarify: bool
+    config: OrchestratorConfig,
+    task_id: str,
+    deps: Deps,
+    skip_clarify: bool,
+    code_ready: bool = False,
 ) -> int:
     gitops = deps.make_gitops(config)
     wt = gitops.task_worktree(task_id)
@@ -559,6 +628,12 @@ def _phase_loop_locked(
             file=sys.stderr,
         )
         return 2
+    # After the clarify/draft/design validations (a code-ready task honors
+    # every gate the written-by-the-loop path does), before the loop starts.
+    if code_ready:
+        rc = _adopt_code_ready(gitops, wt, task_id)
+        if rc != 0:
+            return rc
     artifacts.write_json(ROLE_PLAN, spec.role_plan(task_id))
     orchestrator = _build_orchestrator(config, deps, gitops, wt, spec)
     terminal = orchestrator.run(task_id)
@@ -815,6 +890,14 @@ def main(
     parser.add_argument("--new", action="store_true", help="author the spec interactively first")
     parser.add_argument("--skip-clarify", action="store_true")
     parser.add_argument(
+        "--code-ready",
+        dest="code_ready",
+        action="store_true",
+        help="loop phase: the finished code is already committed on the task "
+        "branch - adopt it as round 1's developer output and start at the "
+        "review chain (fast tests -> rw1 -> ...)",
+    )
+    parser.add_argument(
         "--reason", help="resume phase: the Director's note (why the task is resumed)"
     )
     # --phase flag: raise (--kind/--summary/...) or resolve (--resolve) a flag
@@ -886,6 +969,13 @@ def main(
             )
     if args.phase in ("queue", "queue-list", "status") and args.task_ids:
         parser.error(f"--phase {args.phase} takes no task id")
+    # kickoff.sh forwards the same args to clarify/design/loop, so those
+    # phases ACCEPT (and ignore) --code-ready; refuse it only where it could
+    # mislead - the queue family and resume have their own start semantics.
+    if args.code_ready and args.phase in (
+        "new", "resume", "enqueue", "queue", "queue-list", "status", "flag", "flags"
+    ):
+        parser.error(f"--code-ready is not valid with --phase {args.phase}")
 
     config = OrchestratorConfig.from_env(env if env is not None else os.environ)
     deps = deps or Deps()
@@ -921,7 +1011,10 @@ def main(
         return _phase_design(config, task_id, deps)
     if args.phase == "resume":
         return _phase_resume(config, task_id, deps, args.reason)
-    return _phase_loop(config, task_id, deps, skip_clarify=args.skip_clarify)
+    return _phase_loop(
+        config, task_id, deps,
+        skip_clarify=args.skip_clarify, code_ready=args.code_ready,
+    )
 
 
 if __name__ == "__main__":
