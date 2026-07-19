@@ -176,6 +176,16 @@ def test_dependency_and_payment_files_classify_l3() -> None:
     assert classify_blast_radius(["frontend/pnpm-lock.yaml"]) == L3
 
 
+def test_note_server_is_engine_sensitive() -> None:
+    # note_server/ is product code living in the engine repo; it must ride L3
+    # like every other engine code dir when laddy dogfoods itself - before the
+    # glob landed it was the one code dir auto-merging as L2.
+    from orchestrator.policy import L3
+
+    assert classify_blast_radius(["note_server/server.py"]) == L3
+    assert classify_blast_radius(["note_server/sub/util.py"]) == L3
+
+
 def test_gate_own_security_ruleset_is_sensitive() -> None:
     # FINDING 4: the gate's own semgrep ruleset (<agent-dir>/security/*) must be
     # sensitive - a branch that weakens the rules must not auto-merge as L2,

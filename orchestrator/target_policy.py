@@ -167,6 +167,11 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "docker/*",
     "security/*",
     "skills/*",
+    # note_server is product code living in the engine repo (pending its move
+    # to its own target); without this glob it was the ONE code dir riding L2
+    # auto-merge while every sibling is L3.
+    "note_server/*",
+    "note_server/**/*",
     # The gate infra + oracle data + THIS policy file, in the target's agent dir.
     # policy.toml is engine-sensitive so a branch cannot weaken its OWN
     # classification: editing it is L3, and merge_check reads it from trusted main.
