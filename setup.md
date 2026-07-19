@@ -121,6 +121,22 @@ every `LADDY_USERS` entry with no args): if any of them has a loop
 running or a dirty `~/laddy`, nothing is upgraded. It only ever touches
 the engine checkout — never the hub, never target content.
 
+## 4b. Wire the trusted side (`local-onboard.sh`)
+
+The mirror step on **your** machine, once per target project:
+
+```bash
+scripts/local-onboard.sh    # interactive on first run; saves <engine>/local.conf
+```
+
+Per `LADDY_TARGETS` entry (`project:ssh_alias:hub_path:local_repo_path`,
+see `local.conf.example`) it verifies the local checkout and SSH
+connectivity, adds/updates the `laddy` remote pointing at the hub,
+verifies `git fetch laddy`, and seeds an `env.local` from the template
+(review `TEST_COMMANDS` / the agent CLI commands by hand afterwards).
+Idempotent — re-run any time; it never clones and never touches GitHub.
+`merge-verified.sh` depends on this wiring being in place.
+
 ## 5. Seed the target's `.laddy/` directory
 
 A target project needs its own `.laddy/{specs,tasks,docker,security,policy.toml}`
@@ -132,10 +148,11 @@ committed before the first task can run:
   empty (a `.gitkeep` is enough).
 - `.laddy/docker/` and `.laddy/security/` — the containerized gate
   config the loop and `merge-verified.sh` both run. Copy this engine
-  repo's `docker/` and `security/` as your starting point and commit
-  them into the target repo; adjust `docker/compose.test.yml` /
-  `security/semgrep.yml` for the target's own stack (test DB, service
-  image, language-specific rules) as needed.
+  repo's own live `.laddy/docker/` and `.laddy/security/` as your
+  starting point (the top-level `docker/`/`security/` dirs are stale
+  pre-split templates) and commit them into the target repo; adjust
+  `docker/compose.test.yml` / `security/semgrep.yml` for the target's
+  own stack (test DB, service image, language-specific rules) as needed.
 - `.laddy/policy.toml` — the per-target merge policy (this engine repo's
   own `.laddy/policy.toml` is a commented worked example). `test_dirs`
   is a **required** key (a missing key fails the merge closed): it only

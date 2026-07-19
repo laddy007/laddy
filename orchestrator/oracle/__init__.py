@@ -1,6 +1,7 @@
 """Oracle: post-merge, non-blocking measurement of the dev-loop gates.
 
-Design: docs/development/superpowers/specs/2026-07-12-self-improvement-oracle-design.md
+Design rationale lives in commit history and oracle/classes.md (this
+repo carries no docs/ tree by design).
 
 The gates (rw1, rw2, merge-rw) DECIDE go/no-go in the hot path; the oracle
 MEASURES them from outside, after merge, with a fresh context. It never

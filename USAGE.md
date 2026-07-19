@@ -39,17 +39,17 @@ any kind.
 
 ## Quick flow — the whole loop, copy-paste
 
-Two tracks: **manual** (today) and **fullrun** (one command, once its driver
-lands — currently being built, slice S3). Commands below use this deployment:
-local engine at `/mnt/c/myprogramfiles/laddy` (machine DELLi), VPS user `laddy`
-(ssh alias `vps-laddy`, engine `~/laddy`, hub `~/repo_laddy/hub.git`). For
-another user swap `laddy` for their `LADDY_USERS` entry.
+Commands below use an example deployment: engine checked out locally, VPS
+user `laddy` (ssh alias `vps-laddy`, engine `~/laddy`, hub
+`~/repo_laddy/hub.git`). For another user swap `laddy` for their
+`LADDY_USERS` entry.
 
 ### A. Manual flow (today)
 
 ```bash
-# 1. Author the spec — locally: hand-write .laddy/specs/<task>.md
-#    (or skip to step 4 with `kickoff.sh <task> --new` to co-author on the VPS).
+# 1. Author the spec — locally: `claude "/create-spec <task>"` from the target
+#    repo (or hand-write .laddy/specs/<task>.md, or skip to step 4 with
+#    `kickoff.sh <task> --new` to co-author on the VPS).
 
 # 2. Spec onto the hub (skip if you used --new):
 git add .laddy/specs/<task>.md && git commit -m "spec: <task>"
@@ -83,21 +83,13 @@ cd ~/laddy && ./scripts/kickoff.sh <task>   # + --skip-clarify to skip Q&A
 ./scripts/push-hub.sh laddy
 ```
 
-### B. fullrun (once it lands — being built, slice S3)
+### B. fullrun — PLANNED, not yet available
 
-One **local** command wraps steps 2–7: `push → kickoff on VPS → poll → rw3
-(trusted cross-vendor review that feeds findings back to the developer) →
-merge-or-hold`, looping until merged/held, and **pausing + ntfy** at the human
-gates (L3 design approval, L3 merge confirm, the GitHub-push y/N).
-
-```bash
-./scripts/fullrun.sh <task>       # one task
-./scripts/fullrun.sh <project>    # all of a project's ready tasks
-./scripts/fullrun.sh              # = all: every project's every ready task
-```
-
-Both `fullrun` and `kickoff` will **auto-wrap in tmux** (shared
-`scripts/lib/tmux_wrap.sh`, on the TODO), so step 4's manual tmux goes away.
+**None of this exists yet** (no `fullrun.sh`, no `tmux_wrap.sh`, no rw3 —
+slice S3 on the TODO). When it lands, one **local** command will wrap steps
+2–7 (`push → kickoff on VPS → poll → rw3 trusted review → merge-or-hold`),
+pausing + ntfy at the human gates, and both `fullrun` and `kickoff` will
+auto-wrap themselves in tmux. Until then use track A.
 
 ---
 
@@ -107,12 +99,16 @@ Setup is a one-time thing per VPS user, done by the Director — see
 `setup.md`: root bootstrap (unix user, docker, cgroup slice), a
 per-user bare hub (`~/repo_<project>/hub.git`), an empty engine checkout
 promoted by `scripts/upgrade_laddy.sh`, and the target project's `main`
-seeded onto the hub. On **your** machine you only need Docker running
-plus `git` / `python3` / the `claude` and `codex` CLIs — the merge
-gate's scanners (`diff-cover`, `semgrep`, `gitleaks`) and its test
-Postgres run **inside the container**, not on your host. The VPS never
-holds a GitHub credential — merging, and pushing to GitHub, only ever
-happen on your machine.
+seeded onto the hub. The **trusted/local side** has its own one-shot
+onboarder: `scripts/local-onboard.sh` wires each target checkout to its
+hub (adds the `laddy` remote, verifies the fetch, seeds an `env.local`
+from the template) driven by `LADDY_TARGETS` in `<engine>/local.conf`
+(schema: `local.conf.example`; re-runs are idempotent). On **your**
+machine you only need Docker running plus `git` / `python3` / the
+`claude` and `codex` CLIs — the merge gate's scanners (`diff-cover`,
+`semgrep`, `gitleaks`) and its test Postgres run **inside the
+container**, not on your host. The VPS never holds a GitHub credential —
+merging, and pushing to GitHub, only ever happen on your machine.
 
 ---
 
@@ -193,10 +189,14 @@ fires when it finishes.
 
 **Where it ends up:**
 
-| Terminal state | Meaning |
-|---|---|
-| pushed `<task>` to the hub | Converged. Ready for you to merge (step 6). |
-| `CAP_REACHED` / `ESCALATED_DEADLOCK` | Did **not** converge. Nothing pushed; a `handback.md` on the VPS explains what was tried. |
+| Terminal state | Pushed? | Re-kickoff | Meaning |
+|---|---|---|---|
+| pushed `<task>` to the hub | yes | sticky (use `--resume`) | Converged. Ready for you to merge (step 6). |
+| `CAP_REACHED` / `ESCALATED_DEADLOCK` | no | sticky (use `--resume`) | Did **not** converge; `handback.md` explains what was tried. |
+| `INVESTIGATOR_MALFORMED` / `VERIFY_MALFORMED` | yes (handback) | sticky, `--resume` does **not** apply | A report-only role produced no usable report — start a fresh task. |
+| `QUOTA_TIMEOUT` | yes (handback) | **resumes automatically** | Agent quota/rate limit never recovered in the window. Retryable: a plain re-kickoff continues it. |
+| `INTERNAL_ERROR` | no | **resumes automatically** | The loop itself crashed. Retryable: a plain re-kickoff continues it. |
+| `PATH_GUARD_VIOLATION` | no | **not resumable** | The tree carries forbidden edits — discard the branch and restart. |
 
 All artifacts (the iteration log, reviewer verdicts, a human summary,
 `merge-decision.json`) live under `.laddy/tasks/<task>/` on the branch.
@@ -323,6 +323,19 @@ deleted — they wait for you, with a `merge-hold.md` digest in
 **Dry run:** add `--no-input` to see what *would* auto-merge without
 prompting or pushing (it holds every sensitive change and never pushes).
 
+**Hand-fixed a held branch? (`--local <ref>`)** When the gate held a task
+BROKEN and you fixed it yourself with ordinary git, judge your
+locally-committed revision through the same trusted gate with
+
+```bash
+scripts/merge-verified.sh <task> --local <sha|branch|worktree-path>
+```
+
+No VPS round trip, no fetch — the hub remote is optional in this mode. It
+does not trust the code more, it trusts the route: you are the trusted
+author, the same gates judge the diff, and the judged sha is the merged
+sha. The tool itself still never edits code.
+
 ### 7. Keep the hub current
 
 `merge-verified.sh` only pushes `main` to **GitHub**. It never touches
@@ -341,7 +354,9 @@ the hub: skip this and the next task starts from stale code.
 
 A task that stopped — hit the iteration cap (`CAP_REACHED`), deadlocked
 (`ESCALATED_DEADLOCK`), or landed at `stop_before_merge`/`PUSHED` — is
-**sticky**: a plain re-kickoff no-ops. When the reason it stopped is that the
+**sticky**: a plain re-kickoff no-ops. (The retryable terminals
+`QUOTA_TIMEOUT` and `INTERNAL_ERROR` are the exception — those a plain
+re-kickoff resumes without `--resume`.) When the reason it stopped is that the
 **spec was wrong** (the code was fine, the ask was incomplete), there is one
 explicit, logged way to put it back to work:
 

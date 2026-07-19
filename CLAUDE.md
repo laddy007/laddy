@@ -52,8 +52,10 @@ files are fair game.
 ## Architecture (navigation, not authority)
 
 The engine drives a loop of AI agents -- developer -> fast tests -> reviewer 1
-(Claude) -> reviewer 2 (cross-vendor) -- bouncing on failure or change-request
-until convergence, escalating a deadlock to a senior reviewer. It runs over a
+(Claude) -> reviewer 2 (cross-vendor when Codex is configured; the role ->
+vendor binding is config, and rw2 currently defaults to Claude/Sonnet) --
+bouncing on failure or change-request until convergence, escalating a deadlock
+to a senior reviewer. It runs over a
 **target** repo and holds no product code of its own.
 
 - `orchestrator/` -- the engine: deterministic policy, state, and decisions.

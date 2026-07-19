@@ -19,7 +19,7 @@
 - máme roli rw?
 - Onboarding should INSTALL the agent CLIs, not just warn (vps-onboard.sh:212-213 only warn when claude/codex are missing). Install the binaries system-wide in the root phase (the binary is not the secret); the login/token stays a manual per-user step (interactive auth, must live in /home/<user>/.claude, never root's). Make the installed tool set CONFIG-DRIVEN, not hardcoded claude/codex - a list (in vps.conf or a manifest) of {tool -> install command} so tools can be swapped (e.g. replace codex) or added later without editing the script.
   - Verified install methods (reviewed on the live VPS 2026-07): Claude Code via Anthropic's official signed APT repo - key `https://downloads.claude.ai/keys/claude-code.asc` into /etc/apt/keyrings, `signed-by=` repo `https://downloads.claude.ai/claude-code/apt/stable stable main`, pin fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`, then `apt install claude-code`. Codex via `npm i -g @openai/codex`. Install-ONLY (drop the one-off per-user removal/migration steps from the manual script). Coordinate with the rootless-docker rewrite below - both touch the root phase, so do them in one pass.
-- VPS loop has NO worktree setup step: DEFAULT_FAST_COMMANDS activates `.venv` (`. .venv/bin/activate && ... pytest`) but nothing on the VPS creates it (env.vps has no SETUP_COMMANDS; loop/gitops/kickoff never run venv/pip). The local merge node HAS SETUP_COMMANDS (env.local) - the VPS side is missing the equivalent. Either add a SETUP_COMMANDS step to the loop (run once per fresh worktree before fast_tests) or document that TEST_COMMANDS on the VPS must bootstrap its own env. Also needs `python3-venv` on the box.
+- VPS loop has NO worktree setup step: DEFAULT_FAST_COMMANDS activates `.venv` (`. .venv/bin/activate && ... pytest`) but nothing on the VPS creates it (env.vps has no SETUP_COMMANDS; loop/gitops/kickoff never run venv/pip). NOTE (2026-07-19): `SETUP_COMMANDS` is read by NOTHING anywhere - it was a dead knob in env.local.example (now removed); there is no setup step on either node. Either add a real SETUP_COMMANDS step to the loop (run once per fresh worktree before fast_tests) or document that TEST_COMMANDS must bootstrap its own env. Also needs `python3-venv` on the box.
 - Config ergonomics: let LADDY_USERS take just a PROJECT name and derive user/ssh-alias(`vps-<project>`)/engine-path(`/home/<project>/laddy`) by convention (they are 1:1 today), keeping explicit 4-field overrides optional. Change lives in lib/laddy_users.sh.
 - Role -> vendor binding is HALF hardcoded: the CLI *commands* are config (env.vps CLAUDE_CMD/CODEX_CMD/SENIOR_CMD/REVIEW_*/RW2_CMD), but WHICH vendor runs each role is fixed in run.py (developer/rw1/clarify/senior/rw2 -> ClaudeRunner). Make the role->runner mapping config-driven so any role's vendor is swappable without editing run.py, and wire it into onboarding/env.vps. Overlaps with the config-driven toolset item above - do together.
   - CURRENT STATE: rw2 now runs **Claude (Sonnet)** by default (DEFAULT_RW2_CMD, override with RW2_CMD), NOT Codex - this deployment has no codex login, so rw1 and rw2 are both Claude and the cross-vendor guarantee is dropped. The LOCAL merge-panel rw2 (config.review_codex_cmd, run by merge-verified.sh) still defaults to codex - revisit when codex is back or make it config-driven too.
@@ -70,11 +70,102 @@ dva specy merge-hold.md
   non-retryable failures - deliberate follow-up to `agent-error-visibility`.
 - `scripts/local-task.sh` defaults pre-date the engine/target split:
   `LOCAL_SOURCE_REPO=/mnt/c/myapp`, `LOCAL_BASE_BRANCH=fix/agent-loop-hardening`.
-  Untruthful config - fix or document.
+  Untruthful config - fix or document. (2026-07-19: PYTHON_BIN is now honored
+  like the sibling launchers; the four LOCAL_* defaults still point at myapp -
+  read them from local.conf/env.local instead.)
 
 
 proč merge-verified.sh nevypisuje co se děje?
-merger-verified funguje asi jen na vps branche ... ale co když něco neprojde, já to upravím ručně a budu to chtít merger-verified (jen pokud to nedoáže sám před vrácení devu)
+~~merger-verified funguje asi jen na vps branche ... co když to upravím ručně~~
+DONE/ANSWERED 2026-07-19: presne tohle je `merge-verified.sh <task> --local
+<sha|branch|worktree>` - soudí lokálně commitnutou revizi stejnou gate, bez
+VPS. Nově zdokumentováno v USAGE.md §6.
 
 
 kod pro ntfy vytáhout mimo git a odrotovat
+
+## Coherence findings from the 2026-07-19 whole-project review
+
+- **`note_server/` is NOT in `ENGINE_SENSITIVE_GLOBS` (trust gap, decide+fix).**
+  target_policy.py's engine-sensitive list covers orchestrator/scripts/roles/
+  prompts/oracle/monitoring/docker/security/skills but not `note_server/*` - so
+  when laddy dogfoods itself, a branch editing note_server rides L2 auto-merge
+  while every other code dir is L3. Either move note_server out to its own
+  target repo (it is product code inside an engine that claims to hold none),
+  or add `note_server/*` to ENGINE_SENSITIVE_GLOBS. Fail-closed says: add the
+  glob now, decide the move later.
+- Root `docker/`, `security/`, `specs/` are stale pre-split templates: root
+  docker/Dockerfile.test is still the myapp gate (pnpm, py3.12) and has
+  DIVERGED from the live `.laddy/docker/`; root security/ is a byte-identical
+  copy of `.laddy/security/`. setup.md now points new targets at the `.laddy/`
+  copies; delete the root dirs or refresh them consciously.
+- `local-onboard.sh` writes `<target>/env.local`, but `merge-verified.sh`
+  sources only `<engine>/env.local` (and Python reads no env file itself) -
+  for any target != engine the generated file is never read. Decide the
+  contract (per-target env.local sourced from the target CWD?) and align
+  script + docs.
+- monitoring/README.md installs from `/root/myapp-trusted/.laddy/monitoring/`
+  as root - pre-split paths and an unreconciled monitor-as-root story; rewrite
+  against the engine `monitoring/` + unprivileged-user topology.
+- README/CLAUDE.md no longer claim rw2 = Codex (fixed 2026-07-19: "cross-vendor
+  when Codex is configured"); the deeper fix stays the role->vendor binding
+  item above.
+
+## Proposals from the 2026-07-19 GitHub survey (Director to pick)
+
+Top picks, ranked (full report in the session log; S/M/L = rough effort):
+
+1. Evidence bundle + trajectory replay per task branch (M) - ship per-role
+   session logs, test output, coverage delta, verdict JSONs with the branch;
+   merge gate replays WHY per commit. Trust through legibility (Copilot
+   session logs / Cursor "demos over diffs" / SWE-agent trajectories).
+2. Best-of-N attempts with panel-ranked selection (M) - N workers on one spec,
+   `<task>/attempt-N` branches, existing cross-vendor panel ranks them;
+   side-by-side at the gate. Nobody ships auto-ranking yet.
+3. Spec deltas + living-spec archive (M, OpenSpec) - specs carry
+   ADDED/MODIFIED/REMOVED requirement deltas; the merge gate folds them into a
+   living specs/ dir. Fixes one-shot-spec drift.
+4. Egress allowlist proxy + blocked-attempt ledger (M) - two-phase network on
+   the VPS (setup: registries; agent: model APIs only); blocked attempts become
+   merge-report line items (exfiltration signal). 2026 Claude-Action CVEs are
+   the motivation.
+5. Per-role cost ledger + hard budget caps (S) - parse the agent CLIs' own
+   JSONL session logs (ccusage approach), price via litellm tables, aggregate
+   per task x round x role, show dollars + wall-time at the gate.
+6. Git-native per-repo memory (S) - gate-side LESSONS.md appended after each
+   merge from reviewer corrections; worker proposes, only the trusted gate
+   persists. No vector stores.
+7. Repro-test-first protocol for bug specs (S, Agentless) - bugfix spec type
+   requires a failing test commit before the fix; gates check the red->green
+   flip.
+8. Fleet mode: parallel tasks + one status surface (L) - N concurrent workers,
+   kanban-shaped status over stream-json events, claude-squad-style tmux
+   attach + pause/resume. Scheduler + viewer, NOT an orchestrator agent (Kilo
+   Code deprecated theirs).
+9. Snapshot-keyed environment cache (M) - cache worker state keyed on
+   hash(setup script + lockfiles); cold-start latency is what caps parallelism
+   and best-of-N.
+10. Mid-run steering + named autonomy ladder (S) - `laddy msg <task> "..."`
+    appends to the next round's prompt; named levels (guarded/standard/full)
+    instead of flag soup; PLAN.md round-0 artifact whose divergence from the
+    final diff is a free reviewer signal.
+
+Spec-authoring optimizations (overlaps: create-spec skill + clarify gate):
+
+- `[NEEDS CLARIFICATION]` markers in specs (Spec Kit): create-spec writes them
+  instead of guessing; kickoff/enqueue refuse while any marker remains -
+  queued 3am runs never hit an unanswerable clarify.
+- Optional EARS acceptance-criteria stanza ("WHEN X THE SYSTEM SHALL Y",
+  Kiro): most reviewable AC format; reviewers cite which requirement each hunk
+  satisfies.
+- Bugfix spec template (repro + root-cause hypothesis + required regression
+  test) as a distinct type next to feature/bug/spike/audit/investigate.
+- Local clarify pre-pass in create-spec: the skill already reads the target
+  code - have it ask the clarify-gate-style blocking questions at authoring
+  time and bake answers into the spec (pairs with `[NEEDS CLARIFICATION]`).
+- Plan-handback (existing TODO item above) fits Jules' editable-PLAN.md
+  pattern: plan approval as an explicit state before code.
+
+NOT adopting (surveyed, rejected): persona swarms (claude-flow/BMAD),
+dedicated orchestrator-agent layer, external memory services (mem0/Letta),
+normalized cost units (Devin ACU retreat).
