@@ -8,8 +8,8 @@
   fails closed on a branch-planted symlink. USE THESE wherever a
   branch-controlled path is written on the trusted machine instead of a bare
   `Path.write_text`/`write_bytes`. DONE 2026-07-19: append_jsonl now opens O_NOFOLLOW. Still bare (tighten
-  when touched): direct `spec_path.write_text` in clarify.py:60 / run.py:197 /
-  loop.py:1076 / oracle. Folds into the `report-path-guard-md` spec's theme.
+  when touched): direct `spec_path.write_text` in clarify.py, run.py
+  (_phase_new seed + _refresh_stub_spec), loop.py, oracle. Folds into the `report-path-guard-md` spec's theme.
 - Dead role fixtures in tests/test_run_cli.py:39 and tests/test_oracle_evalrun.py:117 - pass via real ENGINE_DIR/roles instead.
 - basedpyright warnings (~1500, non-blocking by design - failOnWarnings=false) - burn down opportunistically.
 - Report-only `path_guard` (orchestrator/policy.py REPORT_ALLOWED_PREFIXES) allows ANY file under `<agent-dir>/specs/`, not only `*.md` - a report-only task could commit `specs/x.py`. Not collected by pytest (testpaths=["tests"]) so low risk, but tighten the guard to spec markdown once C3's draft-status check has settled.
@@ -20,7 +20,11 @@
   - Verified install methods (reviewed on the live VPS 2026-07): Claude Code via Anthropic's official signed APT repo - key `https://downloads.claude.ai/keys/claude-code.asc` into /etc/apt/keyrings, `signed-by=` repo `https://downloads.claude.ai/claude-code/apt/stable stable main`, pin fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`, then `apt install claude-code`. Codex via `npm i -g @openai/codex`. Install-ONLY (drop the one-off per-user removal/migration steps from the manual script). Coordinate with the rootless-docker rewrite below - both touch the root phase, so do them in one pass.
 - VPS loop has NO worktree setup step: DEFAULT_FAST_COMMANDS activates `.venv` (`. .venv/bin/activate && ... pytest`) but nothing on the VPS creates it (env.vps has no SETUP_COMMANDS; loop/gitops/kickoff never run venv/pip). NOTE (2026-07-19): `SETUP_COMMANDS` is read by NOTHING anywhere - it was a dead knob in env.local.example (now removed); there is no setup step on either node. Either add a real SETUP_COMMANDS step to the loop (run once per fresh worktree before fast_tests) or document that TEST_COMMANDS must bootstrap its own env. Also needs `python3-venv` on the box.
 - Config ergonomics: let LADDY_USERS take just a PROJECT name and derive user/ssh-alias(`vps-<project>`)/engine-path(`/home/<project>/laddy`) by convention (they are 1:1 today), keeping explicit 4-field overrides optional. Change lives in lib/laddy_users.sh.
-- Role -> vendor binding is HALF hardcoded: the CLI *commands* are config (env.vps CLAUDE_CMD/CODEX_CMD/SENIOR_CMD/REVIEW_*/RW2_CMD), but WHICH vendor runs each role is fixed in run.py (developer/rw1/clarify/senior/rw2 -> ClaudeRunner). Make the role->runner mapping config-driven so any role's vendor is swappable without editing run.py, and wire it into onboarding/env.vps. Overlaps with the config-driven toolset item above - do together.
+- ~~Role -> vendor binding is HALF hardcoded~~ MOSTLY DONE (fullrun-s0, on
+  this branch): ROLE_<NAME>_{VENDOR,MODEL,THINKING} env knobs + _resolve_runner
+  make the role->runner mapping config-driven (documented in
+  env.local.example AND env.vps.example). REMAINING: only the config-driven
+  CLI-install toolset item above (vps-onboard).
   - CURRENT STATE: rw2 now runs **Claude (Sonnet)** by default (DEFAULT_RW2_CMD, override with RW2_CMD), NOT Codex - this deployment has no codex login, so rw1 and rw2 are both Claude and the cross-vendor guarantee is dropped. The LOCAL merge-panel rw2 (config.review_codex_cmd, run by merge-verified.sh) still defaults to codex - revisit when codex is back or make it config-driven too.
 - ~~kickoff reuses a stale task worktree~~ DONE 2026-07-19 (_refresh_stub_spec:
   clarify pulls the hub spec over an exact --new stub and commits). Original: a failed `--new` (authoring added nothing) leaves wt/<task> with a headline-only spec, and a later `kickoff <task>` (no --new) REUSES it (run.py:276 only creates wt if absent) - so clarify sees the stub, not the spec pushed to the hub. kickoff should detect an empty/stub spec in a reused worktree (or a spec on the hub newer than the worktree base) and refresh, or at least warn. Workaround: `rm -rf <AGENT_WORK_ROOT>/wt/<task>` before re-running.
@@ -85,18 +89,20 @@ DONE/ANSWERED 2026-07-19: presne tohle je `merge-verified.sh <task> --local
 VPS. Nově zdokumentováno v USAGE.md §6.
 
 
-kod pro ntfy vytáhout mimo git a odrotovat
+kod pro ntfy vytáhout mimo git a odrotovat (2026-07-19 check: the engine
+tree commits NO topic anywhere - the topic lives only in git-ignored env.vps;
+if a topic leaked, it is in target-repo artifacts/history, not here)
+
+- phone follow-ups: ntfy ACTION buttons (remote_ask sends a plain message;
+  an ntfy Actions payload could answer approve/reject one-tap via the PWA's
+  /api/answer?token=... URL), and `tailscale serve` HTTPS note in docs.
 
 ## Coherence findings from the 2026-07-19 whole-project review
 
-- **`note_server/` is NOT in `ENGINE_SENSITIVE_GLOBS` (trust gap, decide+fix).**
-  target_policy.py's engine-sensitive list covers orchestrator/scripts/roles/
-  prompts/oracle/monitoring/docker/security/skills but not `note_server/*` - so
-  when laddy dogfoods itself, a branch editing note_server rides L2 auto-merge
-  while every other code dir is L3. Either move note_server out to its own
-  target repo (it is product code inside an engine that claims to hold none),
-  or add `note_server/*` to ENGINE_SENSITIVE_GLOBS. Fail-closed says: add the
-  glob now, decide the move later.
+- ~~note_server missing from ENGINE_SENSITIVE_GLOBS~~ GLOB DONE 2026-07-19
+  (fix/merge-flow-queue 3f1ed0e: note_server/* rides L3 + test). STILL OPEN:
+  decide whether note_server (product code in an engine that claims to hold
+  none) moves out to its own target repo.
 - Root `docker/`, `security/`, `specs/` are stale pre-split templates: root
   docker/Dockerfile.test is still the myapp gate (pnpm, py3.12) and has
   DIVERGED from the live `.laddy/docker/`; root security/ is a byte-identical
