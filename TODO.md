@@ -28,7 +28,7 @@
 
 odlogovat z roota
 
-přidat nějaké pořadí tasků (čísla v názvu?)
+~~přidat nějaké pořadí tasků~~ DONE 2026-07-19: `--phase enqueue t1 t2 ... --chain` (ordered, worktree of each link starts from the predecessor branch; failure stops the chain) + `kickoff --code-ready` (review-only run on finished code).
 až dojedu tab local claude - zjistit jak je to s mcp (je nová spec?)
 dva specy merge-hold.md
 !     0local creating spec openhabds
