@@ -189,3 +189,19 @@ def test_write_text_overwrites_a_regular_file(tmp_path: Path) -> None:
     art.write_text("merge-advisory.md", "first\n")
     art.write_text("merge-advisory.md", "second\n")
     assert (art.dir / "merge-advisory.md").read_text(encoding="utf-8") == "second\n"
+
+
+def test_append_jsonl_refuses_symlinked_log(tmp_path):
+    # TODO 2026-07: the log file itself may be a planted symlink; a bare
+    # open("a") would append through it. O_NOFOLLOW must refuse instead.
+    import pytest
+
+    from orchestrator.artifacts import ArtifactPathError, append_jsonl
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched\n", encoding="utf-8")
+    log = tmp_path / "iteration-log.jsonl"
+    log.symlink_to(victim)
+    with pytest.raises(ArtifactPathError):
+        append_jsonl(log, {"action": "x"})
+    assert victim.read_text(encoding="utf-8") == "untouched\n"
