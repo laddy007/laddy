@@ -453,3 +453,34 @@ def test_binding_gate_run_keys_off_exit_code(tmp_path: Path) -> None:
     r = BindingGate(compose_rel="c.yml", shell=shell).run(tmp_path, "abc", "myapp")
     assert r.tests_passed is False
     assert shell.calls[0][1] == tmp_path
+
+
+def test_gate_shell_never_reads_the_callers_stdin(tmp_path: Path) -> None:
+    # The containerized gate runs untrusted branch code; an inherited stdin
+    # would let it swallow the operator's typed merge confirmation (the
+    # interactive prompt then reads EOF) and read the trusted terminal. The
+    # gate shell must run with stdin closed (DEVNULL): a command that reads
+    # stdin gets nothing, and the caller's stdin stays untouched.
+    import subprocess
+    import sys
+
+    probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from orchestrator.testgate import _subprocess_shell_split\n"
+        "rc, out, err = _subprocess_shell_split('cat', Path(sys.argv[2]))\n"
+        "print('OUT=' + repr(out))\n"
+    )
+    engine_root = str(Path(__file__).resolve().parent.parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, engine_root, str(tmp_path)],
+        input="SECRET-STDIN\n",  # what an inherited stdin would hand the gate
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "SECRET-STDIN" not in proc.stdout  # the gate never saw it
+    assert "OUT=''" in proc.stdout

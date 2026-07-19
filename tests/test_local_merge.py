@@ -1784,6 +1784,39 @@ def test_cli_dirty_tree_on_normal_path_refuses_distinctly(
     assert unmerged != 0
 
 
+def test_cli_dirty_tasks_lane_does_not_block_the_run(
+    local_repo: Path, tmp_path: Path, capsys
+) -> None:
+    # The tool's OWN artifact lane must not trip the dirty-tree guard: every
+    # held/dry-run verdict writes <agent-dir>/tasks/<task>/merge-hold.md, so
+    # counting it dirty made each merge-verified run block the next one until
+    # the operator committed the tool's own leftovers.
+    from orchestrator import TARGET_DIR_NAME, local_merge
+
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)  # green L2
+
+    hold_dir = local_repo / TARGET_DIR_NAME / "tasks" / "t1"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    (hold_dir / "merge-hold.md").write_text("# leftover hold\n", encoding="utf-8")
+
+    orig = local_merge.gather_gates
+    local_merge.gather_gates = _fake_gather(blast=L2)
+    try:
+        env = {"AGENT_REPO_URL": "unused", "AGENT_WORK_ROOT": str(tmp_path / "wr")}
+        rc = local_merge.main(
+            ["--repo", str(local_repo), "--work-root", str(tmp_path / "mw"), "t1"],
+            env=env,
+            confirm=lambda v: True,  # merge-safety confirmation given (H4)
+            ask=lambda p: False,  # never push
+        )
+    finally:
+        local_merge.gather_gates = orig
+    out = capsys.readouterr().out
+    assert "commit or stash" not in out
+    assert "MERGED into local main" in out
+    assert rc == 0
+
+
 def test_engine_risk_decision_confirmed_merges() -> None:
     from orchestrator.local_merge import RISK_DECISION
 

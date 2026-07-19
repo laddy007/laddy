@@ -1418,7 +1418,17 @@ def main(
     # the merge and misreport a clean branch as "no longer applies cleanly" -
     # a re-run-the-whole-VPS-task signal for what a stash fixes. Refuse before
     # any gate runs; nothing is merged.
-    _, porcelain = _git(repo, "status", "--porcelain")
+    #
+    # The tool's OWN artifact lane (<agent-dir>/tasks/) is excluded: every held
+    # or dry-run verdict writes merge-hold.md there, so counting it dirty made
+    # each run block the next one until the operator committed the tool's own
+    # leftovers. Those artifacts are never staged by the merge (a merge commit
+    # takes the index; advisory records are staged explicitly), so judged ==
+    # merged is unaffected by ignoring them here.
+    _, porcelain = _git(
+        repo, "status", "--porcelain", "--", ".",
+        f":(exclude){TARGET_DIR_NAME}/tasks",
+    )
     if porcelain.strip():
         print("[dirty] the target working tree has uncommitted changes.")
         if local_ref is not None:

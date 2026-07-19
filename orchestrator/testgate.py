@@ -42,6 +42,13 @@ def _subprocess_shell_split(command: str, cwd: Path) -> tuple[int, str, str]:
         proc = subprocess.run(
             ["bash", "-lc", command],
             cwd=cwd,
+            # DEVNULL, not inherit: the containerized gate runs UNTRUSTED
+            # branch code while the operator's terminal may be about to type
+            # the merge-safety confirmation. An inherited stdin lets the
+            # container (docker compose run attaches it) swallow that input -
+            # the interactive confirm then reads EOF - and hands untrusted
+            # code a read on the trusted terminal. The gate needs no stdin.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=False,
