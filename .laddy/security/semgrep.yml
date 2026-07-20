@@ -145,7 +145,15 @@ rules:
       pre-existing one. O_EXCL WITHOUT O_CREAT is a POSIX no-op (it only
       modifies O_CREAT's behavior) and gives no protection at all, so it does
       NOT exempt a call - only the pair does. Read-only opens are exempt: the
-      risk is the write.
+      risk is the write. The variable-flags branch below traces ONLY the
+      immediate `$FLAGS = <expr>` statement directly preceding the call - NOT
+      ENCODED (LLM panel covers it): flags rebuilt with `|=`/`&=` or assigned
+      further back with statements in between are untraced, in EITHER
+      direction (a real gap can hide behind such a statement; a real guard
+      added that way can also be missed) - tracing that safely needs
+      reaching-definitions dataflow, not pattern matching, and a rule that
+      calls a `|=`-guarded open unsafe is exactly the false positive this
+      ruleset refuses to ship.
     patterns:
       - pattern-either:
           - patterns:
@@ -156,7 +164,6 @@ rules:
           - patterns:
               - pattern: |
                   $FLAGS = $EXPR
-                  ...
                   os.open($PATH, $FLAGS, ...)
               - metavariable-regex:
                   metavariable: $EXPR
