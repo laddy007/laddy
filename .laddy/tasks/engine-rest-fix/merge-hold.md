@@ -2,26 +2,15 @@
 
 ## What failed
 
-- local full test suite is red
-- diff-coverage below threshold: branch does not merge cleanly into current main (conflict); re-run the task
-- security scan flagged 1 item(s): branch does not merge cleanly into current main (conflict); re-run the task
-- gate infra changed by this branch was NOT verified - the gate ran trusted main's copy of: .laddy/security/gitleaks.toml
-- security panel blocker(s): save_note's TOTP check has no rate limiting, lockout, backoff, or failed-attempt logging, so the only credential on a publicly exposed write endpoint is brute-forceable.; The public TOTP endpoint permits unlimited online guesses and token replay.; A credential identified as the production TOTP secret remains committed in the tip and history.; The shell-config hardening omits tracked vps.conf and local.conf.; Branch-writable handoff fields bypass terminal... [truncated]
+- gate infra changed by this branch was NOT verified - the gate ran trusted main's copy of: .laddy/security/gitleaks.toml, .laddy/security/semgrep.yml
+- security panel blocker(s): check_local_fix swallows SpecError as well as OSError, letting a branch disable the entire report-only guard by corrupting its own spec file - the inverse of merge_check.check, which hard-fails the same condition.; Hub branch names become task ids with no charset validation and are passed to git as bare positional arguments with no `--` separator, giving an untrusted VPS agent argument injection into git commands run on the Director's trusted machine.; A... [truncated]
 
 ## Security panel findings
 
-- save_note's TOTP check has no rate limiting, lockout, backoff, or failed-attempt logging, so the only credential on a publicly exposed write endpoint is brute-forceable.
-- The public TOTP endpoint permits unlimited online guesses and token replay.
-- A credential identified as the production TOTP secret remains committed in the tip and history.
-- The shell-config hardening omits tracked vps.conf and local.conf.
-- Branch-writable handoff fields bypass terminal-control neutralization.
-- The new MCP runtime dependency is installed without a version bound, lockfile, or hashes.
-
-## Local test failure (tail)
-
-```
-branch does not merge cleanly into current main (conflict); re-run the task
-```
+- check_local_fix swallows SpecError as well as OSError, letting a branch disable the entire report-only guard by corrupting its own spec file - the inverse of merge_check.check, which hard-fails the same condition.
+- Hub branch names become task ids with no charset validation and are passed to git as bare positional arguments with no `--` separator, giving an untrusted VPS agent argument injection into git commands run on the Director's trusted machine.
+- A hub branch whose name collides with the base branch's tracking ref makes the discovery fetch fail outside the per-task isolation try block, wedging the entire merge gate until an operator intervenes manually.
+- security panel member 'codex' did not return a valid verdict; holding for human review - output still malformed after 2 retries: agent run did not complete cleanly (exit_reason='error', rc=1); its output is not trustworthy
 
 ## What is needed
 
