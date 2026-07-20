@@ -1,0 +1,14 @@
+# Trusted gitleaks configuration for the laddy binding gate.
+#
+# Passed EXPLICITLY to `gitleaks detect --config` (testgate._binding_gate) so
+# gitleaks never auto-discovers a branch-planted `.gitleaks.toml` whose
+# `[allowlist]` would suppress the branch's own committed secret (H-D2-3). This
+# file lives under <agent-dir>/security, restored from trusted main over the
+# branch clone (RESTORED_INFRA_PATHS), so the branch cannot weaken it either.
+#
+# `useDefault = true` keeps the FULL built-in gitleaks ruleset - passing an
+# explicit config would otherwise REPLACE the defaults and detect nothing.
+title = "laddy trusted gitleaks config"
+
+[extend]
+useDefault = true
