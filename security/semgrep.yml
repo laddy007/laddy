@@ -144,10 +144,20 @@ rules:
       O_CREAT|O_EXCL fails EEXIST against a pre-existing one. Read-only opens are
       exempt: the risk is the write.
     patterns:
-      - pattern: os.open($PATH, $FLAGS, ...)
-      - metavariable-regex:
-          metavariable: $FLAGS
-          regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
+      - pattern-either:
+          - patterns:
+              - pattern: os.open($PATH, $FLAGS, ...)
+              - metavariable-regex:
+                  metavariable: $FLAGS
+                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
+          - patterns:
+              - pattern: |
+                  $FLAGS = $EXPR
+                  ...
+                  os.open($PATH, $FLAGS, ...)
+              - metavariable-regex:
+                  metavariable: $EXPR
+                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
 
   - id: python-ftruncate-without-nlink-check
     languages: [python]
@@ -163,5 +173,8 @@ rules:
       - pattern-not-inside: |
           def $F(...):
               ...
-              <... $X.st_nlink ...>
+              if <... $X.st_nlink ...>:
+                  ...
+                  raise ...
               ...
+              os.ftruncate($FD, 0)
