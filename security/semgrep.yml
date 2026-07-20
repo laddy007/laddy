@@ -137,19 +137,22 @@ rules:
     languages: [python]
     severity: ERROR
     message: >
-      os.open() for writing whose flags contain NEITHER O_NOFOLLOW NOR O_EXCL
-      follows a final-component symlink swapped in after any check (the
-      parent-directory TOCTOU): the write lands on the symlink's target. Either
-      is independently sufficient - O_NOFOLLOW refuses to follow a symlink,
-      O_CREAT|O_EXCL fails EEXIST against a pre-existing one. Read-only opens are
-      exempt: the risk is the write.
+      os.open() for writing whose flags contain NEITHER O_NOFOLLOW NOR
+      O_CREAT|O_EXCL TOGETHER follows a final-component symlink swapped in
+      after any check (the parent-directory TOCTOU): the write lands on the
+      symlink's target. Either is independently sufficient - O_NOFOLLOW
+      refuses to follow a symlink, O_CREAT|O_EXCL fails EEXIST against a
+      pre-existing one. O_EXCL WITHOUT O_CREAT is a POSIX no-op (it only
+      modifies O_CREAT's behavior) and gives no protection at all, so it does
+      NOT exempt a call - only the pair does. Read-only opens are exempt: the
+      risk is the write.
     patterns:
       - pattern-either:
           - patterns:
               - pattern: os.open($PATH, $FLAGS, ...)
               - metavariable-regex:
                   metavariable: $FLAGS
-                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
+                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?!(?=[\s\S]*O_EXCL)[\s\S]*O_CREAT)'
           - patterns:
               - pattern: |
                   $FLAGS = $EXPR
@@ -157,23 +160,30 @@ rules:
                   os.open($PATH, $FLAGS, ...)
               - metavariable-regex:
                   metavariable: $EXPR
-                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?![\s\S]*O_EXCL)'
+                  regex: '(?s)^(?=[\s\S]*O_(WRONLY|RDWR))(?![\s\S]*O_NOFOLLOW)(?!(?=[\s\S]*O_EXCL)[\s\S]*O_CREAT)'
 
   - id: python-ftruncate-without-nlink-check
     languages: [python]
     severity: ERROR
     message: >
-      os.ftruncate(fd, 0) inside a function with no st_nlink check is the
+      os.ftruncate(fd, 0) inside a function with no st_nlink != 1 check is the
       force-overwrite hard-link hole: a hard link to a sensitive file IS a
       regular, non-symlink file, so O_NOFOLLOW + S_ISREG pass and the truncate
       lands on the linked file. Refuse st_nlink != 1 before truncating (see
       report_path.py _open_existing_for_force, which closes exactly this hole).
+      The guard must be the LITERAL comparison `$X.st_nlink != 1` (not merely
+      a function that mentions st_nlink somewhere, and not the inverted
+      `== 1`), and it must raise. NOT ENCODED (LLM panel covers it): a guard
+      that is syntactically this shape but unreachable (wrapped in a
+      dead/always-false outer condition) - full reachability is a dataflow
+      property outside semgrep OSS pattern matching, the same tradeoff
+      already made for Rule C/D above.
     patterns:
       - pattern: os.ftruncate($FD, 0)
       - pattern-not-inside: |
           def $F(...):
               ...
-              if <... $X.st_nlink ...>:
+              if $X.st_nlink != 1:
                   ...
                   raise ...
               ...
