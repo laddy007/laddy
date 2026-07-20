@@ -1,0 +1,62 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "security/semgrep.yml",
+    ".laddy/security/semgrep.yml",
+    "tests/test_semgrep_fsrules.py",
+    "tests/fixtures/semgrep/rule_a_bad_write_open.py",
+    "tests/fixtures/semgrep/rule_b_bad_ftruncate.py",
+    "orchestrator/queue.py",
+    "orchestrator/artifacts.py",
+    "monitoring/loop_monitor/report_path.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Two ruleset copies are byte-identical",
+      "evidence": "cmp security/semgrep.yml .laddy/security/semgrep.yml => IDENTICAL",
+      "verified": true
+    },
+    {
+      "claim": "Rule A metavariable-regex correctly separates guarded vs unguarded flag combinations",
+      "evidence": "independently re-implemented the exact regex in python3 and tested against os.O_CREAT|os.O_WRONLY (match=True), os.O_CREAT|os.O_EXCL|os.O_WRONLY (match=False, canary spared), os.O_RDONLY|os.O_NOFOLLOW (match=False), os.O_CREAT|os.O_RDWR (match=True), os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW (match=False) — all as intended",
+      "verified": true
+    },
+    {
+      "claim": "queue.py:104 (O_CREAT|O_EXCL, no O_NOFOLLOW) is the canary and is correctly guard-exempt",
+      "evidence": "orchestrator/queue.py:104 read directly: os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY) — O_EXCL present, regex spares it",
+      "verified": true
+    },
+    {
+      "claim": "report_path.py's Rule B canary (_open_existing_for_force) has st_nlink check in the same function as ftruncate",
+      "evidence": "monitoring/loop_monitor/report_path.py:98-129 read directly: info.st_nlink != 1 check at line 124, os.ftruncate(fd, 0) at line 129, both inside _open_existing_for_force",
+      "verified": true
+    },
+    {
+      "claim": "artifacts.py:143 / queue.py:205 adjudication is a documented finding, not a suppression",
+      "evidence": "orchestrator/artifacts.py:143 (os.open(path, os.O_CREAT | os.O_RDWR, 0o644) in log_lock) and orchestrator/queue.py:205 (os.open(locks / f\"{task_id}.reclaim\", os.O_CREAT | os.O_RDWR) in _acquire_lock) read directly: both are flock guard-file opens, neither O_NOFOLLOW nor O_EXCL, matches ruleset header's adjudication text verbatim; no nosem present anywhere in the diff",
+      "verified": true
+    },
+    {
+      "claim": "No os.open/os.ftruncate call sites exist outside the reviewed corpus that could silently escape AC2 scoping",
+      "evidence": "grep -rn 'os\\.open(\\|os\\.ftruncate(' across repo (excluding tests/ and .laddy/tasks/) returns exactly the 9 sites named in the spec's corpus table, nothing else",
+      "verified": true
+    },
+    {
+      "claim": "Suite/lint/type clean for touched scope",
+      "evidence": "python3 -m pytest tests/test_semgrep_fsrules.py -q => 7 passed, 5 skipped (semgrep absent on this box, matches documented skip reason); ruff check . => All checks passed!; basedpyright on touched files => 0 errors, 9 warnings (reportAny/reportPrivateUsage, same non-blocking pattern used elsewhere in the suite)",
+      "verified": true
+    },
+    {
+      "claim": "Trust boundary and gate command untouched by this diff",
+      "evidence": "git diff origin/main --stat shows testgate.py, local_merge.py, queue.py, artifacts.py, report_path.py are absent from the changed-file list; only semgrep.yml (x2), test/fixture files, and .laddy/tasks metadata changed",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "AC1/AC2/AC3 are exercised by requires_semgrep tests that skip on this box (no semgrep binary) but I independently re-derived the core regex logic and manually traced every corpus/fixture line against the source, which corroborates rw1's asserted semgrep output rather than blindly trusting it. AC4/AC5/AC6/AC7/AC8 tests run unconditionally and pass locally. Rule B's pattern-not-inside is order-insensitive within a function (a st_nlink check appearing textually anywhere in the function, even after the ftruncate, would still suppress the rule) — this is an inherent expressiveness limit of AST-containment matching, not an implementation bug, and is consistent with the spec's explicit false-negative-over-false-positive design philosophy (already precedented by Rule A's disclosed name-based FN). Noting as residual risk, not a blocker, since no AC requires exhaustive documentation of every rule limitation and it isn't a regression this diff introduces.",
+  "residual_risks": [
+    "Rule B's guard check is unordered within the enclosing function (a st_nlink check placed after the ftruncate would still suppress the rule) — an inherent limitation of structural (non-dataflow) matching, not unique to this implementation.",
+    "Rule A's flags-in-a-variable false negative (documented) and the two adjudicated pre-existing findings (artifacts.py:143, queue.py:205) are known, accepted, already-disclosed trade-offs — restated here only for completeness, not as new risk."
+  ]
+}
