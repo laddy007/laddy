@@ -34,6 +34,7 @@ REPORT_PATH = REPO / "monitoring" / "loop_monitor" / "report_path.py"
 
 RULE_A = "python-open-without-nofollow-or-excl"
 RULE_B = "python-ftruncate-without-nlink-check"
+RULE_B2 = "python-open-trunc-without-nlink-check"
 
 requires_semgrep = pytest.mark.skipif(
     shutil.which("semgrep") is None,
@@ -82,6 +83,12 @@ def test_rule_b_fires_on_ftruncate_without_nlink_fixture() -> None:
     assert _lines(found, RULE_B, "rule_b_bad_ftruncate.py")
 
 
+@requires_semgrep
+def test_rule_b2_fires_on_open_trunc_without_nlink_fixture() -> None:
+    found = _scan(FIXTURES / "rule_b2_bad_open_trunc.py")
+    assert _lines(found, RULE_B2, "rule_b2_bad_open_trunc.py")
+
+
 # --- AC2: zero false positives on the in-repo corpus (outranks AC1) ----------
 
 
@@ -106,6 +113,15 @@ def test_rule_b_no_false_positive_on_guarded_report_path() -> None:
     assert _lines(found, RULE_B, "report_path.py") == set()
 
 
+@requires_semgrep
+def test_rule_b2_no_false_positive_on_report_path_or_guarded_corpus() -> None:
+    # report_path.py has no O_TRUNC-on-open site at all; queue.py's only
+    # O_TRUNC site (177) is the adjudicated finding (AC3), not a false
+    # positive - covered separately below.
+    found = _scan(REPORT_PATH)
+    assert _lines(found, RULE_B2, "report_path.py") == set()
+
+
 # --- AC3: the two unguarded sites are adjudicated as genuine findings --------
 
 
@@ -120,6 +136,16 @@ def test_rule_a_reports_the_two_unguarded_sites_as_findings() -> None:
     found = _scan(ARTIFACTS, QUEUE)
     assert 143 in _lines(found, RULE_A, "artifacts.py")
     assert 205 in _lines(found, RULE_A, "queue.py")
+
+
+@requires_semgrep
+def test_rule_b2_reports_queue_py_lock_pid_write_as_a_finding() -> None:
+    # queue.py:177 (_write_lock_pid) carries O_NOFOLLOW (Rule A silent) but
+    # opens O_CREAT|O_WRONLY|O_TRUNC on a pre-existing path with no st_nlink
+    # check - adjudicated (ruleset header) alongside the Rule A sites above,
+    # same provenance argument, same --baseline-commit treatment.
+    found = _scan(QUEUE)
+    assert 177 in _lines(found, RULE_B2, "queue.py")
 
 
 # --- AC5: the two copies stay byte-identical ---------------------------------
@@ -221,3 +247,4 @@ def test_severity_behaviour_recorded_and_new_rules_are_error() -> None:
     # each new rule's severity is a deliberate ERROR (they flag real defects).
     assert _rule_severity(text, RULE_A) == "ERROR"
     assert _rule_severity(text, RULE_B) == "ERROR"
+    assert _rule_severity(text, RULE_B2) == "ERROR"
