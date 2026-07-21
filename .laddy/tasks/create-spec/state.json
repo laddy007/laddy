@@ -1,0 +1,17 @@
+{
+  "head_sha": "fec6fef8b102b8ab6dadc5e619a0313dfd67d96b",
+  "phase": "merge_decision",
+  "rw1": {
+    "sha": "fec6fef8b102b8ab6dadc5e619a0313dfd67d96b",
+    "approved": true
+  },
+  "rw2": {
+    "sha": "fec6fef8b102b8ab6dadc5e619a0313dfd67d96b",
+    "go": true
+  },
+  "authoritative": {
+    "sha": "fec6fef8b102b8ab6dadc5e619a0313dfd67d96b",
+    "passed": true,
+    "flaky": false
+  }
+}
