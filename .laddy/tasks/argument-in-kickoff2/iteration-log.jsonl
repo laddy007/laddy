@@ -34,3 +34,5 @@
 {"ts": "2026-07-21T14:52:10Z", "action": "rw1", "outcome": "approved", "round": 12, "session_id": "6f7a0d7a-b16a-410d-b4a2-7c1f3d322e28", "sha": "9293d3f4b4e11fd484dfc50a94923b738b2079b2", "detail": ""}
 {"ts": "2026-07-21T14:53:58Z", "action": "rw2", "outcome": "go", "round": 12, "session_id": "6ca9904c-573b-4500-a7e4-b72326a03c7d", "sha": "9293d3f4b4e11fd484dfc50a94923b738b2079b2", "fingerprint": null, "detail": ""}
 {"ts": "2026-07-21T14:58:07Z", "action": "authoritative", "outcome": "pass", "round": 12, "sha": "9293d3f4b4e11fd484dfc50a94923b738b2079b2", "flaky": false, "fingerprint": null, "detail": ""}
+{"ts": "2026-07-21T14:58:08Z", "action": "push", "outcome": "ok", "round": 12}
+{"ts": "2026-07-21T14:58:08Z", "action": "terminal", "outcome": "MERGE_DECIDED:stop_before_merge"}
