@@ -1,0 +1,9 @@
+{
+  "task": "create-spec",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}
