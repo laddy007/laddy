@@ -1,0 +1,53 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "risk_level": "medium",
+  "files_reviewed": [
+    "scripts/kickoff.sh",
+    "orchestrator/run.py",
+    "tests/test_kickoff_wiring.py",
+    "tests/test_run_cli.py",
+    ".laddy/specs/argument-in-kickoff2.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "kickoff.sh captures a non-flag token after --new as BRIEF, keeps it out of REST, forwards it only to --phase new, and preserves spaces/glob chars intact",
+      "evidence": "manual bash trace of the exact parsing loop (scripts/kickoff.sh:74-88) piped into a fake argv-printer: brief 'fix * and ? globs' and 'hello   world' arrived as single, unexpanded argv tokens; --skip-clarify stayed in REST only",
+      "verified": true
+    },
+    {
+      "claim": "_default_author_spec appends the brief block only when brief is truthy, keeping the no-brief prompt byte-identical",
+      "evidence": "orchestrator/run.py:104-107; test_default_author_spec_no_brief_is_byte_identical asserts equality with SPEC_AUTHOR_PROMPT.format(...)",
+      "verified": true
+    },
+    {
+      "claim": "_phase_new seeds `f\"# {task_id}\\n\\n{brief}\\n\"` when a brief is given and reuses that same seed for the post-authoring empty-guard",
+      "evidence": "orchestrator/run.py:214-224",
+      "verified": true
+    },
+    {
+      "claim": "_refresh_stub_spec's stale-stub detection still recognizes a failed --new left over when a brief was supplied",
+      "evidence": "REFUTED. orchestrator/run.py:240 hardcodes `stub = f\"# {task_id}\\n\"`, never updated to match the brief-inclusive seed introduced at run.py:214. Reproduced with a standalone test (added temporarily, confirmed failing, then reverted): a failed `--new --brief \"add rate limiting\"` leaves worktree spec `'# t9\\n\\nadd rate limiting\\n'`; after pushing the real spec to hub main and re-running `--phase clarify`, the worktree spec is still `'# t9\\n\\nadd rate limiting\\n'` instead of picking up 'the real ask' from hub — the exact self-heal `_refresh_stub_spec` exists to perform, silently broken whenever `--brief` was used on the failed attempt.",
+      "verified": false
+    },
+    {
+      "claim": "full gate passes on this branch",
+      "evidence": "not re-run in this pass; rw1 reported ruff/basedpyright/pytest all green, unaffected by this finding since no existing test exercises brief+stub-refresh together",
+      "verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "correctness",
+      "file": "orchestrator/run.py",
+      "line": 240,
+      "summary": "_refresh_stub_spec's hardcoded bare-headline stub no longer matches the brief-inclusive seed, so the hub-refresh self-heal silently no-ops whenever a failed `--new` used `--brief`.",
+      "failure_scenario": "kickoff t9 --new \"add rate limiting\" fails to author anything -> worktree stub is `# t9\\n\\nadd rate limiting\\n`. The real spec is later pushed to hub main. A later plain `kickoff t9` reuses the worktree; `_refresh_stub_spec` compares against the literal `f\"# {task_id}\\n\"`, doesn't match, returns early, and clarify proceeds against the stale brief-only stub instead of the real spec. Reproduced directly against this branch."
+    }
+  ],
+  "test_assessment": "New tests (test_kickoff_wiring.py, test_run_cli.py) thoroughly cover the routing and seeding behavior this spec targets (AC1-4, AC6), but none exercise the interaction between a brief-inclusive failed-`--new` stub and `_refresh_stub_spec`'s existing recovery path (already covered for the no-brief case by test_clarify_refreshes_stub_spec_from_hub). That gap is exactly what let this regression through untested.",
+  "residual_risks": [
+    "AC5 (flag-looking token after --new not swallowed as brief) still has no dedicated automated test, only manual verification.",
+    "Once _refresh_stub_spec is fixed to recognize the brief-inclusive stub, the existing bare-headline test and a new brief-variant test should both be run to confirm no regression in the surgical 'leave non-stub content alone' behavior (test_clarify_leaves_non_stub_spec_alone)."
+  ]
+}
