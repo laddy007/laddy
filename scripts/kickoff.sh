@@ -60,16 +60,31 @@ LOG="$LOG_DIR/$TASK.log"
 
 # Parse launcher-only flags out of the forwarded args. --new/--resume are
 # handled here; everything else (--skip-clarify, --reason "text", ...) rides
-# along in REST to the Python phases verbatim.
+# along in REST to the Python phases verbatim. A token immediately following
+# --new that doesn't itself look like a flag is captured as the brief and
+# forwarded ONLY to the --phase new invocation below - it must never reach
+# REST (and so never reach clarify/design/loop).
+ARGS=("$@")
+NARGS=${#ARGS[@]}
 REST=()
 DO_NEW=0
 DO_RESUME=0
-for a in "$@"; do
+BRIEF=""
+i=1
+while [ "$i" -le "$NARGS" ]; do
+  a="${ARGS[$((i-1))]}"
   case "$a" in
-    --new) DO_NEW=1 ;;
+    --new)
+      DO_NEW=1
+      if [ "$i" -lt "$NARGS" ] && [[ "${ARGS[$i]}" != -* ]]; then
+        BRIEF="${ARGS[$i]}"
+        i=$((i+1))
+      fi
+      ;;
     --resume) DO_RESUME=1 ;;
     *) REST+=("$a") ;;
   esac
+  i=$((i+1))
 done
 
 # --resume: skip clarify/design (task already under way); the Python phase
@@ -83,8 +98,10 @@ if [ "$DO_RESUME" = "1" ]; then
 fi
 
 # Phase 0 (optional): --new - interactive spec authoring when no spec exists.
+# ${BRIEF:+...} expands to nothing when BRIEF is empty (an empty brief, same
+# as no brief, forwards no --brief flag at all).
 if [ "$DO_NEW" = "1" ]; then
-  "$PY" -m orchestrator.run "$TASK" --phase new
+  "$PY" -m orchestrator.run "$TASK" --phase new ${BRIEF:+--brief "$BRIEF"}
 fi
 
 # Phase 1: clarify - interactive, blocks until the Director answered.

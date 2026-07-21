@@ -31,7 +31,7 @@ from orchestrator.agents import (
     CodexRunner,
     set_model_flag,
 )
-from orchestrator.artifacts import ROLE_PLAN, TaskArtifacts
+from orchestrator.artifacts import NEW_SEED, ROLE_PLAN, TaskArtifacts
 from orchestrator.clarify import has_clarify, run_clarify_gate
 from orchestrator.config import OrchestratorConfig
 from orchestrator.flags import (
@@ -85,11 +85,25 @@ anything - only author the spec. Keep asking until the Director is
 satisfied, then save and stop.
 """
 
+# Appended (not interpolated) when a brief was given, so the no-brief prompt
+# stays byte-for-byte identical to today's.
+SPEC_AUTHOR_BRIEF_BLOCK = """\
 
-def _default_author_spec(wt: Path, task_id: str, spec_rel: str) -> None:
+The Director's brief for this task:
+{brief}
+
+Draft the spec from it; ask only about what it leaves open.
+"""
+
+
+def _default_author_spec(
+    wt: Path, task_id: str, spec_rel: str, brief: str | None = None
+) -> None:
     """Launch an INTERACTIVE Claude session (TUI, not headless -p) so the
     Director co-authors the spec in the terminal. Blocks until they exit."""
     prompt = SPEC_AUTHOR_PROMPT.format(spec_rel=spec_rel)
+    if brief:
+        prompt += SPEC_AUTHOR_BRIEF_BLOCK.format(brief=brief)
     subprocess.run(["claude", prompt], cwd=wt, check=False)
 
 
@@ -145,7 +159,9 @@ class Deps:
     # before stdout so the pytest result survives into output_tail rather than
     # being buried under docker's stderr flood (see _subprocess_shell_gate).
     gate_shell: ShellRunner = field(default=_subprocess_shell_gate)
-    author_spec: Callable[[Path, str, str], None] = field(default=_default_author_spec)
+    author_spec: Callable[[Path, str, str, str | None], None] = field(
+        default=_default_author_spec
+    )
 
 
 def _spec_rel(task_id: str) -> str:
@@ -176,7 +192,9 @@ def _load_spec(wt: Path, task_id: str) -> tuple[TaskSpec | None, int]:
     return spec, 0
 
 
-def _phase_new(config: OrchestratorConfig, task_id: str, deps: Deps) -> int:
+def _phase_new(
+    config: OrchestratorConfig, task_id: str, deps: Deps, brief: str | None = None
+) -> int:
     """Interactive spec authoring (trust-model doc S11): co-write the spec with
     the Director when none exists yet, then commit + push the branch so the
     normal clarify/loop can see it."""
@@ -190,12 +208,17 @@ def _phase_new(config: OrchestratorConfig, task_id: str, deps: Deps) -> int:
             file=sys.stderr,
         )
         return 2
-    # seed the file with just a headline so the authoring session has a
-    # concrete file to fill in (and the file always exists)
-    seed = f"# {task_id}\n"
+    # seed the file with just a headline (plus the brief, when one is given)
+    # so the authoring session has a concrete file to fill in (and the file
+    # always exists)
+    seed = f"# {task_id}\n\n{brief}\n" if brief else f"# {task_id}\n"
     spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(seed, encoding="utf-8", newline="\n")
-    deps.author_spec(wt, task_id, _spec_rel(task_id))
+    # Record the exact seed so a later _refresh_stub_spec (a separate phase
+    # invocation, with no brief in hand) can recognize a failed attempt left
+    # this untouched - regardless of whether a brief was given.
+    TaskArtifacts(wt, task_id).write_text(NEW_SEED, seed)
+    deps.author_spec(wt, task_id, _spec_rel(task_id), brief)
     if spec_path.read_text(encoding="utf-8") == seed:
         print(
             "ERROR: authoring session added nothing beyond the headline at "
@@ -210,15 +233,19 @@ def _phase_new(config: OrchestratorConfig, task_id: str, deps: Deps) -> int:
 
 
 def _refresh_stub_spec(gitops: GitOps, wt: Path, task_id: str) -> None:
-    """A failed ``--new`` (authoring added nothing) leaves a headline-only stub
-    spec in the task worktree, and a later plain kickoff REUSES that worktree -
-    so clarify would interrogate the stub while the real spec sits on the hub
-    (TODO 2026-07). When the worktree spec is exactly the ``--new`` seed and
-    the hub's default branch carries a richer one, pull that version over the
-    stub and commit; any other content is left strictly alone."""
+    """A failed ``--new`` (authoring added nothing) leaves a stub spec (bare
+    headline, or headline+brief - see NEW_SEED) in the task worktree, and a
+    later plain kickoff REUSES that worktree - so clarify would interrogate
+    the stub while the real spec sits on the hub (TODO 2026-07). When the
+    worktree spec is exactly the recorded ``--new`` seed and the hub's default
+    branch carries a richer one, pull that version over the stub and commit;
+    any other content is left strictly alone."""
     spec_rel = _spec_rel(task_id)
     spec_path = wt / spec_rel
-    stub = f"# {task_id}\n"
+    # The exact seed --phase new wrote (bare headline, or headline+brief); no
+    # record (e.g. --new never ran here) falls back to the bare headline, the
+    # only shape a stub could ever have had before NEW_SEED existed.
+    stub = TaskArtifacts(wt, task_id).read_text(NEW_SEED) or f"# {task_id}\n"
     try:
         if not spec_path.is_file() or spec_path.read_text(encoding="utf-8") != stub:
             return
@@ -1047,6 +1074,9 @@ def main(
     parser.add_argument(
         "--reason", help="resume phase: the Director's note (why the task is resumed)"
     )
+    parser.add_argument(
+        "--brief", help="new phase: optional brief that seeds spec authoring"
+    )
     # --phase flag: raise (--kind/--summary/...) or resolve (--resolve) a flag
     parser.add_argument(
         "--kind", choices=LOOP_FLAG_KINDS,
@@ -1159,7 +1189,7 @@ def main(
     task_id = args.task_ids[0]
 
     if args.phase == "new" or (args.new and args.phase == "all"):
-        rc = _phase_new(config, task_id, deps)
+        rc = _phase_new(config, task_id, deps, brief=args.brief)
         if rc != 0 or args.phase == "new":
             return rc
     if args.phase in ("clarify", "all"):

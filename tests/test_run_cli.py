@@ -113,7 +113,7 @@ def test_clarify_refreshes_stub_spec_from_hub(remote: Path, tmp_path: Path) -> N
     from dataclasses import replace
 
     env = _env(remote, tmp_path)
-    deps_new = replace(_deps([]), author_spec=lambda wt, t, rel: None)
+    deps_new = replace(_deps([]), author_spec=lambda wt, t, rel, brief: None)
     assert main(["t9", "--phase", "new"], env=env, deps=deps_new) == 2
     wt = tmp_path / "work" / "wt" / "t9"
     spec = wt / TARGET_DIR_NAME / "specs" / "t9.md"
@@ -124,6 +124,59 @@ def test_clarify_refreshes_stub_spec_from_hub(remote: Path, tmp_path: Path) -> N
     assert main(["t9", "--phase", "clarify"], env=env, deps=deps) == 0
     refreshed = spec.read_text(encoding="utf-8")
     assert "the real ask" in refreshed
+
+
+def test_clarify_refreshes_brief_stub_spec_from_hub(remote: Path, tmp_path: Path) -> None:
+    # Regression guard (rw2 finding): a failed --new that used --brief leaves
+    # a headline+brief stub, not the bare headline. _refresh_stub_spec must
+    # still recognize it (via the recorded NEW_SEED artifact) and pull the
+    # real spec pushed to hub main, exactly as the no-brief case does.
+    from dataclasses import replace
+
+    env = _env(remote, tmp_path)
+    deps_new = replace(_deps([]), author_spec=lambda wt, t, rel, brief: None)
+    rc = main(
+        ["t9b", "--phase", "new", "--brief", "add rate limiting"],
+        env=env,
+        deps=deps_new,
+    )
+    assert rc == 2
+    wt = tmp_path / "work" / "wt" / "t9b"
+    spec = wt / TARGET_DIR_NAME / "specs" / "t9b.md"
+    assert spec.read_text(encoding="utf-8") == "# t9b\n\nadd rate limiting\n"
+
+    _push_spec(remote, tmp_path, "t9b", "# t9b\n\n## Goal\nthe real ask\n")
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t9b", "--phase", "clarify"], env=env, deps=deps) == 0
+    refreshed = spec.read_text(encoding="utf-8")
+    assert "the real ask" in refreshed
+
+
+def test_clarify_leaves_authored_brief_spec_alone(remote: Path, tmp_path: Path) -> None:
+    # A SUCCESSFULLY authored spec (post --new --brief) must never be treated
+    # as a stub by a later clarify, even though NEW_SEED still records the
+    # original brief-inclusive seed on disk.
+    from dataclasses import replace
+
+    env = _env(remote, tmp_path)
+
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
+        (wt / spec_rel).write_text(f"# {task_id}\n\n## Goal\n{brief}\n", encoding="utf-8")
+
+    deps_new = replace(_deps([]), author_spec=author)
+    rc = main(
+        ["t9c", "--phase", "new", "--brief", "add rate limiting"],
+        env=env,
+        deps=deps_new,
+    )
+    assert rc == 0
+    wt = tmp_path / "work" / "wt" / "t9c"
+    spec = wt / TARGET_DIR_NAME / "specs" / "t9c.md"
+
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t9c", "--phase", "clarify"], env=env, deps=deps) == 0
+    refreshed = spec.read_text(encoding="utf-8")
+    assert "## Goal" in refreshed and "add rate limiting" in refreshed
 
 
 def test_clarify_leaves_non_stub_spec_alone(remote: Path, tmp_path: Path) -> None:
@@ -256,7 +309,7 @@ def test_missing_spec_exits_2(remote: Path, tmp_path: Path) -> None:
 
 def test_new_mode_authors_spec_and_pushes(remote: Path, tmp_path: Path) -> None:
     # a task whose spec does NOT exist on main; --new authors it interactively
-    def author(wt: Path, task_id: str, spec_rel: str) -> None:
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
         (wt / spec_rel).write_text("---\ntype: feature\n---\n# Authored\n", encoding="utf-8")
 
     deps = Deps(
@@ -284,7 +337,7 @@ def test_new_mode_refuses_when_spec_already_exists(remote: Path, tmp_path: Path)
     # t1 spec already exists on main (from the fixture); --new must refuse
     called = False
 
-    def author(wt: Path, task_id: str, spec_rel: str) -> None:
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
         nonlocal called
         called = True
 
@@ -297,10 +350,111 @@ def test_new_mode_refuses_when_spec_already_exists(remote: Path, tmp_path: Path)
 def test_new_mode_errors_if_no_spec_produced(remote: Path, tmp_path: Path) -> None:
     deps = Deps(
         make_runner=lambda c, role: FakeRunner([]),
-        author_spec=lambda wt, task, spec_rel: None,  # produces nothing
+        author_spec=lambda wt, task, spec_rel, brief: None,  # produces nothing
     )
     rc = main(["freshtask", "--phase", "new"], env=_env(remote, tmp_path), deps=deps)
     assert rc == 2
+
+
+def test_new_mode_with_brief_seeds_spec_and_threads_it(remote: Path, tmp_path: Path) -> None:
+    captured: dict[str, str | None] = {}
+
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
+        captured["seed"] = (wt / spec_rel).read_text(encoding="utf-8")
+        captured["brief"] = brief
+        (wt / spec_rel).write_text("---\ntype: feature\n---\n# Authored\n", encoding="utf-8")
+
+    deps = Deps(make_runner=lambda c, role: FakeRunner([]), author_spec=author)
+    rc = main(
+        ["freshtask", "--phase", "new", "--brief", "Do the thing"],
+        env=_env(remote, tmp_path),
+        deps=deps,
+    )
+    assert rc == 0
+    assert captured["seed"] == "# freshtask\n\nDo the thing\n"
+    assert captured["brief"] == "Do the thing"
+
+
+def test_new_mode_no_brief_seed_and_prompt_unchanged(remote: Path, tmp_path: Path) -> None:
+    # regression guard: dropping --brief must reproduce today's exact seed and
+    # the exact (brief-free) prompt, byte-for-byte.
+    captured: dict[str, str | None] = {}
+
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
+        captured["seed"] = (wt / spec_rel).read_text(encoding="utf-8")
+        captured["brief"] = brief
+        (wt / spec_rel).write_text("---\ntype: feature\n---\n# Authored\n", encoding="utf-8")
+
+    deps = Deps(make_runner=lambda c, role: FakeRunner([]), author_spec=author)
+    rc = main(["freshtask", "--phase", "new"], env=_env(remote, tmp_path), deps=deps)
+    assert rc == 0
+    assert captured["seed"] == "# freshtask\n"
+    assert captured["brief"] is None
+
+
+def test_new_mode_empty_brief_same_as_no_brief(remote: Path, tmp_path: Path) -> None:
+    captured: dict[str, str] = {}
+
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
+        captured["seed"] = (wt / spec_rel).read_text(encoding="utf-8")
+        (wt / spec_rel).write_text("---\ntype: feature\n---\n# Authored\n", encoding="utf-8")
+
+    deps = Deps(make_runner=lambda c, role: FakeRunner([]), author_spec=author)
+    rc = main(
+        ["freshtask", "--phase", "new", "--brief", ""],
+        env=_env(remote, tmp_path),
+        deps=deps,
+    )
+    assert rc == 0
+    assert captured["seed"] == "# freshtask\n"
+
+
+def test_new_mode_empty_authoring_guard_fires_with_brief(remote: Path, tmp_path: Path) -> None:
+    # the "authoring added nothing" guard must compare against the
+    # brief-inclusive seed, not the bare headline, when a brief was given.
+    deps = Deps(
+        make_runner=lambda c, role: FakeRunner([]),
+        author_spec=lambda wt, task, spec_rel, brief: None,  # produces nothing
+    )
+    rc = main(
+        ["freshtask", "--phase", "new", "--brief", "Do the thing"],
+        env=_env(remote, tmp_path),
+        deps=deps,
+    )
+    assert rc == 2
+
+
+def test_default_author_spec_threads_brief_into_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.run import SPEC_AUTHOR_PROMPT, _default_author_spec
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], cwd: Path, check: bool) -> None:
+        captured["cmd"] = cmd
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _default_author_spec(tmp_path, "t1", "specs/t1.md", "Fix the thing")
+    prompt = captured["cmd"][1]
+    base = SPEC_AUTHOR_PROMPT.format(spec_rel="specs/t1.md")
+    assert prompt.startswith(base)
+    assert "Fix the thing" in prompt
+
+
+def test_default_author_spec_no_brief_is_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orchestrator.run import SPEC_AUTHOR_PROMPT, _default_author_spec
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], cwd: Path, check: bool) -> None:
+        captured["cmd"] = cmd
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _default_author_spec(tmp_path, "t1", "specs/t1.md", None)
+    assert captured["cmd"][1] == SPEC_AUTHOR_PROMPT.format(spec_rel="specs/t1.md")
 
 
 def test_gitops_from_config(remote: Path, tmp_path: Path) -> None:

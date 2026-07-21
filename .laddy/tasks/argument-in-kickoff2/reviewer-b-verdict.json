@@ -1,0 +1,29 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "orchestrator/run.py",
+    "orchestrator/artifacts.py",
+    "tests/test_run_cli.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "_refresh_stub_spec now recognizes a brief-inclusive failed-`--new` stub by reading the exact seed recorded via a new NEW_SEED artifact file, instead of a hardcoded bare-headline literal",
+      "evidence": "orchestrator/run.py:216-219 writes `TaskArtifacts(wt, task_id).write_text(NEW_SEED, seed)` right after seeding the spec (before the guard check); orchestrator/run.py:246 reads it back with `stub = TaskArtifacts(wt, task_id).read_text(NEW_SEED) or f\"# {task_id}\\n\"`, falling back to the bare headline only when no record exists",
+      "verified": true
+    },
+    {
+      "claim": "the exact regression I reproduced (failed `--new --brief` stub not refreshed from hub) is now fixed and covered by a dedicated test",
+      "evidence": "test_clarify_refreshes_brief_stub_spec_from_hub (tests/test_run_cli.py) reproduces my exact repro (task t9b, brief 'add rate limiting', push real spec to hub, run --phase clarify) and asserts 'the real ask' appears; ran `pytest tests/test_run_cli.py -k \"stub or refresh\" -q` -> 3 passed (includes this test, the original no-brief regression test, and the new 'successfully authored brief spec not treated as stub' test)",
+      "verified": true
+    },
+    {
+      "claim": "full gate still green after the fix",
+      "evidence": "ruff check . -> 'All checks passed!'; basedpyright -> '0 errors, 2141 warnings, 0 notes'",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "The prior binding finding (_refresh_stub_spec silently broken for brief-seeded stubs) is fixed via a recorded NEW_SEED artifact and directly verified by a new regression test that reproduces my exact failure scenario and passes. An adjacent case (a successfully-authored brief-seeded spec must not be mistaken for a stub on a later clarify) is also covered and passes.",
+  "residual_risks": []
+}
