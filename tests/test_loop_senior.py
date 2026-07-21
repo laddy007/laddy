@@ -180,6 +180,9 @@ def test_oscillation_same_rw2_finding_escalates_to_senior(
     ]
     # senior got both verdicts as data
     assert "loses audit rows" in senior.calls[0].prompt
+    # no gate failure in this dispute (fast all green, no authoritative run), so
+    # the gate-failure section is omitted (Change 3)
+    assert "Last gate failure" not in senior.calls[0].prompt
     art = TaskArtifacts(wt, "t1")
     stored = art.read_json(SENIOR_VERDICT)
     assert stored is not None and stored["verdict"] == "APPROVED"
@@ -278,5 +281,60 @@ def test_nonconvergence_helpers() -> None:
             {"action": "authoritative", "outcome": "fail", "fingerprint": "x"},
         ]
     )
+    # Change 2: two identical fast-test failures escalate too - a developer fix
+    # that keeps failing the same fast test never reaches the reviewers again.
+    assert nonconvergence_detected(
+        [
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft"},
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft"},
+        ]
+    )
+    # ...but only SINCE the last senior verdict: a senior intervention re-arms
+    # the backstop, so one post-senior fast failure is not yet nonconvergence.
+    assert not nonconvergence_detected(
+        [
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft"},
+            {"action": "senior", "outcome": "changes_requested"},
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft"},
+        ]
+    )
+    # two DIFFERENT fast failures are progress, not a stall
+    assert not nonconvergence_detected(
+        [
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft1"},
+            {"action": "fast_tests", "outcome": "fail", "fingerprint": "ft2"},
+        ]
+    )
     assert senior_ran([{"action": "senior", "outcome": "approved"}])
     assert not senior_ran([{"action": "rw1", "outcome": "approved"}])
+
+
+def test_repeated_fast_failure_escalates_to_senior_with_failure_tail(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # Change 2+3: a developer fix that keeps failing the SAME fast test would run
+    # to CAP_REACHED (the fast gate is before rw1, so the reviewers never see it
+    # again). Two identical fast failures must escalate to the senior instead,
+    # and the senior must be handed the failure tail so it knows WHY it is stuck.
+    senior = FakeRunner([verdict_json("APPROVED")])
+    orch = _orch(
+        remote, tmp_path, roles_dir,
+        dev=FakeRunner(["done", "still broken"]),
+        rw1=FakeRunner([verdict_json("APPROVED")]),
+        senior=senior,
+        fast_shell=FakeShell(
+            results=[(1, "FAILED tests/test_x.py::test_y - boom")] * 2
+        ),
+    )
+    assert orch.run("t1") == "PUSHED"
+    wt = orch.gitops.task_worktree("t1")
+    actions = [e["action"] for e in TaskArtifacts(wt, "t1").read_log()]
+    # escalated after the second identical fast failure, not another dev round
+    assert actions == [
+        "developer", "fast_tests",
+        "developer", "fast_tests",
+        "senior", "push", "terminal",
+    ]
+    # the senior prompt carries the fast-failure tail (Change 3)
+    assert "Last gate failure" in senior.calls[0].prompt
+    assert "FAILED tests/test_x.py::test_y - boom" in senior.calls[0].prompt

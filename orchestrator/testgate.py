@@ -61,30 +61,50 @@ def _subprocess_shell_split(command: str, cwd: Path) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def _subprocess_shell(command: str, cwd: Path) -> tuple[int, str]:
-    rc, out, err = _subprocess_shell_split(command, cwd)
-    return rc, out + err
+def _merge_streams(out: str, err: str) -> str:
+    """Combine captured stdout+stderr so the test SIGNAL survives ``_tail``.
 
+    Tools split output by convention: pytest/ruff/basedpyright write their
+    RESULT (the ``N passed`` summary, a real ``FAILED`` line, the ``@@GATE``
+    sentinel) to stdout, while the noise - docker/compose build + teardown
+    progress and pytest-xdist worker chatter - floods stderr, hundreds of
+    lines. A naive stdout+stderr concatenation puts stdout FIRST, so ``_tail``
+    (which reads the END) returns only the stderr flood and the actual result
+    is pushed out of the tail - never surviving into ``output_tail`` or the
+    rework ``detail``. Emit stderr first and stdout LAST so the tail lands on
+    the result; on an infra failure with no stdout, the stderr tail still
+    surfaces the error.
 
-def _subprocess_shell_gate(command: str, cwd: Path) -> tuple[int, str]:
-    """Combined-output shell for the containerized authoritative gate that
-    keeps the test SIGNAL visible in the tail.
-
-    docker/compose write build + teardown progress (hundreds of lines) to
-    stderr; pytest/ruff write their result to stdout. A naive stdout+stderr
-    concatenation puts stdout FIRST, so ``_tail`` (which reads the END) returns
-    only the stderr flood - the ``N passed`` summary, or a real test failure,
-    never survives into ``output_tail`` or the rework ``detail``. Emit stderr
-    first and stdout LAST so the tail lands on the gate's actual result; on an
-    infra failure with no stdout, the stderr tail still surfaces the error.
+    ONE ordering, shared by both gates (fast inner + authoritative): the fast
+    gate is just as prone to burying a real pytest failure under a basedpyright
+    / pytest-xdist stderr flood as the container gate is under docker noise.
     """
-    rc, out, err = _subprocess_shell_split(command, cwd)
     sections: list[str] = []
     if err.strip():
         sections.append("--- stderr ---\n" + err.rstrip("\n"))
     if out.strip():
         sections.append("--- stdout ---\n" + out.rstrip("\n"))
-    return rc, "\n".join(sections)
+    return "\n".join(sections)
+
+
+def _subprocess_shell(command: str, cwd: Path) -> tuple[int, str]:
+    """Combined-output shell for the fast inner gate and the default deps shell.
+
+    Shares the authoritative gate's stderr-first ordering (``_merge_streams``)
+    so a real pytest failure on stdout is never buried under the stderr flood.
+    """
+    rc, out, err = _subprocess_shell_split(command, cwd)
+    return rc, _merge_streams(out, err)
+
+
+def _subprocess_shell_gate(command: str, cwd: Path) -> tuple[int, str]:
+    """Combined-output shell for the containerized authoritative gate.
+
+    Identical signal-preserving ordering as the fast gate (see
+    ``_merge_streams``); kept as a distinct name because ``Deps`` wires it as
+    ``gate_shell`` and ``DockerGate`` defaults to it.
+    """
+    return _subprocess_shell(command, cwd)
 
 
 @dataclass(frozen=True)

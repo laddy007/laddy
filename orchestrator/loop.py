@@ -258,10 +258,19 @@ def _fingerprints(entries: Sequence[Mapping[str, Any]], action: str) -> list[str
 
 
 def nonconvergence_detected(entries: Sequence[Mapping[str, Any]]) -> bool:
-    """Same rw2 binding finding or same authoritative failure repeating.
+    """Same rw2 finding, or same authoritative / fast-test failure, repeating.
+
+    A developer fix for a rw2 nogo can reintroduce a fast test that then fails
+    IDENTICALLY every round (the r3-r8 argument-in-kickoff2 stall) - the fast
+    gate sits before rw1, so such a run never reaches the reviewers again and
+    only the fingerprint of the repeated fast failure can catch it. Two
+    consecutive identical fast-test failures are as much a non-convergence
+    signal as a repeated authoritative failure, and must escalate rather than
+    grind to the iteration cap.
 
     Only rounds SINCE the last senior verdict count: a senior intervention
-    resolves the dispute it was called for, so the backstop arms afresh.
+    resolves the dispute it was called for, so the backstop arms afresh - a
+    single fast failure right after a senior verdict does not re-escalate.
     """
     since = list(entries)
     for i in range(len(since) - 1, -1, -1):
@@ -271,6 +280,8 @@ def nonconvergence_detected(entries: Sequence[Mapping[str, Any]]) -> bool:
     if repeats(_fingerprints(since, "rw2")):
         return True
     if repeats(_fingerprints(since, "authoritative")):
+        return True
+    if repeats(_fingerprints(since, "fast_tests")):
         return True
     # reviewer disagreement on a binding matter: rw1 keeps approving,
     # rw2 keeps blocking
@@ -595,6 +606,15 @@ CONFIRMED subset (verbatim where confirmed), with your evidence in
 claims_verified.
 """
 
+SENIOR_GATE_FAILURE_SECTION = """\
+Last gate failure (the loop is stuck on this - the verdicts above may not
+show WHY the gate keeps failing):
+```
+{tail}
+```
+
+"""
+
 SENIOR_PROMPT = """\
 {role}
 
@@ -616,7 +636,7 @@ rw2 verdict:
 {rw2_verdict}
 ```
 
-Diff against origin/{base}:
+{gate_failure}Diff against origin/{base}:
 ```diff
 {diff}
 ```
@@ -1188,6 +1208,10 @@ class Orchestrator:
             action="fast_tests",
             outcome="pass" if result.passed else "fail",
             round=rp.round,
+            # Fingerprint the failure (symmetry with _run_authoritative) so the
+            # backstop can catch a fast test that fails IDENTICALLY every round
+            # instead of grinding to the iteration cap.
+            fingerprint=failure_fp(result.output_tail) if not result.passed else None,
             detail=result.output_tail[-4000:],
         )
         self.gitops.commit_all(
@@ -1344,6 +1368,25 @@ class Orchestrator:
         rp: ResumePoint,
     ) -> None:
         assert self.senior_runner is not None
+        # The senior is escalated on a stuck gate but is otherwise shown only the
+        # diff + verdicts - not WHY the gate keeps failing. Feed the tail of the
+        # last fast/authoritative failure so it can decide on evidence; omit the
+        # section when there is no gate failure (e.g. a pure rw1/rw2 dispute).
+        last_gate_fail = next(
+            (
+                e
+                for e in reversed(artifacts.read_log())
+                if e.get("action") in ("fast_tests", "authoritative")
+                and e.get("outcome") == "fail"
+            ),
+            None,
+        )
+        gate_tail = str(last_gate_fail.get("detail", "")) if last_gate_fail else ""
+        gate_failure = (
+            SENIOR_GATE_FAILURE_SECTION.format(tail=gate_tail[:20000])
+            if gate_tail.strip()
+            else ""
+        )
         prompt = SENIOR_PROMPT.format(
             role=self._role("senior-reviewer"),
             task=task_id,
@@ -1351,6 +1394,7 @@ class Orchestrator:
             base=self.gitops.default_branch,
             rw1_verdict=json.dumps(artifacts.read_json(RW1_VERDICT), indent=2),
             rw2_verdict=json.dumps(artifacts.read_json(RW2_VERDICT), indent=2),
+            gate_failure=gate_failure,
             diff=self.gitops.diff_text(wt)[:20000],
         )
         try:

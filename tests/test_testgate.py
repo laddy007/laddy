@@ -129,6 +129,38 @@ def test_gate_shell_keeps_stderr_when_stdout_empty() -> None:
     assert "build failed: no space left" in _tail(output)
 
 
+@requires_bash
+def test_fast_gate_surfaces_pytest_failure_under_stderr_flood() -> None:
+    # Change 1: the fast inner gate had no stderr-first ordering, so a real
+    # pytest failure on stdout was pushed out of the 400-line tail by a flood
+    # of stderr emitted AFTER it (basedpyright / pytest-xdist worker noise).
+    # run_fast's default shell must share the authoritative gate's stderr-first
+    # merge, so the failure survives into output_tail (the developer's rework
+    # detail) instead of being buried.
+    cmd = (
+        "echo 'FAILED tests/test_x.py::test_y - AssertionError'; "
+        "for i in $(seq 1 800); do echo xdist-worker-noise >&2; done; exit 1"
+    )
+    result = run_fast(cmd, Path("."))
+    assert result.passed is False
+    assert "FAILED tests/test_x.py::test_y - AssertionError" in result.output_tail
+
+
+def test_stream_merge_orders_stderr_first_stdout_last() -> None:
+    # The ordering is ONE implementation (_merge_streams) shared by the fast and
+    # the authoritative gate shells, so neither can drift: stderr first (noise),
+    # stdout LAST so the tail (read from the END) lands on the real result.
+    from orchestrator.testgate import _merge_streams
+
+    assert (
+        _merge_streams("the result", "the noise")
+        == "--- stderr ---\nthe noise\n--- stdout ---\nthe result"
+    )
+    # empty streams are dropped, never emitting a bare section header
+    assert _merge_streams("only-stdout", "") == "--- stdout ---\nonly-stdout"
+    assert _merge_streams("", "only-stderr") == "--- stderr ---\nonly-stderr"
+
+
 def test_docker_gate_defaults_to_signal_preserving_shell() -> None:
     from orchestrator.testgate import DockerGate, _subprocess_shell_gate
 
