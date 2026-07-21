@@ -950,6 +950,11 @@ def _binding_on_merged_tree(
     try:
         code, _ = _git(
             mwt,
+            # Neutralize any branch-controlled git hook (a target that sets a
+            # TRACKED core.hooksPath - husky-style .husky/ - would otherwise run
+            # the branch's committed post-merge/pre-commit script on the
+            # Director's trusted machine during verification, before any L3 hold).
+            "-c", "core.hooksPath=/dev/null",
             "-c", "user.name=myapp-verify",
             "-c", "user.email=verify@myapp.local",
             "merge", "--no-ff", branch_sha,
@@ -1181,6 +1186,7 @@ def merge_branch(
     _, original_head = _git(repo, "rev-parse", "HEAD")
     code, _ = _git(
         repo,
+        "-c", "core.hooksPath=/dev/null",  # no branch-controlled hook on merge
         "-c", "user.name=myapp-merge",
         "-c", "user.email=merge@myapp.local",
         "merge", "--no-ff", "--no-commit", verified_sha,
@@ -1222,6 +1228,7 @@ def merge_branch(
 
         commit_code, commit_output = _git(
             repo,
+            "-c", "core.hooksPath=/dev/null",  # no branch-controlled pre-commit/commit-msg hook
             "-c", "user.name=myapp-merge",
             "-c", "user.email=merge@myapp.local",
             "commit", "-m", merge_subject(task_id, verified_sha),

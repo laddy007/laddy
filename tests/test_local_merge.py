@@ -999,6 +999,32 @@ def test_gather_and_merge_l2_green(local_repo: Path, tmp_path: Path) -> None:
     assert _g("-C", str(local_repo), "cat-file", "-e", "main:myapp/api_helper.py") == ""
 
 
+def test_merge_disables_branch_controlled_hooks(local_repo: Path, tmp_path: Path) -> None:
+    # A target that configures core.hooksPath (husky-style .husky/) lets a branch
+    # ship a TRACKED hook that would run on the Director's trusted machine during
+    # the merge/commit. merge_branch pins core.hooksPath=/dev/null per git
+    # invocation, so no branch-controlled hook executes there.
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    shell = _green_shell()
+    tools = _tools(
+        local_repo, shell,
+        security_outputs=[verdict_json("APPROVED")],
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    gates = gather_gates("t1", local_repo, tmp_path / "mw", tools)
+    # Configure a hooksPath with a pre-commit that fires on the merge commit.
+    hooks = tmp_path / "evil-hooks"
+    hooks.mkdir()
+    canary = tmp_path / "hook-ran"
+    hook = hooks / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch {canary}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _g("-C", str(local_repo), "config", "core.hooksPath", str(hooks))
+    # The merge still succeeds, and the planted hook never ran.
+    assert merge_branch(local_repo, "t1", gates.head_sha) is True
+    assert not canary.exists(), "a branch-controlled hook ran during the trusted merge"
+
+
 def test_gather_l3_sensitive_names_the_path(local_repo: Path, tmp_path: Path) -> None:
     _push_ready_branch(local_repo, tmp_path, sensitive=True)  # touches myapp/models.py
     shell = _green_shell()
