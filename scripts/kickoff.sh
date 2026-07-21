@@ -119,11 +119,17 @@ fi
   exit 1
 }
 
-# Phase 2: loop - detached, survives SSH drop.
+# Phase 2: loop - detached; survives an SSH drop AND the tmux_wrap session
+# closing when this launcher exits.
+# setsid --fork (NOT `nohup ... &`): fork the loop into a fresh session
+# synchronously. `&` + this launcher exiting races tmux's killpg on the pane's
+# process group; nohup blocks only SIGHUP, not that kill, so the backgrounded
+# loop was killed with an empty $LOG (measured). --fork makes the detach
+# unconditional, so it behaves the same wrapped in tmux or run bare. Do not
+# revert to `&`.
 # -u: unbuffered, so a crash before the terminal-state print does not swallow
 # buffered output (an empty $LOG that looked like an instant death otherwise).
 # LADDY_LOG_HEARTBEAT: mirror each iteration-log entry to $LOG as it happens.
-LADDY_LOG_HEARTBEAT=1 nohup "$PY" -u -m orchestrator.run "$TASK" --phase loop ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null &
-PID=$!
-echo "[kickoff] loop detached (pid $PID); log: $LOG"
+LADDY_LOG_HEARTBEAT=1 setsid --fork "$PY" -u -m orchestrator.run "$TASK" --phase loop ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null
+echo "[kickoff] loop detached; log: $LOG"
 echo "[kickoff] follow with: tail -f $LOG"

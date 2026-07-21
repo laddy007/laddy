@@ -26,11 +26,14 @@ def test_local_task_runs_design_between_clarify_and_loop() -> None:
 
 def test_kickoff_resume_forwards_reason_and_detaches() -> None:
     # --resume must reach `--phase resume` (forwarding --reason via REST) and
-    # detach the same way the loop does (nohup, unbuffered, heartbeat) so it
-    # survives an SSH drop. Guard the wiring against a silent regression.
+    # detach the same way the loop does: `setsid --fork` (unbuffered, heartbeat)
+    # so it survives an SSH drop AND the tmux_wrap session closing when the
+    # launcher exits. A plain `nohup ... &` races tmux's killpg on pane teardown
+    # (measured: the loop died with an empty $LOG). Guard against a regression.
     text = (_SCRIPTS / "kickoff.sh").read_text(encoding="utf-8")
     resume = next(ln for ln in text.splitlines() if "--phase resume" in ln)
-    assert "nohup" in resume, resume
+    assert "setsid --fork" in resume, resume
+    assert not resume.rstrip().endswith("&"), resume  # no racy background detach
     assert "LADDY_LOG_HEARTBEAT=1" in resume, resume
     assert " -u " in resume, resume
     assert 'REST[@]' in resume, resume  # forwards --reason "text" verbatim
@@ -39,11 +42,14 @@ def test_kickoff_resume_forwards_reason_and_detaches() -> None:
 def test_kickoff_launches_loop_observably() -> None:
     # AC#3: the detached loop must run unbuffered (so a crash before the terminal
     # print does not swallow buffered output into an empty $LOG) with the log
-    # heartbeat enabled. Guard the wiring so neither silently regresses.
+    # heartbeat enabled, and detach via `setsid --fork` (NOT `nohup ... &`, which
+    # races tmux's killpg when the wrap session closes). Guard against regress.
     text = (_SCRIPTS / "kickoff.sh").read_text(encoding="utf-8")
     loop = next(ln for ln in text.splitlines() if "--phase loop" in ln)
     assert "LADDY_LOG_HEARTBEAT=1" in loop, loop
     assert " -u " in loop, loop  # python -u: unbuffered stdout/stderr
+    assert "setsid --fork" in loop, loop
+    assert not loop.rstrip().endswith("&"), loop  # no racy background detach
 
 
 def test_kickoff_forwards_brief_only_to_new() -> None:
