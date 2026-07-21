@@ -113,3 +113,73 @@ Then paste this brief into the authoring session:
 
 Locus: scripts/kickoff.sh + orchestrator/run.py (not in security_globs; expect
 L1/L2). Verify with `merge-verified --local kickoff-new-brief <branch>`.
+
+---
+
+## Task 3: loop-venv-bootstrap
+
+PREREQUISITE for every VPS task: today the loop's fast_tests default
+(config.DEFAULT_FAST_COMMANDS = `. .venv/bin/activate && ...`) assumes a built
+`.venv`, but nothing on the VPS creates it in a fresh worktree (.venv is
+gitignored). So fast_tests fails EVERY round with
+`.venv/bin/activate: No such file or directory`, the loop never returns to
+review, and the task burns its rounds to CAP_REACHED. Not a task defect -- an
+engine setup gap. (Seen live: a task was code-complete at r3, but r3+ all died
+on the missing venv.) The env.vps.example:75-77 comment documents a TEST_COMMANDS
+that self-bootstraps, but it is opt-in and the real env.vps never set it; and
+SETUP_COMMANDS is a dead knob read by nothing (TODO).
+
+The band-aid is a Director setting TEST_COMMANDS in env.vps. This task is the
+durable fix so no future Director has to remember it.
+
+Launch:
+
+```bash
+./scripts/kickoff.sh loop-venv-bootstrap --new
+```
+
+Then paste this brief into the authoring session:
+
+    Write a spec for this task (spec only, no implementation).
+
+    Problem: the dev-loop has no per-worktree setup step. config.py's
+    DEFAULT_FAST_COMMANDS activates `.venv` but nothing creates it in a fresh
+    task worktree (`.venv` is gitignored), so fast_tests fails every round with
+    "`.venv/bin/activate: No such file or directory`" and the task burns rounds
+    to CAP_REACHED. SETUP_COMMANDS exists in name but is read by no code.
+
+    Goal: a fresh task worktree gets its environment bootstrapped ONCE before
+    the first fast_tests, so the default fast gate finds a working `.venv`
+    without every Director hand-editing TEST_COMMANDS.
+
+    Decide the shape at the clarify/design gate (options to weigh, not
+    prescriptions):
+    - revive SETUP_COMMANDS as a REAL knob: a setup command run once per fresh
+      worktree (after task_worktree creates it, before the first fast_tests),
+      defaulting to the venv+pip bootstrap; run once, not every round; OR
+    - a built-in bootstrap step in the loop keyed on worktree freshness (no new
+      knob), idempotent so a re-run is cheap; OR
+    - if neither, at minimum make DEFAULT_FAST_COMMANDS self-bootstrap and
+      DELETE the dead SETUP_COMMANDS references so the knob is not misleading.
+
+    Constraints:
+    - runs on the VPS worker (needs python3-venv on the box; note it in the
+      spec / onboarding, do not assume it).
+    - the injected-clock / no-real-sleep and typed-config invariants hold.
+    - idempotent: a resumed or re-entered worktree must not rebuild from scratch
+      or double-install.
+
+    AC:
+    - a brand-new task worktree reaches fast_tests with a usable `.venv` and no
+      "activate: No such file or directory".
+    - the bootstrap runs at most once per fresh worktree, not every round.
+    - whichever path is chosen, no dead/misleading SETUP_COMMANDS knob remains.
+    - unit tests: setup runs on a fresh worktree, is skipped on an already-set-up
+      one, and the loop ordering (setup -> fast_tests) holds.
+
+Locus: orchestrator/loop.py + orchestrator/config.py (+ env.vps.example doc);
+not in security_globs, expect L1/L2. Verify with `merge-verified --local
+loop-venv-bootstrap <branch>`.
+
+NOTE: until Task 3 lands, set TEST_COMMANDS in the real env.vps to the
+bootstrap variant (env.vps.example:77) so the other tasks can run at all.
