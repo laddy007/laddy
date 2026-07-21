@@ -116,21 +116,23 @@ L1/L2). Verify with `merge-verified --local kickoff-new-brief <branch>`.
 
 ---
 
-## Task 3: loop-venv-bootstrap
+## Task 3: loop-venv-bootstrap  -- DONE (commit dd62a3b9, on main)
 
-PREREQUISITE for every VPS task: today the loop's fast_tests default
-(config.DEFAULT_FAST_COMMANDS = `. .venv/bin/activate && ...`) assumes a built
-`.venv`, but nothing on the VPS creates it in a fresh worktree (.venv is
-gitignored). So fast_tests fails EVERY round with
-`.venv/bin/activate: No such file or directory`, the loop never returns to
-review, and the task burns its rounds to CAP_REACHED. Not a task defect -- an
-engine setup gap. (Seen live: a task was code-complete at r3, but r3+ all died
-on the missing venv.) The env.vps.example:75-77 comment documents a TEST_COMMANDS
-that self-bootstraps, but it is opt-in and the real env.vps never set it; and
-SETUP_COMMANDS is a dead knob read by nothing (TODO).
+DONE in code, not just spec: the loop now bootstraps a fresh worktree ONCE
+before the first fast_tests. SETUP_COMMANDS was revived as a real knob
+(config.DEFAULT_SETUP_COMMANDS creates .venv + installs requirements-dev.txt,
+honoring ${PYTHON_BIN:-python3}); loop._ensure_setup runs it at most once per
+worktree, guarded by a marker under work_root (never the worktree, so it never
+lands on the branch). ruff/basedpyright/1122 tests green; shell precedence and
+PYTHON_BIN expansion verified against a real shell.
 
-The band-aid is a Director setting TEST_COMMANDS in env.vps. This task is the
-durable fix so no future Director has to remember it.
+REMAINING: this fix must reach the VPS -- the running engine there predates
+dd62a3b9. Update the engine on the box (upgrade_laddy.sh once its preflight is
+clear, or however the VPS engine is refreshed). The env.vps TEST_COMMANDS
+band-aid is no longer required (the default bootstraps on its own); a lighter
+TEST_COMMANDS that assumes .venv is fine to keep.
+
+The original brief, kept for the record:
 
 Launch:
 
