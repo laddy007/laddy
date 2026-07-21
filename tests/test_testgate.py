@@ -316,10 +316,37 @@ def test_binding_gate_runs_trusted_infra_not_the_branch() -> None:
 
     cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp", trusted_ref="trustedsha")
     # the gate infra is restored from the trusted ref over the branch clone
-    assert f"checkout trustedsha -- {TARGET_DIR_NAME}/docker {TARGET_DIR_NAME}/security" in cmd
+    for path in (f"{TARGET_DIR_NAME}/docker", f"{TARGET_DIR_NAME}/security"):
+        assert f"checkout trustedsha -- {path}" in cmd
     # ...AFTER the branch sha is checked out, BEFORE cd + docker compose
     assert cmd.index("checkout -q branchsha") < cmd.index("checkout trustedsha")
     assert cmd.index("checkout trustedsha") < cmd.index("docker compose")
+
+
+def test_infra_restore_deletes_branch_added_files_before_restoring() -> None:
+    # H-D2-5: `git checkout <ref> -- <dir>` overlays, so a branch-ADDED infra
+    # file that trusted main lacks survives it. GITLEAKS_CONFIG points --config
+    # at exactly such a path, so a planted [allowlist] there would silence the
+    # scan the restore exists to protect. Each path is deleted FIRST.
+    from orchestrator.testgate import RESTORED_INFRA_PATHS, BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp", trusted_ref="trustedsha")
+    for path in RESTORED_INFRA_PATHS:
+        assert f'rm -rf "$tmp/repo/{path}"' in cmd
+        assert cmd.index(f'rm -rf "$tmp/repo/{path}"') < cmd.index(
+            f"checkout trustedsha -- {path}"
+        )
+
+
+def test_gitleaks_config_lives_under_a_restored_infra_path() -> None:
+    # The trusted gitleaks config is only trustworthy because the restore above
+    # rebuilds its directory from main; if it ever moved outside RESTORED_INFRA_PATHS
+    # the branch would simply author the config the gate runs.
+    from orchestrator.testgate import GITLEAKS_CONFIG, RESTORED_INFRA_PATHS
+
+    assert any(
+        GITLEAKS_CONFIG.startswith(f"{p}/") for p in RESTORED_INFRA_PATHS
+    ), f"{GITLEAKS_CONFIG} is branch-controlled: not under {RESTORED_INFRA_PATHS}"
 
 
 def test_binding_gate_without_trusted_ref_does_not_touch_infra() -> None:
@@ -337,7 +364,8 @@ def test_restore_command_is_built_from_the_declared_infra_paths() -> None:
     from orchestrator.testgate import RESTORED_INFRA_PATHS, BindingGate
 
     cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp", trusted_ref="trustedsha")
-    assert f"checkout trustedsha -- {' '.join(RESTORED_INFRA_PATHS)}" in cmd
+    for path in RESTORED_INFRA_PATHS:
+        assert f"checkout trustedsha -- {path}" in cmd
 
 
 def test_restored_infra_paths_names_what_the_branch_silently_loses() -> None:

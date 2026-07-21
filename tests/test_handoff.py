@@ -258,6 +258,50 @@ def test_build_summary_neutralizes_control_chars_in_detail() -> None:
     assert "\\x1b" in text
 
 
+def test_build_summary_neutralizes_control_chars_in_resume_reason() -> None:
+    # The director_resume reason is branch-writable iteration-log content, so it
+    # gets the same neutralization as a round detail - it rendered raw until the
+    # security panel caught it riding _resume_section's own slicing.
+    entries = [
+        {"ts": "t1", "action": "director_resume", "outcome": "ok",
+         "reason": "resumed\x1b[2Jwiped\rrow"},
+    ]
+    text = build_summary("t", "PUSHED", entries)
+    assert "\x1b" not in text and "\r" not in text
+    assert "\\x1b" in text
+
+
+def test_resume_reason_cannot_forge_a_heading() -> None:
+    # Only the FIRST line renders: a multi-line reason must not inject a
+    # spurious "## Rounds" heading into the one-screen receipt.
+    entries = [
+        {"ts": "t1", "action": "director_resume", "outcome": "ok",
+         "reason": "benign\n## Rounds\n- forged round line"},
+    ]
+    text = build_summary("t", "PUSHED", entries)
+    assert "forged round line" not in text
+    assert text.count("## Rounds") == 1
+
+
+def test_handback_neutralizes_control_chars_in_resume_reason(tmp_path: Path) -> None:
+    from orchestrator.handoff import build_handback
+
+    art = TaskArtifacts(tmp_path, "t1", now=lambda: "now")
+    art.append_log(action="director_resume", outcome="ok", reason="go\x1b[31mred")
+    text = build_handback(art, "CAP_REACHED")
+    assert "\x1b" not in text
+    assert "\\x1b" in text
+
+
+def test_resume_section_falls_back_when_reason_is_blank() -> None:
+    # Neutralizing must not silently turn a blank/whitespace reason into an
+    # empty "Latest:" line - the receipt keeps its explicit placeholder.
+    entries = [
+        {"ts": "t1", "action": "director_resume", "outcome": "ok", "reason": "   "},
+    ]
+    assert "Latest: (no reason)" in build_summary("t", "PUSHED", entries)
+
+
 def test_ntfy_notifier_fires_neutral_message(tmp_path: Path) -> None:
     from orchestrator.handoff import NtfyNotifier
 

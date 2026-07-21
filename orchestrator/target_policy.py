@@ -70,6 +70,21 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "**/CLAUDE.md",
     "CLAUDE.local.md",
     "**/CLAUDE.local.md",
+    # The guide tree CLAUDE.md DELEGATES authority to (H-D2-4). A root CLAUDE.md
+    # that says "read CLAUDE/gate.md before touching the gate" makes those files
+    # steering too, but they carry neither the CLAUDE.md name nor an executable
+    # suffix - so without this they read as safe-by-construction markdown and
+    # ride the L1 no-review auto-merge lane onto the Director's TRUSTED machine,
+    # where the next session obeys them. Classification only, and only ever
+    # toward L3: a target whose `claude/` happens to be source code costs a human
+    # glance, never a lost file. Deliberately NOT added to local_merge's
+    # _UNTRUSTED_CONFIG_* deletion sets - that removes the path from the review
+    # worktree, and no CLI auto-ingests this tree the way it does CLAUDE.md
+    # (stripping the root file already breaks the delegation pointer).
+    "CLAUDE/*",
+    "CLAUDE/**/*",
+    "**/CLAUDE/*",
+    "**/CLAUDE/**/*",
     "AGENTS.md",
     "**/AGENTS.md",
     "GEMINI.md",

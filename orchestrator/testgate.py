@@ -271,8 +271,21 @@ def _containerized(
     if "'" in gate_command:  # pragma: no cover - guards a programming error
         raise ValueError("gate_command must not contain a single quote")
     project = _compose_project(sha)
+    # rm BEFORE the checkout, per path (H-D2-5): `git checkout <ref> -- <dir>`
+    # OVERLAYS - it restores every file trusted main HAS, but leaves a file the
+    # branch ADDED that main lacks. That is not a hypothetical: a branch adding
+    # `<agent-dir>/security/gitleaks.toml` (a path GITLEAKS_CONFIG then passes to
+    # `--config`) had its own scanner config survive the restore and run, so a
+    # planted `[allowlist]` would silence the very scan this restore exists to
+    # protect. Deleting first makes the restored tree byte-identical to trusted
+    # main, which is what "the gate infra is trusted" has to mean. The sibling
+    # neutralize_scan below already had this shape (checkout || rm).
     restore_infra = (
-        f'&& git -C "$tmp/repo" checkout {trusted_ref} -- {" ".join(RESTORED_INFRA_PATHS)} '
+        "".join(
+            f'&& rm -rf "$tmp/repo/{p}" '
+            f'&& git -C "$tmp/repo" checkout {trusted_ref} -- {p} '
+            for p in RESTORED_INFRA_PATHS
+        )
         if trusted_ref
         else ""
     )

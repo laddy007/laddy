@@ -249,6 +249,15 @@ def test_deploy_secret_config_is_sensitive(path: str) -> None:
         "GEMINI.md",
         "sub/CLAUDE.md",
         "pkg/CLAUDE.local.md",
+        # H-D2-4: the guide tree the root CLAUDE.md delegates authority to is
+        # steering as much as the file that points at it - .md alone would
+        # otherwise put it on the L1 no-review lane onto the trusted machine.
+        "CLAUDE/gate.md",
+        "CLAUDE/trust-and-merge.md",
+        "CLAUDE/nested/deep.md",
+        "pkg/CLAUDE/gate.md",
+        # H8: the same casefolded match that covers Claude.md covers the tree.
+        "claude/gate.md",
     ],
 )
 def test_agent_config_surface_is_l3(path: str) -> None:

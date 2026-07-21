@@ -68,6 +68,32 @@ def _lines(found: set[tuple[str, str, int]], rule_id: str, filename: str) -> set
     return {line for rid, name, line in found if rid == rule_id and name == filename}
 
 
+def _open_site(path: Path, flags: str) -> int:
+    """1-based line where the ``os.open()`` call carrying ``flags`` starts.
+
+    The adjudications below identify a site by the code AT it, never by a bare
+    line number: any edit earlier in the file shifts the number, and the test
+    then fails for a reason that has nothing to do with the rule. (It did -
+    that is why this helper exists.) ``flags`` may sit on a continuation line,
+    so resolve it and walk back to the line the call opens on, which is what
+    semgrep reports as the finding's start.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    hits = [i for i, line in enumerate(lines) if flags in line]
+    assert len(hits) == 1, f"anchor {flags!r} matched {len(hits)} lines in {path.name}"
+    start = hits[0]
+    while "os.open(" not in lines[start]:
+        start -= 1
+        assert start >= 0, f"no os.open( above anchor {flags!r} in {path.name}"
+    return start + 1
+
+
+# The adjudicated sites, by flag signature (see AC3 below).
+ARTIFACTS_RULE_A = "os.O_CREAT | os.O_RDWR, 0o644"
+QUEUE_RULE_A = "os.O_CREAT | os.O_RDWR)"
+QUEUE_RULE_B2 = "os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600"
+
+
 # --- AC1: each shipped rule catches its anti-pattern -------------------------
 
 
@@ -97,11 +123,20 @@ def test_rule_a_no_false_positive_on_guarded_corpus() -> None:
     found = _scan(REPORT_PATH, QUEUE)
     # report_path.py: every os.open there carries O_NOFOLLOW (or is O_RDONLY).
     assert _lines(found, RULE_A, "report_path.py") == set()
-    q = _lines(found, RULE_A, "queue.py")
-    # queue.py:104 is THE canary - O_CREAT|O_EXCL is TOCTOU-free without
-    # O_NOFOLLOW; 156/177 are O_RDONLY / O_NOFOLLOW opens.
-    assert 104 not in q, "Rule A fired on the O_EXCL canary queue.py:104"
-    assert 156 not in q and 177 not in q
+    # queue.py's other opens are O_RDONLY / O_NOFOLLOW. Asserting the EXACT set
+    # (rather than that a few known-good lines are absent) makes any new
+    # unguarded open in queue.py fail here instead of passing unnoticed.
+    assert _lines(found, RULE_A, "queue.py") == {_open_site(QUEUE, QUEUE_RULE_A)}
+
+
+@requires_semgrep
+def test_rule_a_silent_on_exclusive_create() -> None:
+    # THE canary: O_CREAT|O_EXCL is TOCTOU-free without O_NOFOLLOW, so Rule A
+    # must not fire. It lived on queue.py's exclusive lock-create until the flow
+    # rework replaced that lock with an flock reclaim guard; the fixture keeps
+    # the coverage from leaving with the corpus code that happened to carry it.
+    found = _scan(FIXTURES / "rule_a_good_open_creat_excl.py")
+    assert _lines(found, RULE_A, "rule_a_good_open_creat_excl.py") == set()
 
 
 @requires_semgrep
@@ -127,25 +162,28 @@ def test_rule_b2_no_false_positive_on_report_path_or_guarded_corpus() -> None:
 
 @requires_semgrep
 def test_rule_a_reports_the_two_unguarded_sites_as_findings() -> None:
-    # artifacts.py:143 and queue.py:205 open O_CREAT|O_RDWR with neither guard.
-    # Adjudicated (ruleset header) as genuine low-severity findings: the
-    # "engine-derived path" defence is a provenance argument the ruleset refuses
-    # to encode, and queue.py:205 lacks the O_NOFOLLOW its siblings carry. The
-    # rule correctly fires; --baseline-commit keeps main green as they predate
-    # any diff. This locks the adjudication in as a finding, not a suppression.
+    # The artifacts.py log-lock and queue.py reclaim-guard opens take
+    # O_CREAT|O_RDWR with neither guard. Adjudicated (ruleset header) as genuine
+    # low-severity findings: the "engine-derived path" defence is a provenance
+    # argument the ruleset refuses to encode, and the queue.py site lacks the
+    # O_NOFOLLOW its siblings carry. The rule correctly fires; --baseline-commit
+    # keeps main green as they predate any diff. This locks the adjudication in
+    # as a finding, not a suppression.
     found = _scan(ARTIFACTS, QUEUE)
-    assert 143 in _lines(found, RULE_A, "artifacts.py")
-    assert 205 in _lines(found, RULE_A, "queue.py")
+    assert _open_site(ARTIFACTS, ARTIFACTS_RULE_A) in _lines(
+        found, RULE_A, "artifacts.py"
+    )
+    assert _open_site(QUEUE, QUEUE_RULE_A) in _lines(found, RULE_A, "queue.py")
 
 
 @requires_semgrep
 def test_rule_b2_reports_queue_py_lock_pid_write_as_a_finding() -> None:
-    # queue.py:177 (_write_lock_pid) carries O_NOFOLLOW (Rule A silent) but
-    # opens O_CREAT|O_WRONLY|O_TRUNC on a pre-existing path with no st_nlink
-    # check - adjudicated (ruleset header) alongside the Rule A sites above,
-    # same provenance argument, same --baseline-commit treatment.
+    # queue.py's _write_lock_pid carries O_NOFOLLOW (Rule A silent) but opens
+    # O_CREAT|O_WRONLY|O_TRUNC on a pre-existing path with no st_nlink check -
+    # adjudicated (ruleset header) alongside the Rule A sites above, same
+    # provenance argument, same --baseline-commit treatment.
     found = _scan(QUEUE)
-    assert 177 in _lines(found, RULE_B2, "queue.py")
+    assert _open_site(QUEUE, QUEUE_RULE_B2) in _lines(found, RULE_B2, "queue.py")
 
 
 # --- AC5: the two copies stay byte-identical ---------------------------------

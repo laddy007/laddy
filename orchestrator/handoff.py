@@ -91,8 +91,12 @@ def _resume_section(entries: Sequence[Mapping[str, Any]]) -> list[str]:
     resumes = [e for e in entries if e.get("action") == "director_resume"]
     if not resumes:
         return []
-    latest = str(resumes[-1].get("reason", "")).strip().splitlines()
-    latest_line = latest[0][:200] if latest else "(no reason)"
+    # The reason reaches here from the iteration log, which a branch can write:
+    # neutralize it exactly as every sibling render does (_flags_section, the
+    # round trace) rather than slicing the raw first line. Without this, a
+    # crafted reason puts ANSI/CSI/OSC or bidi controls straight into the
+    # Director-facing summary and handback on ``cat``.
+    latest_line = _safe_inline(resumes[-1].get("reason", ""), limit=200) or "(no reason)"
     return [
         f"## ↻ Director resumes: {len(resumes)}×",
         "",
