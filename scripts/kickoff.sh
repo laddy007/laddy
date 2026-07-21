@@ -90,9 +90,13 @@ done
 # --resume: skip clarify/design (task already under way); the Python phase
 # validates + appends the director_resume event, then runs the loop detached.
 if [ "$DO_RESUME" = "1" ]; then
-  LADDY_LOG_HEARTBEAT=1 nohup "$PY" -u -m orchestrator.run "$TASK" --phase resume ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null &
-  PID=$!
-  echo "[kickoff] resume detached (pid $PID); log: $LOG"
+  # setsid --fork (NOT `nohup ... &`): detach into a fresh session synchronously
+  # so the loop outlives an SSH drop AND the tmux_wrap session closing when this
+  # launcher exits. `&` + the launcher exiting races tmux's killpg on the pane's
+  # process group; nohup blocks only SIGHUP, not that kill - measured, the
+  # backgrounded loop died with an empty $LOG. Do not revert to `&`.
+  LADDY_LOG_HEARTBEAT=1 setsid --fork "$PY" -u -m orchestrator.run "$TASK" --phase resume ${REST[@]+"${REST[@]}"} >> "$LOG" 2>&1 < /dev/null
+  echo "[kickoff] resume detached; log: $LOG"
   echo "[kickoff] follow with: tail -f $LOG"
   exit 0
 fi
