@@ -1,8 +1,11 @@
-pytest
-pytest-xdist
-ruff
-basedpyright
+# Pinned: the gate image installs this file on the TRUSTED machine, so
+# floating versions would let an upstream release change the trusted gate
+# under us (TODO 2026-07-17). Bump deliberately, in a reviewed commit.
+pytest==9.1.1
+pytest-xdist==3.8.0
+ruff==0.15.22
+basedpyright==1.39.9
 # Runtime dep of note_server (declared in pyproject [project].dependencies).
 # Also listed here so the gate image and the fast local .venv install it - the
 # Dockerfile installs requirements-dev.txt but never runs `pip install .`.
-mcp
+mcp==1.28.1

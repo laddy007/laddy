@@ -1,0 +1,120 @@
+/* laddy phone - single-screen mobile layout, dark/light via system scheme. */
+
+:root {
+  --bg: #f5f6f8;
+  --fg: #17202a;
+  --muted: #6b7683;
+  --card: #ffffff;
+  --border: #d7dce2;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --error: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101418;
+    --fg: #e6e9ec;
+    --muted: #8a949e;
+    --card: #171d24;
+    --border: #2a323b;
+    --accent: #3b82f6;
+    --accent-fg: #ffffff;
+    --error: #f87171;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.45 system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 { margin: 0; font-size: 1.2rem; }
+header input { flex: 1; }
+
+main { padding: 0.5rem 1rem 2rem; max-width: 40rem; margin: 0 auto; }
+
+section { margin-top: 1.25rem; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.section-head h2 { margin: 0; font-size: 1rem; }
+.section-head button { margin-left: auto; }
+
+.badge {
+  background: var(--error);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0 0.5rem;
+  font-size: 0.8rem;
+}
+
+.row { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
+.row input { flex: 1; min-width: 0; }
+.check { display: flex; align-items: center; gap: 0.3rem; }
+
+input, textarea, button {
+  font: inherit;
+  color: inherit;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.6rem;
+}
+
+textarea { width: 100%; resize: vertical; margin-top: 0.5rem; }
+
+button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  cursor: pointer;
+}
+
+button:active { opacity: 0.8; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-task { font-weight: 600; font-size: 0.85rem; color: var(--muted); }
+.card p { margin: 0.4rem 0; white-space: pre-wrap; }
+.card button { margin-top: 0.5rem; }
+
+.out {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.6rem;
+  min-height: 2rem;
+  max-height: 40vh;
+  overflow: auto;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+.muted { color: var(--muted); }
+.error { color: var(--error); }
+
+footer { padding: 0.5rem 1rem 1.5rem; text-align: center; min-height: 2rem; }

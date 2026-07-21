@@ -484,6 +484,43 @@ args = every user in `vps.conf`.
 
 ---
 
+## Phone control (laddy-phone)
+
+`phone/` is a minimal PWA served by a stdlib-only HTTP server on the VPS.
+Its primary job: answer the interactive gate questions from a phone. With
+`LADDY_ASK_REMOTE=1` in `env.vps`, the clarify/design gates stop reading
+stdin and instead write each question to
+`$AGENT_WORK_ROOT/questions/<task>.json` and poll for
+`<task>.answer.json` (`orchestrator/remote_ask.py`); the PWA lists those
+questions and writes the answers. It also shows `--phase status` /
+`queue-list` output, enqueues tasks (with optional `--chain`), resumes a
+finished task with a reason, and tails `$AGENT_LOG_DIR/<task>.log`.
+
+**Security posture.** It runs on the untrusted VPS node, as the loop user,
+and can do exactly what that user can already do over SSH - nothing more.
+There is deliberately **no merge, verify, or GitHub surface**: merges stay
+on the Director's trusted machine. Defense layers:
+
+1. Network: bind `LADDY_PHONE_BIND` to the machine's Tailscale/WireGuard IP
+   (default `127.0.0.1:8787` reaches nobody). Never a public interface.
+2. Token: every `/api/*` call needs `LADDY_PHONE_TOKEN`, as
+   `Authorization: Bearer <token>` or `?token=` (for ntfy action URLs).
+   The server refuses to start without a token (exit 2).
+3. Input: task ids are validated against `^[A-Za-z0-9._-]+$` (the same
+   shape kickoff.sh enforces), so no request can escape the questions/log
+   directories.
+
+**Start it.** Foreground: `scripts/phone.sh` (sources `env.vps`, execs
+`python -m phone.server`). Persistent: install `phone/laddy-phone.service`
+as a per-user systemd unit - the install commands are in the unit file's
+comments.
+
+**ntfy tie-in.** Question notifications arrive through the existing
+`NTFY_TOPIC` push ("QUESTION: ..."); open the PWA from your phone's home
+screen and answer there. The gate resumes within its poll interval.
+
+---
+
 ## Oracle — measuring the gates' escape rate (post-merge, non-blocking)
 
 The gates decide; the oracle measures. It never blocks anything. Design

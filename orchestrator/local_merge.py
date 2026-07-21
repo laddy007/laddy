@@ -1008,6 +1008,7 @@ def gather_gates(
     )
     try:
         verified_sha = _worktree_sha(wt)
+        print(f"[gate] {task_id}: worktree at {verified_sha[:12]}; checking artifacts/policy...", flush=True)
         # The recompute (and --local's stop recompute below) is keyed to the
         # trusted LOCAL base branch (M1): policy loads from local <base_branch>
         # - the same trusted ref the binding gate uses - never from a possibly
@@ -1081,6 +1082,11 @@ def gather_gates(
             if frontend_touched(changed, policy.frontend_prefixes)
             else ""
         )
+        print(
+            f"[gate] {task_id}: blast radius {blast}, {len(changed)} changed "
+            "file(s); running the containerized suite (the long step)...",
+            flush=True,
+        )
         binding = _binding_on_merged_tree(
             repo, task_id, work_root, base_sha, verified_sha, tools.binding_gate,
             policy.coverage_package, frontend_gate,
@@ -1089,11 +1095,13 @@ def gather_gates(
         security: tuple[Verdict, ...] = ()
         rw2: Verdict | None = None
         if blast in (L2, L3):
+            print(f"[gate] {task_id}: security panel...", flush=True)
             prompt = SECURITY_PANEL_PROMPT.format(
                 role=_role(tools.roles_dir, "security"), task=task_id, base=base_branch
             )
             security = tuple(run_security_panel(tools.security_runners, prompt, wt))
         if blast == L2:
+            print(f"[gate] {task_id}: rw2 re-run...", flush=True)
             rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir, base_branch)
 
         return GateResults(

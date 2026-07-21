@@ -65,9 +65,21 @@ def utc_now() -> str:
 
 
 def append_jsonl(path: Path, event: dict[str, Any]) -> None:
-    """Append exactly one event line (never rewrites); creates parents."""
+    """Append exactly one event line (never rewrites); creates parents.
+
+    O_NOFOLLOW on the open: callers vet the parent dir (``_ensure``'s lstat
+    walk), but the log FILE itself could still be a planted symlink - a bare
+    ``open("a")`` would append through it to an arbitrary path (TODO 2026-07,
+    the last bare task-artifact write)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
+    try:
+        fd = os.open(
+            path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o644
+        )
+    except OSError as exc:
+        _refuse_symlink(path, exc)
+        raise  # pragma: no cover - _refuse_symlink always raises on ELOOP
+    with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 

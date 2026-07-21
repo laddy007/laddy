@@ -15,7 +15,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -209,11 +209,39 @@ def _phase_new(config: OrchestratorConfig, task_id: str, deps: Deps) -> int:
     return 0
 
 
+def _refresh_stub_spec(gitops: GitOps, wt: Path, task_id: str) -> None:
+    """A failed ``--new`` (authoring added nothing) leaves a headline-only stub
+    spec in the task worktree, and a later plain kickoff REUSES that worktree -
+    so clarify would interrogate the stub while the real spec sits on the hub
+    (TODO 2026-07). When the worktree spec is exactly the ``--new`` seed and
+    the hub's default branch carries a richer one, pull that version over the
+    stub and commit; any other content is left strictly alone."""
+    spec_rel = _spec_rel(task_id)
+    spec_path = wt / spec_rel
+    stub = f"# {task_id}\n"
+    try:
+        if not spec_path.is_file() or spec_path.read_text(encoding="utf-8") != stub:
+            return
+    except OSError:
+        return
+    gitops.fetch_origin(wt)
+    hub_spec = gitops.show_file(wt, f"origin/{gitops.default_branch}", spec_rel)
+    if hub_spec is None or hub_spec == stub:
+        return
+    spec_path.write_text(hub_spec, encoding="utf-8", newline="\n")
+    gitops.commit_all(wt, f"Refresh stub spec from hub main for {task_id}")
+    print(
+        "[clarify] stale stub spec (failed --new leftover) refreshed from "
+        f"origin/{gitops.default_branch}"
+    )
+
+
 def _phase_clarify(
     config: OrchestratorConfig, task_id: str, deps: Deps, skip_clarify: bool
 ) -> int:
     gitops = deps.make_gitops(config)
     wt = gitops.task_worktree(task_id)
+    _refresh_stub_spec(gitops, wt, task_id)
     _, rc = _load_spec(wt, task_id)
     if rc != 0:
         return rc
@@ -966,6 +994,23 @@ def _phase_queue_list(config: OrchestratorConfig) -> int:
     return 0
 
 
+def _wire_remote_ask(
+    config: OrchestratorConfig, task_id: str | None, deps: Deps
+) -> Deps:
+    """LADDY_ASK_REMOTE=1: route the interactive gates' questions through the
+    file+ntfy channel (answerable from the phone) instead of stdin. Only the
+    DEFAULT stdin ask is replaced - a caller (or test) that injected its own
+    ask keeps it, and phases with no task id stay on stdin."""
+    if not config.ask_remote or task_id is None or deps.ask is not _stdin_ask:
+        return deps
+    from orchestrator.remote_ask import RemoteAsk
+
+    remote = RemoteAsk(
+        work_root=config.work_root, task_id=task_id, topic=config.ntfy_topic
+    )
+    return replace(deps, ask=remote.ask)
+
+
 def main(
     argv: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
@@ -1086,6 +1131,9 @@ def main(
 
     config = OrchestratorConfig.from_env(env if env is not None else os.environ)
     deps = deps or Deps()
+    deps = _wire_remote_ask(
+        config, args.task_ids[0] if args.task_ids else None, deps
+    )
 
     if args.phase == "enqueue":
         if args.enqueue_all:

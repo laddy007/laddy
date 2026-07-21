@@ -274,3 +274,17 @@ a troubleshooting table (missing spec, deadlocked task, tripwire fired,
   whichever of `claude`/`codex` is on PATH — confirms the local review
   panel actually runs to completion before you trust it on a real merge
   decision.
+
+## Phone control (laddy-phone)
+
+A minimal, self-contained PWA (`phone/`, stdlib only) to drive the VPS loop
+from a phone: answer clarify/design gate questions (the `LADDY_ASK_REMOTE=1`
+file channel from `orchestrator/remote_ask.py`), view status and queue,
+enqueue/resume tasks, and tail a task log. Security posture: it runs on the
+untrusted VPS node and exposes only what SSH already exposes there - it has
+**no merge or GitHub capability** by construction. Bind it to a tailnet
+address only (`LADDY_PHONE_BIND`), and every `/api/*` call requires the
+`LADDY_PHONE_TOKEN` bearer token. Start with `scripts/phone.sh` (foreground)
+or install `phone/laddy-phone.service` as a per-user systemd unit. Question
+pushes ride the existing `NTFY_TOPIC`; you answer in the PWA. Details in
+`USAGE.md`.
