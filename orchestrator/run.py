@@ -31,7 +31,7 @@ from orchestrator.agents import (
     CodexRunner,
     set_model_flag,
 )
-from orchestrator.artifacts import ROLE_PLAN, TaskArtifacts
+from orchestrator.artifacts import NEW_SEED, ROLE_PLAN, TaskArtifacts
 from orchestrator.clarify import has_clarify, run_clarify_gate
 from orchestrator.config import OrchestratorConfig
 from orchestrator.flags import (
@@ -214,6 +214,10 @@ def _phase_new(
     seed = f"# {task_id}\n\n{brief}\n" if brief else f"# {task_id}\n"
     spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(seed, encoding="utf-8", newline="\n")
+    # Record the exact seed so a later _refresh_stub_spec (a separate phase
+    # invocation, with no brief in hand) can recognize a failed attempt left
+    # this untouched - regardless of whether a brief was given.
+    TaskArtifacts(wt, task_id).write_text(NEW_SEED, seed)
     deps.author_spec(wt, task_id, _spec_rel(task_id), brief)
     if spec_path.read_text(encoding="utf-8") == seed:
         print(
@@ -229,15 +233,19 @@ def _phase_new(
 
 
 def _refresh_stub_spec(gitops: GitOps, wt: Path, task_id: str) -> None:
-    """A failed ``--new`` (authoring added nothing) leaves a headline-only stub
-    spec in the task worktree, and a later plain kickoff REUSES that worktree -
-    so clarify would interrogate the stub while the real spec sits on the hub
-    (TODO 2026-07). When the worktree spec is exactly the ``--new`` seed and
-    the hub's default branch carries a richer one, pull that version over the
-    stub and commit; any other content is left strictly alone."""
+    """A failed ``--new`` (authoring added nothing) leaves a stub spec (bare
+    headline, or headline+brief - see NEW_SEED) in the task worktree, and a
+    later plain kickoff REUSES that worktree - so clarify would interrogate
+    the stub while the real spec sits on the hub (TODO 2026-07). When the
+    worktree spec is exactly the recorded ``--new`` seed and the hub's default
+    branch carries a richer one, pull that version over the stub and commit;
+    any other content is left strictly alone."""
     spec_rel = _spec_rel(task_id)
     spec_path = wt / spec_rel
-    stub = f"# {task_id}\n"
+    # The exact seed --phase new wrote (bare headline, or headline+brief); no
+    # record (e.g. --new never ran here) falls back to the bare headline, the
+    # only shape a stub could ever have had before NEW_SEED existed.
+    stub = TaskArtifacts(wt, task_id).read_text(NEW_SEED) or f"# {task_id}\n"
     try:
         if not spec_path.is_file() or spec_path.read_text(encoding="utf-8") != stub:
             return

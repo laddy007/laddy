@@ -54,6 +54,11 @@ FINDINGS = "findings.json"
 FINDINGS_PROPOSED = "findings-proposed.json"
 REPORT = "report.md"
 EXPLORATION = "exploration.md"
+# The exact seed --phase new wrote before authoring (bare headline, or
+# headline+brief) - lets a later _refresh_stub_spec recognize a failed --new
+# leftover regardless of whether a brief was given, without having to guess
+# or re-derive the brief text from the spec content.
+NEW_SEED = "new-seed.txt"
 SPEC = "spec.md"
 
 

@@ -122,6 +122,59 @@ def test_clarify_refreshes_stub_spec_from_hub(remote: Path, tmp_path: Path) -> N
     assert "the real ask" in refreshed
 
 
+def test_clarify_refreshes_brief_stub_spec_from_hub(remote: Path, tmp_path: Path) -> None:
+    # Regression guard (rw2 finding): a failed --new that used --brief leaves
+    # a headline+brief stub, not the bare headline. _refresh_stub_spec must
+    # still recognize it (via the recorded NEW_SEED artifact) and pull the
+    # real spec pushed to hub main, exactly as the no-brief case does.
+    from dataclasses import replace
+
+    env = _env(remote, tmp_path)
+    deps_new = replace(_deps([]), author_spec=lambda wt, t, rel, brief: None)
+    rc = main(
+        ["t9b", "--phase", "new", "--brief", "add rate limiting"],
+        env=env,
+        deps=deps_new,
+    )
+    assert rc == 2
+    wt = tmp_path / "work" / "wt" / "t9b"
+    spec = wt / TARGET_DIR_NAME / "specs" / "t9b.md"
+    assert spec.read_text(encoding="utf-8") == "# t9b\n\nadd rate limiting\n"
+
+    _push_spec(remote, tmp_path, "t9b", "# t9b\n\n## Goal\nthe real ask\n")
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t9b", "--phase", "clarify"], env=env, deps=deps) == 0
+    refreshed = spec.read_text(encoding="utf-8")
+    assert "the real ask" in refreshed
+
+
+def test_clarify_leaves_authored_brief_spec_alone(remote: Path, tmp_path: Path) -> None:
+    # A SUCCESSFULLY authored spec (post --new --brief) must never be treated
+    # as a stub by a later clarify, even though NEW_SEED still records the
+    # original brief-inclusive seed on disk.
+    from dataclasses import replace
+
+    env = _env(remote, tmp_path)
+
+    def author(wt: Path, task_id: str, spec_rel: str, brief: str | None) -> None:
+        (wt / spec_rel).write_text(f"# {task_id}\n\n## Goal\n{brief}\n", encoding="utf-8")
+
+    deps_new = replace(_deps([]), author_spec=author)
+    rc = main(
+        ["t9c", "--phase", "new", "--brief", "add rate limiting"],
+        env=env,
+        deps=deps_new,
+    )
+    assert rc == 0
+    wt = tmp_path / "work" / "wt" / "t9c"
+    spec = wt / TARGET_DIR_NAME / "specs" / "t9c.md"
+
+    deps = _deps([json.dumps({"questions": []})])
+    assert main(["t9c", "--phase", "clarify"], env=env, deps=deps) == 0
+    refreshed = spec.read_text(encoding="utf-8")
+    assert "## Goal" in refreshed and "add rate limiting" in refreshed
+
+
 def test_clarify_leaves_non_stub_spec_alone(remote: Path, tmp_path: Path) -> None:
     # The refresh is surgical: anything beyond the exact --new seed is the
     # task's own spec line and must never be clobbered by hub content.
