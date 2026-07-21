@@ -6,6 +6,11 @@ For one-time VPS / project setup read `setup.md`; for the engineering
 detail read the code (`orchestrator/`) — this repo does not carry a
 separate design-doc tree.
 
+##trouble shooting
+- when kickoff.sh exits (after approve)
+cd ~/laddy
+LADDY_NO_TMUX=1 ./scripts/kickoff.sh create-spec
+
 ---
 
 ## What it is, in one paragraph
