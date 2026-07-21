@@ -17,6 +17,18 @@ DEFAULT_FAST_COMMANDS = (
     ". .venv/bin/activate && ruff check . && basedpyright && pytest -n auto -q"
 )
 
+# DEFAULT_FAST_COMMANDS activates .venv, but a fresh (gitignored) task worktree
+# has none and the loop had no setup step - so fast_tests died every round on
+# "activate: No such file" and the task burned rounds to the cap. This bootstrap
+# runs ONCE per worktree (loop._ensure_setup) before the first fast_tests.
+# ${PYTHON_BIN:-python3}: the box's default python3 may be too old for the engine
+# (tomllib), so honor the same PYTHON_BIN knob kickoff sources from env.vps. A
+# non-Python target overrides this via SETUP_COMMANDS, exactly as with TEST_COMMANDS.
+DEFAULT_SETUP_COMMANDS = (
+    "test -d .venv || ${PYTHON_BIN:-python3} -m venv .venv "
+    "&& . .venv/bin/activate && pip install -q -r requirements-dev.txt"
+)
+
 # Recognised runner vendors for a role binding (ROLE_<NAME>_VENDOR).
 ROLE_VENDORS = ("claude", "codex")
 
@@ -132,6 +144,10 @@ class OrchestratorConfig:
     branch_remote: str = "origin"
     max_loops: int = 4
     fast_commands: str = DEFAULT_FAST_COMMANDS
+    # Bootstrap run ONCE per fresh worktree before the first fast_tests
+    # (loop._ensure_setup), so DEFAULT_FAST_COMMANDS's `. .venv/bin/activate`
+    # finds a venv. Empty = no bootstrap. See DEFAULT_SETUP_COMMANDS.
+    setup_commands: str = DEFAULT_SETUP_COMMANDS
     claude_cmd: tuple[str, ...] = field(default_factory=tuple)
     codex_cmd: tuple[str, ...] = field(default_factory=tuple)
     rw2_cmd: tuple[str, ...] = field(default_factory=tuple)
@@ -202,6 +218,7 @@ class OrchestratorConfig:
             branch_remote=env.get("AGENT_BRANCH_REMOTE", "origin"),
             max_loops=max_loops,
             fast_commands=env.get("TEST_COMMANDS", DEFAULT_FAST_COMMANDS),
+            setup_commands=env.get("SETUP_COMMANDS", DEFAULT_SETUP_COMMANDS),
             claude_cmd=_claude_cmd(env.get("CLAUDE_CMD")),
             codex_cmd=tuple(shlex.split(env["CODEX_CMD"])) if env.get("CODEX_CMD") else (),
             rw2_cmd=_claude_cmd(env.get("RW2_CMD")),

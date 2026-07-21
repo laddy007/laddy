@@ -56,6 +56,7 @@ def _orchestrator(
     rw1: FakeRunner,
     shell: FakeShell,
     max_loops: int = 4,
+    setup_commands: str = "",
 ) -> Orchestrator:
     dev.name = "dev"
     rw1.name = "rw1"
@@ -64,6 +65,7 @@ def _orchestrator(
         dev_runner=dev,
         rw1_runner=rw1,
         fast_commands="fake-tests",
+        setup_commands=setup_commands,
         shell=shell,
         roles_dir=roles_dir,
         max_loops=max_loops,
@@ -100,6 +102,67 @@ def test_happy_path_pushes_and_logs(remote: Path, tmp_path: Path, roles_dir: Pat
     assert "t1" in summary and "PUSHED" in summary
     # remote branch exists and carries the artifacts
     assert _git("-C", str(remote), "rev-parse", "refs/heads/t1")
+
+
+def test_setup_bootstraps_fresh_worktree_before_fast_tests(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # A fresh worktree has no .venv; the setup command must run BEFORE the first
+    # fast_tests so `. .venv/bin/activate` finds one (else every round dies on
+    # "activate: No such file" and the task burns rounds to the cap).
+    dev = FakeRunner([_dev_output()])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    shell = FakeShell(results=[(0, "venv bootstrapped"), (0, "all green")])
+    orch = _orchestrator(
+        remote, tmp_path, roles_dir, dev, rw1, shell, setup_commands="make-venv"
+    )
+    wt = orch.gitops.task_worktree("t1")
+    (wt / "impl.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert orch.run("t1") == "PUSHED"
+    # setup ran first, fast_tests second - order is the whole point
+    assert [c[0] for c in shell.calls] == ["make-venv", "fake-tests"]
+
+
+def test_setup_runs_once_across_rounds(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # The bootstrap is per-worktree, not per-round: a fast_tests failure that
+    # sends the loop back to the developer must NOT re-run setup next round.
+    dev = FakeRunner([_dev_output(), _dev_output()])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    shell = FakeShell(
+        results=[(0, "venv bootstrapped"), (1, "FAILED test_x"), (0, "green")]
+    )
+    orch = _orchestrator(
+        remote, tmp_path, roles_dir, dev, rw1, shell, setup_commands="make-venv"
+    )
+    wt = orch.gitops.task_worktree("t1")
+    (wt / "impl.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert orch.run("t1") == "PUSHED"
+    assert [c[0] for c in shell.calls] == ["make-venv", "fake-tests", "fake-tests"]
+    # the marker lives under work_root, NOT the worktree, so commit_all -A never
+    # lands it on the branch
+    assert (tmp_path / "work" / "setup-done" / "t1").exists()
+    assert not (wt / "setup-done").exists()
+
+
+def test_empty_setup_commands_is_noop(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # No setup command (a target that self-bootstraps inside TEST_COMMANDS, or
+    # the loop's direct-construction default): fast_tests runs straight, with no
+    # extra shell call ahead of it.
+    dev = FakeRunner([_dev_output()])
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    shell = FakeShell(results=[(0, "all green")])
+    orch = _orchestrator(remote, tmp_path, roles_dir, dev, rw1, shell)
+    wt = orch.gitops.task_worktree("t1")
+    (wt / "impl.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert orch.run("t1") == "PUSHED"
+    assert [c[0] for c in shell.calls] == ["fake-tests"]
 
 
 def test_fast_test_failure_feeds_output_to_next_dev_prompt(

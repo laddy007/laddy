@@ -53,6 +53,10 @@ def _env(remote: Path, tmp_path: Path) -> dict[str, str]:
     return {
         "AGENT_REPO_URL": remote.as_uri(),
         "AGENT_WORK_ROOT": str(tmp_path / "work"),
+        # These CLI-flow tests fake-shell exactly the fast_tests / docker-gate
+        # calls; the per-worktree venv bootstrap is covered in test_loop.py, so
+        # disable it here rather than queue an extra shell result in each.
+        "SETUP_COMMANDS": "",
     }
 
 

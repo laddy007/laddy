@@ -584,6 +584,7 @@ def _build_orchestrator(
         policy_enabled=True,
         notifier=NtfyNotifier(config.ntfy_topic),
         fast_commands=config.fast_commands,
+        setup_commands=config.setup_commands,
         shell=deps.shell,
         roles_dir=default_roles_dir(),
         max_loops=config.max_loops,

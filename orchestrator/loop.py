@@ -706,6 +706,7 @@ class Orchestrator:
         shell: ShellRunner,
         roles_dir: Path,
         max_loops: int = 4,
+        setup_commands: str = "",
         rw2_runner: AgentRunner | None = None,
         senior_runner: AgentRunner | None = None,
         docker_gate: DockerGate | None = None,
@@ -727,6 +728,7 @@ class Orchestrator:
         self.policy_enabled = policy_enabled
         self.notifier = notifier or NtfyNotifier(topic=None)
         self.fast_commands = fast_commands
+        self.setup_commands = setup_commands
         self.shell = shell
         self.roles_dir = roles_dir
         self.max_loops = max_loops
@@ -1243,9 +1245,33 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_force_draft_status(fix_spec), encoding="utf-8", newline="\n")
 
+    def _ensure_setup(self, task_id: str, wt: Path) -> None:
+        """Bootstrap the worktree's environment ONCE before the first fast_tests.
+
+        DEFAULT_FAST_COMMANDS activates ``.venv``, but a fresh (gitignored)
+        worktree has none - without this every round dies on
+        ``.venv/bin/activate: No such file`` and the task burns rounds to the
+        cap (the r3+ argument-in-kickoff2 stall). Runs ``setup_commands``
+        (default: create ``.venv`` + install dev deps) at most once per
+        worktree, guarded by a marker UNDER work_root - never the worktree, so
+        ``commit_all -A`` cannot land it on the branch. Empty ``setup_commands``
+        is a no-op; a failed setup writes no marker, so the next round retries
+        and fast_tests surfaces the real error either way.
+        """
+        if not self.setup_commands:
+            return
+        marker = self.gitops.work_root / "setup-done" / task_id
+        if marker.exists():
+            return
+        rc, _ = self.shell(self.setup_commands, wt)
+        if rc == 0:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("", encoding="utf-8")
+
     def _run_fast_tests(
         self, task_id: str, wt: Path, artifacts: TaskArtifacts, rp: ResumePoint
     ) -> None:
+        self._ensure_setup(task_id, wt)
         result = run_fast(self.fast_commands, wt, self.shell)
         artifacts.append_log(
             action="fast_tests",

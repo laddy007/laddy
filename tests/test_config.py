@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.config import DEFAULT_FAST_COMMANDS, ConfigError, OrchestratorConfig
+from orchestrator.config import (
+    DEFAULT_FAST_COMMANDS,
+    DEFAULT_SETUP_COMMANDS,
+    ConfigError,
+    OrchestratorConfig,
+)
 
 
 def test_repo_url_is_required() -> None:
@@ -19,6 +24,7 @@ def test_defaults() -> None:
     assert config.max_loops == 4
     assert config.default_branch == "main"
     assert config.fast_commands == DEFAULT_FAST_COMMANDS
+    assert config.setup_commands == DEFAULT_SETUP_COMMANDS
     assert config.repo_url == "file:///tmp/hub.git"
     assert config.claude_cmd == ()
     assert config.ntfy_topic is None
@@ -31,6 +37,7 @@ def test_env_overrides() -> None:
             "AGENT_WORK_ROOT": "/srv/agent",
             "MAX_LOOPS": "2",
             "TEST_COMMANDS": "pytest -x",
+            "SETUP_COMMANDS": "make bootstrap",
             "CLAUDE_CMD": "claude -p --output-format json",
             "DEFAULT_BRANCH": "trunk",
             "NTFY_TOPIC": "myapp-agent",
@@ -40,6 +47,7 @@ def test_env_overrides() -> None:
     assert config.work_root == Path("/srv/agent")
     assert config.max_loops == 2
     assert config.fast_commands == "pytest -x"
+    assert config.setup_commands == "make bootstrap"
     assert config.claude_cmd == ("claude", "-p", "--output-format", "json")
     assert config.default_branch == "trunk"
     assert config.ntfy_topic == "myapp-agent"
