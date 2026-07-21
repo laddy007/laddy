@@ -4,6 +4,10 @@ Final state: **CAP_REACHED**
 Branch with the diff: `argument-in-kickoff2`
 Fetch: git fetch laddy argument-in-kickoff2  (shows locally as laddy/argument-in-kickoff2)
 
+## ↻ Director resumes: 1×
+
+Latest: znovu s vyšším MAX_LOOPS
+
 ## What was tried, per round
 
 - round -: `clarify` -> no_questions
@@ -27,6 +31,13 @@ Fetch: git fetch laddy argument-in-kickoff2  (shows locally as laddy/argument-in
 - round 7: `fast_tests` -> fail — bash: line 1: .venv/bin/activate: No such file or directory
 - round 8: `developer` -> ok — No code change — 6th consecutive round on the same `.venv`-missing infra gap; `argument-in-kickoff2`'s implementation is unchanged and already co... [truncated]
 - round 8: `fast_tests` -> fail — bash: line 1: .venv/bin/activate: No such file or directory
+- round -: `terminal` -> CAP_REACHED
+- round 9: `developer` -> ok — The Director's resume raised `MAX_LOOPS` rather than fixing the underlying venv-provisioning gap, so this round hit the identical failure again:... [truncated]
+- round 9: `fast_tests` -> fail — --- stderr ---
+- round 10: `developer` -> ok — No code change — same recurring `.venv`-missing infra gap; the implementation remains committed and unchanged. Re-bootstrapped `.venv` and reran... [truncated]
+- round 10: `fast_tests` -> fail — --- stderr ---
+- round 11: `developer` -> ok — No code change — same recurring `.venv`-missing gap; the implementation is already committed and unchanged. Re-bootstrapped `.venv`, exact gate c... [truncated]
+- round 11: `fast_tests` -> fail — --- stderr ---
 
 ## Latest verdicts
 
@@ -36,5 +47,6 @@ Fetch: git fetch laddy argument-in-kickoff2  (shows locally as laddy/argument-in
 ## Last fast_tests failure (tail)
 
 ```
+--- stderr ---
 bash: line 1: .venv/bin/activate: No such file or directory
 ```
