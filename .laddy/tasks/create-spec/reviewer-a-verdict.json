@@ -1,0 +1,60 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "scripts/create-spec.sh",
+    "orchestrator/run.py",
+    "tests/test_create_spec_launcher.py",
+    "tests/test_spec_author_prompt.py",
+    "scripts/kickoff.sh",
+    "scripts/lib/env_guard.sh"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Launcher runs only --phase new, exactly once, no clarify/design/loop",
+      "evidence": "scripts/create-spec.sh:56 single `\"$PY\" -m orchestrator.run \"$TASK\" --phase new`; test_runs_only_phase_new_exactly_once asserts len(calls)==1 and banned phases absent (14 passed)",
+      "verified": true
+    },
+    {
+      "claim": "Sources env.local (required), never env.vps/vps.conf",
+      "evidence": "create-spec.sh:34-48 ENV_FILE=env.local with hard `die` if absent; test_runs_with_only_env_local_no_vps plants a poison env.vps and still exits 0; test_launcher_text_targets_env_local_not_vps asserts env.vps/vps.conf absent from executable lines",
+      "verified": true
+    },
+    {
+      "claim": "Task validation mirrors kickoff.sh (empty / bad charset / reserved main)",
+      "evidence": "create-spec.sh:29-31 identical checks to kickoff.sh:38-40; test_empty/invalid_char/reserved_main_task_refused all non-zero with message and python never reached",
+      "verified": true
+    },
+    {
+      "claim": "Missing env.local is a hard error, no silent default",
+      "evidence": "create-spec.sh:35 die pointing at local-onboard.sh/env.local.example; test_missing_env_local_fails_hard asserts rc!=0, message, and _calls(log)==[]",
+      "verified": true
+    },
+    {
+      "claim": "Success hint names `kickoff <task>` (no --new) and is suppressed on refusal",
+      "evidence": "create-spec.sh:58-60 echoes hint after phase-new success; test_success_prints_kickoff_hint + test_refusal_propagates_and_suppresses_hint (exit 2 propagates, hint absent)",
+      "verified": true
+    },
+    {
+      "claim": "Exit code propagates from _phase_new",
+      "evidence": "run.py:1221-1222 returns rc directly for --phase new; _phase_new returns 2 for spec-exists and nothing-authored refusals (run.py:236,254)",
+      "verified": true
+    },
+    {
+      "claim": "SPEC_AUTHOR_PROMPT enriched with front matter (type/roles/risk/status draft), sections, slice discipline, and myapp removed",
+      "evidence": "run.py:79-114 new prompt body; test_spec_author_prompt.py five tests pass incl. no-myapp and .format(spec_rel=) brace-safety",
+      "verified": true
+    },
+    {
+      "claim": "Suite/lint green",
+      "evidence": "pytest new files 14 passed; related suite 57 passed; ruff clean; basedpyright 0 errors (warnings non-blocking)",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "All 8 acceptance criteria are covered. AC#1 -> test_runs_with_only_env_local_no_vps + test_launcher_text_targets_env_local_not_vps; AC#2 -> test_runs_only_phase_new_exactly_once; AC#3 -> test_empty/invalid_char/reserved_main_task_refused; AC#4 -> test_missing_env_local_fails_hard; AC#5 -> test_success_prints_kickoff_hint + test_refusal_propagates_and_suppresses_hint; AC#6 -> ruff/basedpyright/pytest all green; AC#7 -> test_prompt_names_front_matter_fields/section_structure/slice_discipline; AC#8 -> test_prompt_has_no_stale_myapp_naming. Failure-mode coverage present: exit-code propagation and hint suppression on _phase_new refusal, python-not-reached on every validation/missing-env path, format-string brace safety, and ASCII invariant. The launcher is a thin wrapper adding no control-flow branch of its own; _phase_new is unchanged except prompt text, and the shared kickoff --new authoring tests (test_run_cli.py) still pass.",
+  "residual_risks": [
+    "The end-to-end hub handoff (author locally -> branch on hub -> `kickoff <task>` reuses it) is a Notes-level manual verification, not machine-tested; push logic is unchanged so risk is low but the handoff itself is unexercised by CI.",
+    "Extra positional args after <task> are silently ignored (kickoff shifts and forwards; create-spec does not); harmless but could mask a mistyped invocation."
+  ]
+}
