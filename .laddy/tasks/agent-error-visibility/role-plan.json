@@ -1,0 +1,9 @@
+{
+  "task": "agent-error-visibility",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

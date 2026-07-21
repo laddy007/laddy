@@ -9,6 +9,7 @@ import pytest
 
 from orchestrator.agent_retry import request_verdict
 from orchestrator.verdict import (
+    _ERROR_TEXT_MAX,
     Verdict,
     VerdictError,
     extract_json,
@@ -16,6 +17,12 @@ from orchestrator.verdict import (
     validate_review,
 )
 from tests.fakes import FakeRunner, advisory, blocker, verdict_json
+
+
+def _errored(text: str, *, exit_reason: str = "error", rc: int = 1) -> AgentResult:
+    return AgentResult(
+        text=text, session_id=None, exit_reason=exit_reason, returncode=rc
+    )
 
 
 def test_parse_valid_verdict_roundtrip() -> None:
@@ -148,3 +155,84 @@ def test_request_verdict_gives_up_after_retries(tmp_path: Path) -> None:
     with pytest.raises(VerdictError, match="after 2 retries"):
         request_verdict(runner, "review this", tmp_path, max_retries=2)
     assert len(runner.calls) == 3
+
+
+# --- agent-error-visibility: a failed run reports what the agent said --------
+
+_AUTH_ERR = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+def test_failed_run_error_carries_the_agents_own_words(tmp_path: Path) -> None:
+    # AC1: the sentence the agent gave survives into the VerdictError, so a
+    # human can tell an expired login from a rejected --model flag.
+    runner = FakeRunner([_errored(_AUTH_ERR) for _ in range(3)])
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    assert _AUTH_ERR in str(exc.value)
+    assert "exit_reason='error'" in str(exc.value)
+    assert "rc=1" in str(exc.value)
+
+
+def test_failed_run_error_snippet_is_bounded(tmp_path: Path) -> None:
+    # AC3: a runaway blob is clipped to the named limit, not eyeballed.
+    runner = FakeRunner([_errored("x" * 10_000) for _ in range(3)])
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    # the longest run of x's in the message is the bounded snippet
+    longest_x = max(len(run) for run in str(exc.value).split(" ") if set(run) == {"x"})
+    assert longest_x == _ERROR_TEXT_MAX
+
+
+def test_failed_run_error_collapses_whitespace(tmp_path: Path) -> None:
+    # AC4: multi-line agent text must not inject raw newlines/tabs into the
+    # digest - it stays one readable item.
+    runner = FakeRunner([_errored("line1\n\n  line2\tline3") for _ in range(3)])
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    msg = str(exc.value)
+    assert "\n" not in msg
+    assert "\t" not in msg
+    assert "line1 line2 line3" in msg
+
+
+def test_failed_run_with_empty_text_reads_cleanly(tmp_path: Path) -> None:
+    # AC5: a silently-failed run still names exit_reason and rc, with no
+    # dangling separator - asserted on the exact tail, not merely "no crash".
+    runner = FakeRunner([_errored("") for _ in range(3)])
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    assert str(exc.value).endswith(
+        "(exit_reason='error', rc=1); its output is not trustworthy"
+    )
+
+
+def test_failed_run_whitespace_only_text_reads_cleanly(tmp_path: Path) -> None:
+    # AC5 boundary: whitespace-only collapses to empty, same clean tail.
+    runner = FakeRunner([_errored("   \n\t  ") for _ in range(3)])
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    assert str(exc.value).endswith(
+        "(exit_reason='error', rc=1); its output is not trustworthy"
+    )
+
+
+def test_failed_run_with_valid_verdict_json_is_never_parsed(tmp_path: Path) -> None:
+    # AC6: a non-"ok" run whose text is a schema-valid verdict still abstains -
+    # it consumes its retries and never becomes a verdict, and its content
+    # appears only quoted (bounded) in the error, never trusted.
+    runner = FakeRunner([_errored(verdict_json("APPROVED")) for _ in range(3)])
+    with pytest.raises(VerdictError, match="after 2 retries"):
+        request_verdict(runner, "review", tmp_path)
+    assert len(runner.calls) == 3
+
+
+def test_failed_run_quota_path_carries_text_too(tmp_path: Path) -> None:
+    # AC7: a "quota" exit behaves as before apart from the added text; the
+    # snippet rides along and exit_reason is named.
+    runner = FakeRunner(
+        [_errored("rate limit hit", exit_reason="quota", rc=1) for _ in range(3)]
+    )
+    with pytest.raises(VerdictError) as exc:
+        request_verdict(runner, "review", tmp_path)
+    assert "exit_reason='quota'" in str(exc.value)
+    assert "rate limit hit" in str(exc.value)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME
+from orchestrator.agents import AgentResult
 from orchestrator.local_merge import (
     ArtifactAttestation,
     ArtifactAttestationState,
@@ -603,6 +604,21 @@ def test_panel_abstention_carries_the_reason_it_abstained(tmp_path: Path) -> Non
     verdicts = run_security_panel([p1, p2], "review", tmp_path)
     blockers = [f for v in verdicts for f in v.blockers]
     assert any("no JSON object found" in f.summary for f in blockers)
+
+
+def test_panel_abstention_carries_the_agents_own_words(tmp_path: Path) -> None:
+    # AC2 (load-bearing): the sentence the agent gave on a non-"ok" run reaches
+    # the panel blocker SUMMARY a human reads - not truncated away by the
+    # _ABSTENTION_REASON_MAX bound before it arrives. The real incident was an
+    # expired login that abstained identically to every other failure.
+    auth_err = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    errored = AgentResult(text=auth_err, session_id=None, exit_reason="error", returncode=1)
+    p1 = FakeRunner([verdict_json("APPROVED")])
+    p2 = FakeRunner([errored, errored, errored])
+    p1.name, p2.name = "opus", "claude"
+    verdicts = run_security_panel([p1, p2], "review", tmp_path)
+    blockers = [f for v in verdicts for f in v.blockers]
+    assert any(auth_err in f.summary for f in blockers)
 
 
 def test_panel_abstention_reason_is_bounded(tmp_path: Path) -> None:
