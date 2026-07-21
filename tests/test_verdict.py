@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.agent_retry import request_verdict
+from orchestrator.agent_retry import _ERROR_TEXT_MAX, request_verdict
+from orchestrator.agents import AgentResult
 from orchestrator.verdict import (
-    _ERROR_TEXT_MAX,
     Verdict,
     VerdictError,
     extract_json,
