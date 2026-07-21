@@ -18,7 +18,7 @@ set -euo pipefail
 #   - verifies `git fetch laddy` succeeds
 #   - writes local_repo_path/env.local from env.local.example with
 #     AGENT_REPO_URL/AGENT_BRANCH_REMOTE pre-filled (leaves
-#     SETUP_COMMANDS/TEST_COMMANDS/CODEX_CMD as template defaults -
+#     TEST_COMMANDS/CLAUDE_CMD/CODEX_CMD as template defaults -
 #     project-specific, edit by hand)
 #   - warns (does not fail) if the claude/codex CLIs are missing - the
 #     cross-vendor rw2 panel degrades without codex
@@ -127,7 +127,7 @@ for p in "${ORDER[@]}"; do
     sed -e "s|^AGENT_REPO_URL=.*|AGENT_REPO_URL=$REMOTE_URL|" \
         -e "s|^AGENT_BRANCH_REMOTE=.*|AGENT_BRANCH_REMOTE=laddy|" \
         "$ENGINE_DIR/env.local.example" > "$ENV_FILE"
-    info "[$p] wrote $ENV_FILE from env.local.example (AGENT_REPO_URL/AGENT_BRANCH_REMOTE filled in - review SETUP_COMMANDS/TEST_COMMANDS/CODEX_CMD before running merge-verified.sh)"
+    info "[$p] wrote $ENV_FILE from env.local.example (AGENT_REPO_URL/AGENT_BRANCH_REMOTE filled in - review TEST_COMMANDS/CLAUDE_CMD/CODEX_CMD before running merge-verified.sh)"
   fi
 
   for cli in claude codex; do

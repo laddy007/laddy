@@ -9,12 +9,9 @@ messages for the bounded retry.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, TypeVar
-
-from orchestrator.agents import AgentResult, AgentRunner
+from typing import Any
 
 VERDICTS = ("APPROVED", "CHANGES_REQUESTED")
 RISK_LEVELS = ("low", "medium", "high")
@@ -69,45 +66,53 @@ class Verdict:
         return tuple(f for f in self.findings if f.severity == "blocker")
 
 
-def _first_json_object(text: str) -> str | None:
-    """Return the first BALANCED top-level ``{...}`` object in ``text``.
+def _last_json_object(text: str) -> str | None:
+    """Return the LAST valid top-level ``{...}`` JSON object in ``text``.
 
-    A brace-depth scan that ignores braces inside strings. This replaces the
-    old non-greedy ``\\{.*?\\}`` fence regex, which stopped at the FIRST ``}``
-    and so truncated any verdict whose findings/claims arrays contain objects
-    (i.e. every non-trivial review) into invalid JSON. Fence-agnostic: the
-    verdict is the first complete object whether or not it is ```json-fenced.
+    A greedy ``raw_decode`` walk: try the JSON parser at each ``{`` not
+    already consumed by a previous successful decode, and keep the last
+    success. Only ``{`` anchors are tried, so every success is an object
+    (asserted for safety), and a success skips PAST its end - a nested object
+    inside a findings/claims array can never be returned as the payload.
+    Letting the parser decide validity replaces a brace-depth scan that
+    tracked in-string state by quote parity: a lone ``"`` in surrounding
+    prose desynced that scan, making the real final verdict's braces read as
+    string content so an earlier planted object won (H6 bypass). Prose, an
+    unbalanced ``{``/``"``, or a ```json fence between objects simply fails
+    to decode at that anchor and is stepped over.
+
+    LAST, not first (H6): agent output is untrusted-input-adjacent - a
+    reviewer routinely QUOTES branch content before concluding, so a
+    schema-valid APPROVED object planted in the branch and echoed early in
+    the transcript must never be mistaken for the verdict. Every payload
+    prompt ends with "output ONLY the JSON object", so the model's actual
+    answer is the final object in the text; anything before it is narration
+    or quotation.
     """
-    depth = 0
-    start = -1
-    in_str = False
-    escaped = False
-    for i, ch in enumerate(text):
-        if in_str:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_str = False
+    decoder = json.JSONDecoder()
+    pos = 0
+    last: str | None = None
+    while (idx := text.find("{", pos)) != -1:
+        try:
+            value, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            pos = idx + 1
             continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start != -1:
-                    return text[start : i + 1]
-    return None
+        assert isinstance(value, dict)  # anchored at "{" - always an object
+        last = text[idx:end]
+        pos = end
+    return last
 
 
 def extract_json(text: str) -> str:
-    """Pull the verdict JSON object out of agent output (fenced or raw)."""
-    obj = _first_json_object(text)
+    """Pull the payload JSON object out of agent output (fenced or raw).
+
+    Takes the LAST balanced object - see :func:`_last_json_object` for why
+    (H6: quoted/planted objects earlier in the output must not win). Shared
+    by every untrusted-output parser (verdicts, investigator, clarify), so
+    the anti-spoofing rule is uniform across retry and non-retry paths.
+    """
+    obj = _last_json_object(text)
     if obj is None:
         raise VerdictError("no JSON object found in reviewer output")
     return obj
@@ -224,18 +229,6 @@ def validate_review(verdict: Verdict) -> None:
         )
 
 
-# The full original prompt is re-sent on every retry (not just this notice),
-# because non-resumable runners (CodexRunner has no session) would otherwise
-# get the retry with ZERO review context and fabricate a schema-valid verdict
-# about nothing. Resumable runners just pay a few extra tokens.
-RETRY_TEMPLATE = (
-    "{original}\n\n"
-    "--- RETRY ---\n"
-    "Your previous verdict was rejected by the schema validator:\n{error}\n"
-    "Output ONLY the corrected verdict JSON object, nothing else."
-)
-
-
 def validate_rw2(verdict: Verdict) -> None:
     """rw2 guard restriction (design S3): quality findings are advisory only.
 
@@ -251,79 +244,3 @@ def validate_rw2(verdict: Verdict) -> None:
                 "or the finding is a real defect and belongs to a defect "
                 "category"
             )
-
-
-T = TypeVar("T")
-
-
-def request_payload(
-    runner: AgentRunner,
-    prompt: str,
-    cwd: Path,
-    parse: Callable[[str], T],
-    *,
-    resume: str | None = None,
-    max_retries: int = 2,
-) -> tuple[T, AgentResult]:
-    """Run an agent and parse its output, retrying (bounded) on failure.
-
-    The fail-closed core shared by EVERY consumer of untrusted agent output
-    (reviewer verdicts, the investigator payload, the explorer text): output
-    is only authoritative when the run itself SUCCEEDED. An errored /
-    quota'd `claude -p` still returns a payload that can already contain a
-    complete, parseable object (e.g. an interrupted or max-turns run) -
-    parsing it would let a failed run clear a gate or poison an artifact.
-    Any non-"ok" exit consumes a retry and its text is never parsed; a
-    ``VerdictError`` from ``parse`` consumes a retry with the error fed back
-    (full original prompt re-sent, see RETRY_TEMPLATE); persistence fails
-    closed by raising. Quota is surfaced by QuotaAwareRunner (it waits or
-    raises QuotaTimeout before we get here); a plain runner reporting
-    "quota"/"error" is simply not trusted.
-    """
-    attempt_prompt = prompt
-    session = resume
-    last_error = ""
-    for _ in range(max_retries + 1):
-        result = runner.run(attempt_prompt, cwd, resume=session)
-        session = result.session_id or session
-        if result.exit_reason != "ok":
-            last_error = (
-                f"agent run did not complete cleanly "
-                f"(exit_reason={result.exit_reason!r}, rc={result.returncode}); "
-                "its output is not trustworthy"
-            )
-            attempt_prompt = RETRY_TEMPLATE.format(original=prompt, error=last_error)
-            continue
-        try:
-            return parse(result.text), result
-        except VerdictError as exc:
-            last_error = str(exc)
-            attempt_prompt = RETRY_TEMPLATE.format(original=prompt, error=last_error)
-    raise VerdictError(
-        f"output still malformed after {max_retries} retries: {last_error}"
-    )
-
-
-def request_verdict(
-    runner: AgentRunner,
-    prompt: str,
-    cwd: Path,
-    resume: str | None = None,
-    max_retries: int = 2,
-    validate: Callable[[Verdict], None] | None = validate_review,
-) -> tuple[Verdict, AgentResult]:
-    """Run a reviewer and parse its verdict, retrying (bounded) on malformed output.
-
-    ``validate`` defaults to the code-review consistency rule; report-only
-    verify rounds pass ``validate=None``.
-    """
-
-    def _parse(text: str) -> Verdict:
-        verdict = parse_verdict(text)
-        if validate is not None:
-            validate(verdict)
-        return verdict
-
-    return request_payload(
-        runner, prompt, cwd, _parse, resume=resume, max_retries=max_retries
-    )

@@ -60,10 +60,53 @@ class TaskSpec:
 
 _LIST_RE = re.compile(r"^\[(.*)\]$")
 
-
 def _parse_front_matter(text: str) -> dict[str, str]:
+    # Fail CLOSED on a defeated opening fence (M-D4-1). A non-ASCII / zero-width
+    # character - a UTF-8 BOM (U+FEFF), a ZWSP (U+200B), or any other invisible
+    # format char - anywhere on the first line shifts the '---' off a clean
+    # fence: str.strip() removes ASCII whitespace but NOT these, so the fence
+    # test silently returned {} and defaults fell to the MOST-privileged
+    # interpretation (type=feature -> not report_only, not draft). Checking the
+    # whole first line (not just text[0]) also rejects a leading ASCII space or
+    # tab placed BEFORE the zero-width char to dodge a text[0]-only guard.
+    # Reject any non-ASCII byte there (it also violates the LF + ASCII-only
+    # invariant these specs are held to). A genuinely front-matter-less ASCII
+    # markdown file stays valid.
+    first_line = text.split("\n", 1)[0]
+    bad = next((ch for ch in first_line if ord(ch) > 0x7F), None)
+    if bad is not None:
+        raise SpecError(
+            f"spec's first line contains a non-ASCII / zero-width character "
+            f"(U+{ord(bad):04X}); LF + ASCII-only required, and a leading "
+            "BOM/ZWSP/format char defeats the '---' front-matter fence"
+        )
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not lines:
+        return {}
+    if lines[0].strip() != "---":
+        # No fence on line 0: either genuine plain markdown (fine, defaults
+        # apply) or a fence pushed off line 0 by a leading blank/whitespace
+        # line (a defeated fence -> fail closed).
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == "---":
+                raise SpecError(
+                    "front matter fence '---' must be the first line; a leading "
+                    "blank or whitespace line defeats it"
+                )
+            # A fence-LIKE opening run that is not the canonical '---' (e.g.
+            # '----', '~~~') is a defeated/malformed fence, not plain markdown:
+            # fail closed rather than fall to the executable feature default
+            # (M-D4-1). A spec opens with '---' or with real prose, never a
+            # four-dash / tilde rule.
+            if len(stripped) >= 3 and set(stripped) in ({"-"}, {"~"}):
+                raise SpecError(
+                    f"malformed front-matter fence {stripped!r}; the opening "
+                    "fence must be exactly '---'"
+                )
+            break  # first content line is not a fence -> no front matter
         return {}
     fields: dict[str, str] = {}
     for line in lines[1:]:
@@ -74,7 +117,12 @@ def _parse_front_matter(text: str) -> dict[str, str]:
         if ":" not in line:
             raise SpecError(f"front matter line is not 'key: value': {line!r}")
         key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
+        key = key.strip()
+        if key in fields:
+            # Front matter is deliberately not YAML; a repeated key is a
+            # last-wins spoofing surface (L-D4-2) -> reject rather than overwrite.
+            raise SpecError(f"duplicate front matter key {key!r}")
+        fields[key] = value.strip()
     raise SpecError("front matter block not closed with '---'")
 
 

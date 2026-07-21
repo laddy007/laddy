@@ -52,8 +52,10 @@ files are fair game.
 ## Architecture (navigation, not authority)
 
 The engine drives a loop of AI agents -- developer -> fast tests -> reviewer 1
-(Claude) -> reviewer 2 (cross-vendor) -- bouncing on failure or change-request
-until convergence, escalating a deadlock to a senior reviewer. It runs over a
+(Claude) -> reviewer 2 (cross-vendor when Codex is configured; the role ->
+vendor binding is config, and rw2 currently defaults to Claude/Sonnet) --
+bouncing on failure or change-request until convergence, escalating a deadlock
+to a senior reviewer. It runs over a
 **target** repo and holds no product code of its own.
 
 - `orchestrator/` -- the engine: deterministic policy, state, and decisions.
@@ -115,10 +117,12 @@ rehearsal), which are the product doing its job.
     user-level default ("commit silently"). The engine governs everyone's
     merges; a change on the trusted machine is higher-stakes, so a human sees
     each commit.
-  - **Merge into local `main` -> always confirm.** Already enforced:
-    `merge-verified` requires typing the exact task id before any merge
-    side-effect (`--no-input` stays a true dry run). Never merge by another
-    path; never bypass that prompt.
+  - **Merge into local `main` -> always confirm.** Enforced by
+    `orchestrator.local_merge`: EVERY merge side-effect - an L1/L2 auto-merge
+    decision as much as an L3 risk decision - requires typing the exact task
+    id; a wrong or blank id declines and merges nothing (`--no-input` stays a
+    true dry run: no prompt, no merge). Never merge by another path; never
+    bypass that prompt.
 
 ## Definition of done -- laddy
 

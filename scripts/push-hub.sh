@@ -45,6 +45,9 @@ source "$CONF"
 # local scripts read; absent is fine.
 ENV_LOCAL="$ENGINE_DIR/env.local"
 if [ -f "$ENV_LOCAL" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/env_guard.sh"
+  laddy_refuse_tracked_env "$ENGINE_DIR" "$ENV_LOCAL"
   # shellcheck disable=SC1090
   source "$ENV_LOCAL"
 fi

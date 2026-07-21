@@ -29,8 +29,8 @@ any kind.
                                                                              │
    YOU run merge-verified.sh ◄─────────────────────────────────────────────┘ (fetch the hub)
         │ re-run tests + security panel on YOUR machine (trusted)
-        ├─ safe + green ─► auto-merge into local main
-        ├─ sensitive    ─► asks you "merge? (y/N)"
+        ├─ safe + green ─► merges after you type the exact task id
+        ├─ sensitive    ─► risk summary; type the exact task id to merge
         └─ broken/flag   ─► tells you what failed and why (no merge)
    YOU push main to GitHub, and to the hub (so the next task starts current)
 ```
@@ -39,17 +39,17 @@ any kind.
 
 ## Quick flow — the whole loop, copy-paste
 
-Two tracks: **manual** (today) and **fullrun** (one command, once its driver
-lands — currently being built, slice S3). Commands below use this deployment:
-local engine at `/mnt/c/myprogramfiles/laddy` (machine DELLi), VPS user `laddy`
-(ssh alias `vps-laddy`, engine `~/laddy`, hub `~/repo_laddy/hub.git`). For
-another user swap `laddy` for their `LADDY_USERS` entry.
+Commands below use an example deployment: engine checked out locally, VPS
+user `laddy` (ssh alias `vps-laddy`, engine `~/laddy`, hub
+`~/repo_laddy/hub.git`). For another user swap `laddy` for their
+`LADDY_USERS` entry.
 
 ### A. Manual flow (today)
 
 ```bash
-# 1. Author the spec — locally: hand-write .laddy/specs/<task>.md
-#    (or skip to step 4 with `kickoff.sh <task> --new` to co-author on the VPS).
+# 1. Author the spec — locally: `claude "/create-spec <task>"` from the target
+#    repo (or hand-write .laddy/specs/<task>.md, or skip to step 4 with
+#    `kickoff.sh <task> --new` to co-author on the VPS).
 
 # 2. Spec onto the hub (skip if you used --new):
 git add .laddy/specs/<task>.md && git commit -m "spec: <task>"
@@ -83,21 +83,13 @@ cd ~/laddy && ./scripts/kickoff.sh <task>   # + --skip-clarify to skip Q&A
 ./scripts/push-hub.sh laddy
 ```
 
-### B. fullrun (once it lands — being built, slice S3)
+### B. fullrun — PLANNED, not yet available
 
-One **local** command wraps steps 2–7: `push → kickoff on VPS → poll → rw3
-(trusted cross-vendor review that feeds findings back to the developer) →
-merge-or-hold`, looping until merged/held, and **pausing + ntfy** at the human
-gates (L3 design approval, L3 merge confirm, the GitHub-push y/N).
-
-```bash
-./scripts/fullrun.sh <task>       # one task
-./scripts/fullrun.sh <project>    # all of a project's ready tasks
-./scripts/fullrun.sh              # = all: every project's every ready task
-```
-
-Both `fullrun` and `kickoff` will **auto-wrap in tmux** (shared
-`scripts/lib/tmux_wrap.sh`, on the TODO), so step 4's manual tmux goes away.
+**None of this exists yet** (no `fullrun.sh`, no `tmux_wrap.sh`, no rw3 —
+slice S3 on the TODO). When it lands, one **local** command will wrap steps
+2–7 (`push → kickoff on VPS → poll → rw3 trusted review → merge-or-hold`),
+pausing + ntfy at the human gates, and both `fullrun` and `kickoff` will
+auto-wrap themselves in tmux. Until then use track A.
 
 ---
 
@@ -107,12 +99,16 @@ Setup is a one-time thing per VPS user, done by the Director — see
 `setup.md`: root bootstrap (unix user, docker, cgroup slice), a
 per-user bare hub (`~/repo_<project>/hub.git`), an empty engine checkout
 promoted by `scripts/upgrade_laddy.sh`, and the target project's `main`
-seeded onto the hub. On **your** machine you only need Docker running
-plus `git` / `python3` / the `claude` and `codex` CLIs — the merge
-gate's scanners (`diff-cover`, `semgrep`, `gitleaks`) and its test
-Postgres run **inside the container**, not on your host. The VPS never
-holds a GitHub credential — merging, and pushing to GitHub, only ever
-happen on your machine.
+seeded onto the hub. The **trusted/local side** has its own one-shot
+onboarder: `scripts/local-onboard.sh` wires each target checkout to its
+hub (adds the `laddy` remote, verifies the fetch, seeds an `env.local`
+from the template) driven by `LADDY_TARGETS` in `<engine>/local.conf`
+(schema: `local.conf.example`; re-runs are idempotent). On **your**
+machine you only need Docker running plus `git` / `python3` / the
+`claude` and `codex` CLIs — the merge gate's scanners (`diff-cover`,
+`semgrep`, `gitleaks`) and its test Postgres run **inside the
+container**, not on your host. The VPS never holds a GitHub credential —
+merging, and pushing to GitHub, only ever happen on your machine.
 
 ---
 
@@ -193,10 +189,14 @@ fires when it finishes.
 
 **Where it ends up:**
 
-| Terminal state | Meaning |
-|---|---|
-| pushed `<task>` to the hub | Converged. Ready for you to merge (step 6). |
-| `CAP_REACHED` / `ESCALATED_DEADLOCK` | Did **not** converge. Nothing pushed; a `handback.md` on the VPS explains what was tried. |
+| Terminal state | Pushed? | Re-kickoff | Meaning |
+|---|---|---|---|
+| pushed `<task>` to the hub | yes | sticky (use `--resume`) | Converged. Ready for you to merge (step 6). |
+| `CAP_REACHED` / `ESCALATED_DEADLOCK` | no | sticky (use `--resume`) | Did **not** converge; `handback.md` explains what was tried. |
+| `INVESTIGATOR_MALFORMED` / `VERIFY_MALFORMED` | yes (handback) | sticky, `--resume` does **not** apply | A report-only role produced no usable report — start a fresh task. |
+| `QUOTA_TIMEOUT` | yes (handback) | **resumes automatically** | Agent quota/rate limit never recovered in the window. Retryable: a plain re-kickoff continues it. |
+| `INTERNAL_ERROR` | no | **resumes automatically** | The loop itself crashed. Retryable: a plain re-kickoff continues it. |
+| `PATH_GUARD_VIOLATION` | no | **not resumable** | The tree carries forbidden edits — discard the branch and restart. |
 
 All artifacts (the iteration log, reviewer verdicts, a human summary,
 `merge-decision.json`) live under `.laddy/tasks/<task>/` on the branch.
@@ -227,6 +227,52 @@ converged task still pushes its own `<task>` branch to the hub. Merge
 them exactly as below — `merge-verified.sh` with no args processes
 every ready branch at once.
 
+**Chained batch (`--chain`).** When the tasks build on each other,
+enqueue them in dependency order with `--chain`:
+
+```bash
+python -m orchestrator.run --phase enqueue step-1 step-2 step-3 --chain
+```
+
+Each chained task's worktree starts from its **predecessor's pushed
+branch** (not from main), so `step-2` reviews and extends `step-1`'s
+code before anything merges. Semantics:
+
+- The chain is exactly the argument order of ONE enqueue call.
+- A link that fails (cap, quota, any non-success terminal) **stops the
+  chain**: its descendants stay queued untouched, with a `[queue]`
+  warning naming why; independent (non-chained) items keep running.
+  Fix or resume the failed link, then `--phase queue` again.
+- A chained task whose worktree already exists but does not contain the
+  predecessor's branch tip (e.g. created earlier from main by a clarify
+  run) is refused, not silently run on the wrong tree — remove
+  `<work_root>/wt/<task>` for a fresh start from the chain base.
+- Merge the results in chain order (`merge-verified.sh` with no args
+  discovers them alphabetically — name chained tasks so the order
+  sorts, or pass them explicitly in order).
+
+### 5b. Start a task from finished code (`--code-ready`)
+
+When you (or another session) already WROTE the code and only want the
+loop's review chain + gates, commit it on the bare `<task>` branch,
+push it to the hub, and kick off with `--code-ready`:
+
+```bash
+# from any clone wired to the hub:
+git checkout -b <task> && git commit -a -m "finished code" \
+  && git push <hub-remote> <task>
+# on the VPS:
+scripts/kickoff.sh <task> --code-ready --skip-clarify
+```
+
+The loop adopts the committed code as round 1's developer output and
+starts directly at fast tests -> rw1 -> rw2 -> the authoritative gate
+-> push. Nothing else changes: clarify/design gates still apply, every
+reviewer still runs, and a rework round (a reviewer's change request)
+still goes to the developer. Refused on a task that already has a
+developer round or a terminal (use `--resume` / a plain re-kickoff for
+those), and on an empty diff (nothing to review).
+
 ### 6. Merge it (on your machine, from the target repo)
 
 Pull nothing, trust nothing from the VPS — just run, from inside the
@@ -247,11 +293,13 @@ the policy from your trusted code (not the branch's), re-runs the
 cross-vendor reviewer plus a **security panel**. Then it acts by how
 risky the change is:
 
-- **Safe (docs/i18n) or ordinary logic, all gates green** → **auto-merges**
-  into your local `main`.
+- **Safe (docs/i18n) or ordinary logic, all gates green** → **merges** into
+  your local `main` after you confirm by typing the **exact task id** (a
+  wrong or blank id declines and merges nothing).
 - **Touches a sensitive surface** (auth, migrations, `models.py`, deploy, …),
   gates green → **asks you**: prints *what* is sensitive and a one-screen
-  summary, then `merge? (y/N)`. You make a risk call — you don't read the diff.
+  summary, then you type the **exact task id** to merge. You make a risk
+  call — you don't read the diff.
 - **Something failed** (a test, coverage, a scanner, a security/reviewer
   blocker) → **broken**: prints *what failed, why, and what is needed*, and
   does **not** offer to merge. Fix it by re-running the task on the VPS; the
@@ -275,6 +323,19 @@ deleted — they wait for you, with a `merge-hold.md` digest in
 **Dry run:** add `--no-input` to see what *would* auto-merge without
 prompting or pushing (it holds every sensitive change and never pushes).
 
+**Hand-fixed a held branch? (`--local <ref>`)** When the gate held a task
+BROKEN and you fixed it yourself with ordinary git, judge your
+locally-committed revision through the same trusted gate with
+
+```bash
+scripts/merge-verified.sh <task> --local <sha|branch|worktree-path>
+```
+
+No VPS round trip, no fetch — the hub remote is optional in this mode. It
+does not trust the code more, it trusts the route: you are the trusted
+author, the same gates judge the diff, and the judged sha is the merged
+sha. The tool itself still never edits code.
+
 ### 7. Keep the hub current
 
 `merge-verified.sh` only pushes `main` to **GitHub**. It never touches
@@ -288,6 +349,42 @@ This is not required for the tripwire (below) to stay quiet — a hub
 `main` that is simply *behind* your local `main` is still an ancestor of
 it. It matters because `kickoff.sh` clones its task worktree base from
 the hub: skip this and the next task starts from stale code.
+
+### 8. Correct the ask and resume a finished task
+
+A task that stopped — hit the iteration cap (`CAP_REACHED`), deadlocked
+(`ESCALATED_DEADLOCK`), or landed at `stop_before_merge`/`PUSHED` — is
+**sticky**: a plain re-kickoff no-ops. (The retryable terminals
+`QUOTA_TIMEOUT` and `INTERNAL_ERROR` are the exception — those a plain
+re-kickoff resumes without `--resume`.) When the reason it stopped is that the
+**spec was wrong** (the code was fine, the ask was incomplete), there is one
+explicit, logged way to put it back to work:
+
+```bash
+# 1. Edit the spec ON THE TASK BRANCH with your own editor and push it:
+git fetch laddy <task> && git checkout <task>
+$EDITOR .laddy/specs/<task>.md          # fix the ask
+git commit -am "spec: <task> — add the missing requirement" && git push laddy <task>
+
+# 2. Resume, with a mandatory note saying what you changed:
+scripts/kickoff.sh <task> --resume \
+  --reason "spec was missing throttling; added it + replay protection"
+```
+
+`--resume` first syncs the VPS's task worktree to the branch tip on the hub, so
+the correction you pushed in step 1 is what the developer actually reads (and
+what the recorded `spec_sha` receipt hashes) — you edit and push from your own
+clone; the VPS picks it up. The `--reason` note is prepended to the **next
+developer round** (on top of the reviewer verdict that stopped it, not instead
+of it), so the developer reads both the corrected ask and where it got stuck. One `--resume` buys exactly one
+run to the next terminal; resume again to keep going (unbounded, but every
+resume is logged and the count + latest reason show up in the handback). A
+`PATH_GUARD_VIOLATION` is **not** resumable — that tree carries forbidden edits;
+discard the branch and restart instead.
+
+Resume changes nothing about trust: it re-arms iteration only. The resumed run
+re-traverses rw1/rw2/the authoritative gate exactly as a fresh one, never pushes
+to origin, and never skips a reviewer (see SECURITY.md).
 
 ---
 

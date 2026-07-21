@@ -65,6 +65,10 @@ scripts/upgrade_laddy.sh laddy        # promote this engine repo's local main
                                        # into that user's ~/laddy (all-or-nothing
                                        # preflight across every LADDY_USERS entry)
 
+# trusted-side wiring, once per target project (LADDY_TARGETS in local.conf):
+scripts/local-onboard.sh              # adds the `laddy` remote to each target
+                                       # checkout, verifies the fetch, seeds env.local
+
 # from the TARGET project's own local checkout (e.g. ~/myapp):
 scripts/push-hub.sh <user>            # add the `laddy` remote + seed the hub
                                        # with the target's main (idempotent)
@@ -99,12 +103,16 @@ scripts/        thin launchers only — all decisions live in Python:
                   kickoff.sh          VPS entrypoint (clarify -> design -> detached loop)
                   merge-verified.sh   LOCAL merge authority (trusted machine)
                   local-task.sh       whole loop locally (no VPS), rehearsal
+                  local-onboard.sh    one-shot trusted-side onboarding: wires each
+                                      target checkout to its hub (LADDY_TARGETS)
                   smoke-review-cli.sh preflight of the least-privilege review CLIs
                   watch-vps.sh / colorize-log.sh   tail + colorize a running task's log
+                  why-crashed.sh      post-mortem of a dead task's log + state
                   vps-onboard.sh      one-shot, per-user VPS bootstrap (bare-hub model)
                   upgrade_laddy.sh    promote this repo's main into each user's ~/laddy
                   push-hub.sh         seed / keep-current the target's hub (main -> hub)
-                  lib/laddy_users.sh  shared LADDY_USERS parsing (onboard/upgrade/push-hub)
+                  lib/                shared parsing/guards: laddy_users.sh (LADDY_USERS),
+                                      laddy_targets.sh (LADDY_TARGETS), env_guard.sh
 skills/         interactive helpers (Claude Code skills):
                   create-spec/        co-author a task spec -> <target>/.laddy/specs/<task>.md
                   investigate/        diagnosis-only session -> investigations/
@@ -156,6 +164,10 @@ Onboarding a VPS user or adding a new project = the same operation
   <user>` (run from inside the target repo — it adds the `laddy` remote
   from `vps.conf` and pushes `main`, idempotently). `upgrade_laddy.sh`
   never does this; it only ever promotes the engine.
+- `scripts/local-onboard.sh` mirrors the onboarding on the **trusted**
+  side: per `LADDY_TARGETS` entry (`local.conf`, see
+  `local.conf.example`) it wires the target checkout to its hub and
+  seeds an `env.local` template — idempotent, safe to re-run.
 
 On your local trusted machine you only need Docker running plus `git`,
 `python3`, and the `claude`/`codex` CLIs — the merge gate (lint, types,
@@ -165,11 +177,11 @@ against its own throwaway Postgres. Copy `env.local.example` →
 
 ### 1. Write a spec and kick off the VPS
 
-Author the spec either with the **`create-spec` skill** (interactive
-Claude Code session on your machine, committed + pushed to the hub
-before kickoff) or directly on the VPS during kickoff (`--new` co-writes
-it in the terminal, inside the fresh task worktree — no local push
-needed first):
+Author the spec either locally with the **`create-spec` skill** — one
+command from the target repo: `claude "/create-spec <task>"` (interactive
+co-authoring; commit + push to the hub before kickoff) — or directly on
+the VPS during kickoff (`--new` co-writes it in the terminal, inside the
+fresh task worktree — no local push needed first):
 
 ```bash
 ssh vps-laddy '~/laddy/scripts/kickoff.sh <task>'          # spec already on the hub's main
@@ -186,13 +198,20 @@ scripts/watch-vps.sh <task>                 # from your machine, or:
 ssh vps-laddy 'tail -f ~/agent-logs/<task>.log'
 ```
 
-Loop: developer → fast tests → reviewer 1 (Claude) → reviewer 2 (Codex),
-bouncing back on failure/change-request until it converges (max 4
-rounds, escalates to a senior reviewer on repeated deadlock). One ntfy
-push fires on the terminal state. It ends either pushed to the hub as
-`<task>` (ready to merge) or `CAP_REACHED` / `ESCALATED_DEADLOCK`
-(nothing pushed — read `handback.md` on the branch, refine the spec,
-retry).
+Loop: developer → fast tests → reviewer 1 (Claude) → reviewer 2
+(cross-vendor when Codex is configured; the vendor is a config knob and
+currently defaults to Claude/Sonnet), bouncing back on
+failure/change-request until it converges (max 4 rounds, escalates to a
+senior reviewer on repeated deadlock). One ntfy push fires on the
+terminal state. It ends either pushed to the hub as `<task>` (ready to
+merge) or `CAP_REACHED` / `ESCALATED_DEADLOCK` (nothing pushed — read
+`handback.md` on the branch, refine the spec, retry).
+
+Beyond the single-task flow, the engine also supports: a **task queue**
+(`--phase enqueue` / `queue`, incl. `--chain` for ordered tasks building
+on each other), **`--code-ready`** kickoff (adopt already-written code
+and start straight at the review chain), and **`--resume`** (correct the
+spec and put a finished task back to work). See `USAGE.md` §5–§8.
 
 ### 2. Merge it — on your machine, not the VPS
 
@@ -210,9 +229,11 @@ trusted machine**: full test suite + coverage + semgrep + gitleaks,
 plus a cross-vendor reviewer re-run and a security panel. Then, by
 blast radius:
 
-- safe / ordinary change, all gates green → **auto-merges** into local `main`.
+- safe / ordinary change, all gates green → **merges** into local `main`
+  after you confirm by typing the exact task id (anything else declines).
 - touches a sensitive surface (auth, migrations, `models.py`, deploy, …),
-  gates green → prints what's sensitive + a summary, asks `merge? (y/N)`.
+  gates green → prints what's sensitive + a summary; type the exact task id
+  to merge (anything else declines).
 - anything red (test/coverage/scanner/reviewer) → **holds**, prints what
   failed and why, never offers to merge (fix on the VPS and re-run).
 

@@ -18,15 +18,18 @@ from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import SPEC
-from orchestrator.gitops import policy_pathspec
+from orchestrator.gitdiff import policy_pathspec
 from orchestrator.oracle import add_detached_worktree, remove_worktree, run_git
 
 
-def merge_diff(repo: Path, merge_sha: str) -> str:
-    """The shipped product diff: merge commit vs first parent, artifacts
-    excluded (what main actually gained in product terms)."""
+def merge_diff(repo: Path, merge_sha: str, task_id: str) -> str:
+    """The shipped product diff: merge commit vs first parent, the task's own
+    artifacts excluded (what main actually gained in product terms). Content a
+    branch planted in ANOTHER task's dir is product-effective and stays in the
+    diff (M2), exactly as the merge gate classified it."""
     _, out = run_git(
-        repo, "diff", "--no-renames", f"{merge_sha}^1", merge_sha, *policy_pathspec()
+        repo, "diff", "--no-renames", f"{merge_sha}^1", merge_sha,
+        *policy_pathspec(task_id),
     )
     return out
 

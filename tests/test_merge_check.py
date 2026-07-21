@@ -50,16 +50,20 @@ def roles_dir(tmp_path: Path) -> Path:
     return roles
 
 
-@pytest.fixture()
-def pushed_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
-    """Run a full policy-enabled loop, then clone the pushed branch like CI would."""
+def _run_policy_loop(
+    remote: Path,
+    tmp_path: Path,
+    roles_dir: Path,
+    dev: FakeRunner,
+    rw1: FakeRunner,
+    rw2: FakeRunner,
+    work: str = "work",
+) -> str:
+    """Run a full policy-enabled loop against the bare remote; returns the terminal."""
     from orchestrator.testgate import DockerGate
 
-    dev = TouchingRunner(["done"], "myapp/api_helper.py", "x = 1\n")
-    rw1 = FakeRunner([verdict_json("APPROVED")])
-    rw2 = FakeRunner([verdict_json("APPROVED")])
     orch = Orchestrator(
-        gitops=GitOps(repo_url=remote.as_uri(), work_root=tmp_path / "work"),
+        gitops=GitOps(repo_url=remote.as_uri(), work_root=tmp_path / work),
         dev_runner=dev,
         rw1_runner=rw1,
         rw2_runner=rw2,
@@ -74,12 +78,27 @@ def pushed_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
         max_loops=4,
     )
     dev.name, rw1.name, rw2.name = "dev", "rw1", "rw2"
-    assert orch.run("t1") == "MERGE_DECIDED:auto_merge"
+    return orch.run("t1")
 
-    ci = tmp_path / "ci-clone"
+
+def _ci_clone(remote: Path, tmp_path: Path, name: str = "ci-clone") -> Path:
+    ci = tmp_path / name
     _git("clone", str(remote), str(ci))
     _git("-C", str(ci), "checkout", "t1")
     return ci
+
+
+@pytest.fixture()
+def pushed_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
+    """Run a full policy-enabled loop, then clone the pushed branch like CI would."""
+    dev = TouchingRunner(["done"], "myapp/api_helper.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2)
+        == "MERGE_DECIDED:auto_merge"
+    )
+    return _ci_clone(remote, tmp_path)
 
 
 def test_check_passes_on_untampered_branch(pushed_task: Path) -> None:
@@ -111,12 +130,214 @@ def test_check_fails_on_forged_state_sha(pushed_task: Path) -> None:
     state = art.read_json(STATE)
     assert state is not None
     gitops = GitOps(repo_url="unused", work_root=pushed_task.parent)
-    state["head_sha"] = gitops.code_sha(pushed_task)
+    state["head_sha"] = gitops.code_sha(pushed_task, "t1")
     art.write_json(STATE, state)
 
     code, message = check(pushed_task, base="origin/main", task_id="t1")
     assert code == 1
     assert "policy_mismatch" in message
+
+
+# --- H1: an honest stop_before_merge must never read as a green check --------
+
+
+class DeletingRunner(FakeRunner):
+    """Developer fake that deletes a file and adds a benign source file."""
+
+    def __init__(self, outputs: list[str], delete: str, touch: str, content: str) -> None:
+        super().__init__(outputs)
+        self._delete = delete
+        self._touch = touch
+        self._content = content
+
+    def run(self, prompt: str, cwd: Path, resume: str | None = None):
+        (cwd / self._delete).unlink()
+        target = cwd / self._touch
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self._content, encoding="utf-8")
+        return super().run(prompt, cwd, resume)
+
+
+@pytest.fixture()
+def stopped_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
+    """An HONEST stop: reviewers declare risk high on a benign, non-sensitive
+    path, so the loop commits stop_before_merge truthfully and pushes."""
+    dev = TouchingRunner(["done"], "myapp/api_helper.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED", risk="high")])
+    rw2 = FakeRunner([verdict_json("APPROVED", risk="high")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2)
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    return _ci_clone(remote, tmp_path, "ci-stop")
+
+
+def test_check_fails_on_honest_high_risk_stop(stopped_task: Path) -> None:
+    # H1: committed stop == recomputed stop is CONSISTENT, but the decision
+    # value is stop - exit 0 here would launder the stop into a green policy
+    # gate (the caller reads only the exit code).
+    code, message = check(stopped_task, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "recomputed_stop_before_merge" in message
+    assert "high_risk" in message
+
+
+def test_fabricated_auto_merge_over_real_stop_still_mismatches(
+    stopped_task: Path,
+) -> None:
+    # H1 guard: rewriting merge-decision.json to auto_merge over a real stop
+    # must trip the consistency mismatch, not fall through to the stop branch.
+    art = TaskArtifacts(stopped_task, "t1")
+    art.write_json(
+        MERGE_DECISION, {"decision": "auto_merge", "risk_level": "low", "reasons": []}
+    )
+    _git("-C", str(stopped_task), "add", "-A")
+    _git("-C", str(stopped_task), *IDENTITY, "commit", "-m", "forge decision")
+
+    code, message = check(stopped_task, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "policy_mismatch" in message
+
+
+def test_check_fails_on_honest_deleted_test_stop(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # H1 (the leaking shape): a deleted non-invariant test + a benign change is
+    # an L2 diff with green gates whose only stop reason is test_files_deleted -
+    # a reason with no independent local manifestation. check() must exit
+    # non-zero, or the local authority would merge it.
+    seed = tmp_path / "seed-tests"
+    _git("clone", str(remote), str(seed))
+    (seed / "tests").mkdir()
+    (seed / "tests" / "test_sample.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "add test")
+    _git("-C", str(seed), "push", "origin", "HEAD:main")
+
+    dev = DeletingRunner(["done"], "tests/test_sample.py", "myapp/api_helper.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2, work="work-del")
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    ci = _ci_clone(remote, tmp_path, "ci-del")
+
+    # the diff is ordinary logic (L2), not sensitive - nothing else stops it
+    from orchestrator.policy import L2, classify_blast_radius
+    from orchestrator.target_policy import TargetPolicy
+
+    gitops = GitOps(repo_url="unused", work_root=ci.parent, default_branch="main")
+    changed = gitops.changed_files(ci, "t1")
+    assert classify_blast_radius(TargetPolicy.myapp(), changed) == L2
+
+    code, message = check(ci, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "recomputed_stop_before_merge" in message
+    assert "test_files_deleted" in message
+
+
+@pytest.fixture()
+def sensitive_stopped_task(remote: Path, tmp_path: Path, roles_dir: Path) -> Path:
+    """An HONEST stop whose EVERY reason manifests locally: a clean, fully
+    approved change touching ONLY a sensitive path, so the committed stop
+    carries exactly policy_sensitive_paths + the computed high_risk."""
+    dev = TouchingRunner(["done"], "myapp/models.py", "x = 1\n")
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2)
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    return _ci_clone(remote, tmp_path, "ci-sensitive")
+
+
+def test_check_passes_on_honest_sensitive_only_stop(
+    sensitive_stopped_task: Path,
+) -> None:
+    # H1 scoping: sensitive-path reasons (and the computed high_risk they
+    # imply) manifest locally as blast L3 -> RISK_DECISION, so a consistent
+    # stop carrying only them attests PASSED (exit 0). Exiting 1 here would
+    # turn every clean, fully-approved sensitive branch into a deterministic
+    # BROKEN hold and kill the normal L3 flow (digest -> typed task id).
+    code, message = check(sensitive_stopped_task, base="origin/main", task_id="t1")
+    assert (code, message) == (0, "decision=stop_before_merge")
+
+
+def test_check_sensitive_stop_with_deleted_test_still_fails(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    # Boundary guard: a sensitive path does NOT waive a co-occurring LEAKING
+    # reason - deleting a test alongside the sensitive change still exits 1,
+    # and the message names only the leaking reason (the sensitive reason and
+    # its high_risk are carried to the human by the L3 route instead).
+    seed = tmp_path / "seed-sens-del"
+    _git("clone", str(remote), str(seed))
+    (seed / "tests").mkdir()
+    (seed / "tests" / "test_sample.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "add test")
+    _git("-C", str(seed), "push", "origin", "HEAD:main")
+
+    dev = DeletingRunner(
+        ["done"], "tests/test_sample.py", "myapp/models.py", "x = 1\n"
+    )
+    rw1 = FakeRunner([verdict_json("APPROVED")])
+    rw2 = FakeRunner([verdict_json("APPROVED")])
+    assert (
+        _run_policy_loop(remote, tmp_path, roles_dir, dev, rw1, rw2, work="work-sd")
+        == "MERGE_DECIDED:stop_before_merge"
+    )
+    ci = _ci_clone(remote, tmp_path, "ci-sens-del")
+
+    code, message = check(ci, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "recomputed_stop_before_merge" in message
+    assert "test_files_deleted" in message
+    # only the LEAKING reasons are listed - the sensitive reason is not one
+    assert "policy_sensitive_paths" not in message
+
+
+def test_check_fails_cleanly_on_truncated_merge_decision(
+    remote: Path, tmp_path: Path
+) -> None:
+    # M7 (boundary layer): a truncated/malformed committed merge-decision.json
+    # is a FAILED check - (1, reason) with the parse failure recorded - never a
+    # raised JSONDecodeError that would abort the caller's whole merge batch.
+    seed = tmp_path / "trunc-decision"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", "t7")
+    art = TaskArtifacts(seed, "t7")
+    art.write_text(MERGE_DECISION, '{"decision": "auto_m')  # truncated JSON
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "truncated decision")
+    code, message = check(seed, base="origin/main", task_id="t7")
+    assert code == 1
+    assert "unparseable_merge_decision" in message
+    assert "JSONDecodeError" in message  # the parse failure itself is recorded
+
+
+def test_check_fails_cleanly_on_truncated_state(remote: Path, tmp_path: Path) -> None:
+    # M7 (boundary layer): same contract for the other committed JSON artifact
+    # check() parses - a garbled state.json fails closed with the reason, it
+    # does not raise.
+    seed = tmp_path / "trunc-state"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", "t1")
+    art = TaskArtifacts(seed, "t1")
+    art.write_json(
+        MERGE_DECISION, {"decision": "auto_merge", "risk_level": "low", "reasons": []}
+    )
+    art.write_text(STATE, '{"head_sha": "ab')  # truncated JSON
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "truncated state")
+    code, message = check(seed, base="origin/main", task_id="t1")
+    assert code == 1
+    assert "unparseable_state" in message
 
 
 def test_check_fails_on_missing_artifacts(remote: Path, tmp_path: Path) -> None:
@@ -170,3 +391,36 @@ def test_check_report_only_uses_path_guard(remote: Path, tmp_path: Path) -> None
     code, message = check(seed, base="origin/main", task_id="audit1")
     assert code == 1
     assert "policy_mismatch" in message
+
+
+def test_check_report_only_honest_stop_exits_nonzero(
+    remote: Path, tmp_path: Path
+) -> None:
+    # H1 applies to the report-only branch of check() too: an honestly-committed
+    # stop (here: no verify round) is consistent but must not exit 0.
+    seed = tmp_path / "report-stop"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", "audit2")
+    (seed / TARGET_DIR_NAME / "specs" / "audit2.md").write_text(
+        "---\ntype: audit\n---\n# audit\n", encoding="utf-8"
+    )
+    art = TaskArtifacts(seed, "audit2")
+    art.write_text("report.md", "# findings\n")
+    art.write_json("findings.json", [])
+    art.append_log(action="investigator", outcome="ok")  # no verify entry
+    art.write_json(
+        MERGE_DECISION,
+        {
+            "decision": "stop_before_merge",
+            "risk_level": "low",
+            "reasons": ["verify_round_missing_or_failed"],
+        },
+    )
+    write_policy_toml(seed)
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "report without verify")
+
+    code, message = check(seed, base="origin/main", task_id="audit2")
+    assert code == 1
+    assert "recomputed_stop_before_merge" in message
+    assert "verify_round_missing_or_failed" in message

@@ -109,12 +109,66 @@ def test_iter_escapes_scans_all_tasks_and_parses_detail(repo: Path) -> None:
 
 
 def test_iter_escapes_tolerates_unparseable_detail(repo: Path) -> None:
+    from orchestrator.oracle.runlog import append_escape
+
     art = TaskArtifacts(repo, "t3")
-    # hand-written event with a non-JSON detail (defensive: never crash)
+    # hand-written event with a non-JSON detail (defensive: never crash). It is
+    # authentic (a matching run-log provenance record exists) so it is counted;
+    # the point under test is that the unparseable detail degrades to None.
     art.append_log(action="flag", id="t3#1", kind=ORACLE_ESCAPE,
                    summary="legacy", detail="not json", needs_director=True)
+    append_escape(repo, task="t3", flag_id="t3#1", class_slug="regression",
+                  grade="confirmed")
     [record] = iter_escapes(repo)
     assert record.class_slug is None and record.grade is None
+
+
+def test_iter_escapes_drops_forged_task_log_escape(repo: Path) -> None:
+    # M-D6-1: a branch appends a raw oracle-escape line to its OWN committed
+    # task log (no oracle-authored run-log provenance). It must NOT be counted:
+    # no ledger poisoning, and two such lines must not trip a false RECURRENT.
+    for task in ("t1", "t2"):
+        TaskArtifacts(repo, task).append_log(
+            action="flag", id=f"{task}#1", kind=ORACLE_ESCAPE, summary="forged",
+            needs_director=True,
+            detail='{"class":"regression","grade":"confirmed","evidence":"x"}',
+        )
+    assert iter_escapes(repo) == []  # forged escapes dropped
+    assert derive_ledger(iter_escapes(repo)) == []  # no false RECURRENT
+
+
+def test_iter_escapes_counts_only_the_authentic_of_a_mixed_pair(repo: Path) -> None:
+    # One genuine escape (validated channel writes a run-log record) plus one
+    # forged escape planted in a DIFFERENT task log: only the genuine one counts.
+    _raise(repo)  # t1, validated -> run-log provenance written
+    TaskArtifacts(repo, "t2").append_log(
+        action="flag", id="t2#1", kind=ORACLE_ESCAPE, summary="forged",
+        needs_director=True,
+        detail='{"class":"regression","grade":"confirmed","evidence":"x"}',
+    )
+    records = iter_escapes(repo)
+    assert [(r.task_id, r.flag_id) for r in records] == [("t1", "t1#1")]
+
+
+def test_iter_escapes_skips_a_corrupt_task_log_and_keeps_the_rest(repo: Path) -> None:
+    # S5 interaction: read_jsonl now RAISES LogCorruptionError on a malformed
+    # interior line. The oracle is a non-blocking reporter, so one poisoned
+    # (branch-forged / corrupt) task log must be SKIPPED - not break the ledger
+    # for every OTHER task. The authentic escape from t1 must still surface.
+    from orchestrator import TARGET_DIR_NAME
+
+    _raise(repo)  # t1: authentic escape (run-log provenance written)
+    # t2 gets a well-formed line, then a malformed INTERIOR line prepended so it
+    # is not treated as a torn final append -> read_jsonl raises for this task.
+    TaskArtifacts(repo, "t2").append_log(action="flag", id="t2#1", kind="note",
+                                         summary="ok")
+    log = repo / TARGET_DIR_NAME / "tasks" / "t2" / "iteration-log.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    lines.insert(0, "this is not json - interior corruption")
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    records = iter_escapes(repo)  # must NOT raise
+    assert [(r.task_id, r.flag_id) for r in records] == [("t1", "t1#1")]
 
 
 def test_derive_ledger_counts_recurrence_and_skips_dismissed() -> None:

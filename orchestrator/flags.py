@@ -134,21 +134,53 @@ def raise_flag(
     detail: str | None = None,
     round: int | None = None,
     needs_director: bool = False,
+    allow_oracle_escape: bool = False,
 ) -> str:
     """Append a ``flag`` event and return its assigned ``id``.
 
-    ``id`` is ``"<task>#N"`` where N = 1 + the number of ``flag`` events
-    already in the log - deterministic (no random/uuid) and resume-safe.
-    The count-then-append runs under ``TaskArtifacts.log_lock`` so concurrent
-    raises on the same task cannot collide on ``id``.
+    ``id`` is ``"<task>#N"`` where N = 1 + the largest numeric ``#N`` suffix
+    already used by a ``flag`` event in the log - deterministic (no
+    random/uuid) and resume-safe (recomputable from the log). It is the max,
+    NOT the count: a pre-planted gap id (e.g. a branch writes ``<task>#2``
+    with no ``#1``) would make a count-based id collide with the plant, and
+    ``derive_flags`` silently drops a later duplicate id - so a genuine escape
+    raised post-merge would vanish from every derived view. Taking max+1
+    guarantees the new id is strictly greater than every existing numeric id;
+    a defensive assert under the lock refuses to write a colliding id at all.
+    The read-max-then-append runs under ``TaskArtifacts.log_lock`` so
+    concurrent raises on the same task cannot collide on ``id``.
+
+    An oracle-escape is refused unless ``allow_oracle_escape`` (the validated
+    Director/oracle channel, ``oracle.escapes.raise_oracle_escape``): the
+    system under measurement must never write to the measuring instrument's
+    data series, and the CLI's narrower ``--kind`` choices only guard the
+    argparse layer - the library boundary enforces it itself.
     """
+    if kind == ORACLE_ESCAPE and not allow_oracle_escape:
+        raise ValueError(
+            f"{ORACLE_ESCAPE} is raised only through the validated oracle "
+            "channel (oracle.escapes.raise_oracle_escape), never directly"
+        )
     if kind not in FLAG_KINDS:
         raise ValueError(f"unknown flag kind {kind!r}; expected one of {FLAG_KINDS}")
     if not summary or not summary.strip():
         raise ValueError("flag summary must not be empty")
     with art.log_lock():
-        raised = sum(1 for e in art.read_log() if e.get("action") == "flag")
-        flag_id = f"{art.task_id}#{raised + 1}"
+        existing_ids = {
+            e.get("id") for e in art.read_log() if e.get("action") == "flag"
+        }
+        max_n = 0
+        for existing in existing_ids:
+            if isinstance(existing, str):
+                suffix = existing.rpartition("#")[2]
+                if suffix.isdigit():
+                    max_n = max(max_n, int(suffix))
+        flag_id = f"{art.task_id}#{max_n + 1}"
+        if flag_id in existing_ids:  # unreachable via max+1; fail closed if not
+            raise ValueError(
+                f"computed flag id {flag_id} already present - refusing to "
+                "write a colliding id (a duplicate would be silently dropped)"
+            )
         fields: dict[str, Any] = {
             "action": "flag",
             "id": flag_id,

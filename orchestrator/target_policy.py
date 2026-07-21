@@ -43,15 +43,33 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     # Deploy / secret config.
     ".env*",
     "**/.env*",
+    # Per-node engine config (H-D7-1): env.local / env.vps carry PYTHON_BIN,
+    # *_COMMANDS, CLAUDE_CMD, ... and are `set -a; source`d on the TRUSTED
+    # machine (merge-verified.sh / push-hub.sh) - i.e. any shell in them runs as
+    # the Director. Their names have NO leading dot, so `.env*` above misses
+    # them; classify them sensitive so an untracked-turned-tracked env.* routes
+    # L3 (human sees it) instead of L2 auto-merge. The only tracked matches are
+    # the harmless env.local.example / env.vps.example (also L3, fine).
+    "env.*",
+    "**/env.*",
     # Agent-config surface: hooks / MCP servers / steering (C2). Executes host
-    # commands when the local review panel's claude/codex loads them.
+    # commands when the local review panel's claude/codex loads them. Nested
+    # variants are flagged too (H7): the CLIs auto-ingest steering/MCP config
+    # from subdirectories they descend into, not just the repo root.
     ".claude/*",
     ".claude/**/*",
+    "**/.claude/*",
+    "**/.claude/**/*",
     ".mcp.json",
+    "**/.mcp.json",
     ".codex/*",
     ".codex/**/*",
+    "**/.codex/*",
+    "**/.codex/**/*",
     "CLAUDE.md",
     "**/CLAUDE.md",
+    "CLAUDE.local.md",
+    "**/CLAUDE.local.md",
     "AGENTS.md",
     "**/AGENTS.md",
     "GEMINI.md",
@@ -60,13 +78,83 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     ".github/*",
     ".github/**/*",
     # Supply chain: a dependency bump / lockfile change is the main realistic
-    # attack vector (trust-model S9).
+    # attack vector (trust-model S9). Manifests AND lockfiles, at any depth
+    # (M6): a dependency injected into nested backend/requirements.txt or a
+    # lockfile rides the same vector as the root manifest.
     "requirements*.txt",
+    "**/requirements*.txt",
     "pyproject.toml",
+    "**/pyproject.toml",
+    "Pipfile",
+    "**/Pipfile",
+    "Pipfile.lock",
+    "**/Pipfile.lock",
+    "poetry.lock",
+    "**/poetry.lock",
+    "uv.lock",
+    "**/uv.lock",
     "package.json",
     "**/package.json",
+    "package-lock.json",
+    "**/package-lock.json",
     "pnpm-lock.yaml",
     "**/pnpm-lock.yaml",
+    "yarn.lock",
+    "**/yarn.lock",
+    # Trusted-tool config a branch can plant to make a gate step lie (D2). Each
+    # is AUTO-DISCOVERED and honored by a tool the gate runs, yet escaped the
+    # sensitive set, so it rode L2 auto-merge unclassified:
+    #   - conftest.py: pytest auto-loads it and a collection hook
+    #     (pytest_sessionfinish -> session.exitstatus = 0) forges a green suite.
+    #     Classified L3 so a human reviews the collection-hook diff; the gate
+    #     itself cannot restore it (legit fixture conftests) nor tell a malicious
+    #     hook from a benign one, so L3 IS the boundary (H-D2-1).
+    #   - pytest.ini / tox.ini / setup.cfg: pytest config that can re-home the
+    #     runner / rewrite addopts (H-D2-1).
+    #   - .semgrepignore / .gitleaks.toml / .gitleaksignore: scanner ignore/allow
+    #     config the scan step honors; the LOAD-BEARING fix is stripping them in
+    #     the gate (testgate._containerized) so the scan cannot run vacuously -
+    #     classification here is the SECOND layer (H-D2-2, H-D2-3).
+    #   - .coveragerc: coverage.py (via pytest-cov) auto-discovers a dedicated
+    #     .coveragerc in the gate's cwd; a branch `[run]\nomit = <its changed
+    #     files>` drops those from coverage.xml so diff-cover --fail-under=90
+    #     passes vacuously (the same config in setup.cfg/tox.ini/pyproject.toml is
+    #     already covered above). Same class as the scanner configs: the
+    #     LOAD-BEARING fix is neutralizing it in the gate, classification here is
+    #     the SECOND layer.
+    #   - ruff.toml / .ruff.toml / pyrightconfig.json: config for the OTHER two
+    #     gate steps (`ruff check .` -> L, `basedpyright` -> T). ruff auto-reads
+    #     ruff.toml/.ruff.toml and basedpyright reads pyrightconfig.json from the
+    #     gate cwd; a branch `[lint]\nselect = []` (ruff) or
+    #     `{"typeCheckingMode":"off"}` (pyright) turns a red step green. The same
+    #     config in pyproject.toml ([tool.ruff]/[tool.basedpyright]) is already
+    #     covered above; these dedicated files were the .coveragerc-style gap.
+    "conftest.py",
+    "**/conftest.py",
+    "pytest.ini",
+    "**/pytest.ini",
+    "tox.ini",
+    "**/tox.ini",
+    "setup.cfg",
+    "**/setup.cfg",
+    ".semgrepignore",
+    "**/.semgrepignore",
+    ".semgrep/*",
+    ".semgrep/**/*",
+    "**/.semgrep/*",
+    "**/.semgrep/**/*",
+    ".gitleaks.toml",
+    "**/.gitleaks.toml",
+    ".gitleaksignore",
+    "**/.gitleaksignore",
+    ".coveragerc",
+    "**/.coveragerc",
+    "ruff.toml",
+    "**/ruff.toml",
+    ".ruff.toml",
+    "**/.ruff.toml",
+    "pyrightconfig.json",
+    "**/pyrightconfig.json",
     # Engine surfaces when laddy itself is the target branch (repo_laddy):
     # post-split the engine's own code lives at the branch REPO ROOT.
     "orchestrator/*",
@@ -79,6 +167,11 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
     "docker/*",
     "security/*",
     "skills/*",
+    # note_server is product code living in the engine repo (pending its move
+    # to its own target); without this glob it was the ONE code dir riding L2
+    # auto-merge while every sibling is L3.
+    "note_server/*",
+    "note_server/**/*",
     # The gate infra + oracle data + THIS policy file, in the target's agent dir.
     # policy.toml is engine-sensitive so a branch cannot weaken its OWN
     # classification: editing it is L3, and merge_check reads it from trusted main.
@@ -94,11 +187,26 @@ ENGINE_SENSITIVE_GLOBS: tuple[str, ...] = (
 # catalogues (i18n JSON, etc.) are added per-target via ``safe_globs``.
 ENGINE_SAFE_GLOBS: tuple[str, ...] = ("*.md", "**/*.md")
 
+# Extensions a target's ``safe_globs`` may route to the L1 no-review lane (M5).
+# Deliberately tiny - genuinely inert data/document formats only. JSON is here
+# for the documented use case (i18n catalogues); executable-adjacent JSON like
+# package.json / .mcp.json is engine-sensitive, so L3 wins before L1 is even
+# considered. Deliberately NOT here: yaml/toml/ini (config that programs act
+# on), svg/html (can embed scripts), and anything code-shaped. A target that
+# needs more falls back to L2, where the agents gate it.
+INERT_SAFE_EXTENSIONS: tuple[str, ...] = ("md", "txt", "json", "csv", "po")
+
+# Where test files live (path prefixes). The engine default always applies -
+# a target's ``test_dirs`` only ADDS locations (src/tests/, frontend/__tests__/,
+# ...), it can never remove literal tests/ from deleted-test detection (M4).
+ENGINE_TEST_DIRS: tuple[str, ...] = ("tests/",)
+
 _REQUIRED_KEYS: tuple[str, ...] = (
     "coverage_package",
     "sensitive_globs",
     "security_globs",
     "invariant_tests",
+    "test_dirs",
     "migration_globs",
     "frontend_prefixes",
     "frontend_gate",
@@ -117,6 +225,7 @@ class TargetPolicy:
     sensitive_globs: tuple[str, ...]
     security_globs: tuple[str, ...]
     invariant_tests: tuple[str, ...]
+    test_dirs: tuple[str, ...]
     migration_globs: tuple[str, ...]
     frontend_prefixes: tuple[str, ...]
     frontend_gate: str
@@ -133,6 +242,13 @@ class TargetPolicy:
     def all_safe_globs(self) -> tuple[str, ...]:
         """Engine-generic (markdown) + product safe-by-construction globs."""
         return ENGINE_SAFE_GLOBS + self.safe_globs
+
+    @property
+    def all_test_dirs(self) -> tuple[str, ...]:
+        """Engine default (literal tests/) + the target's declared test
+        locations. Additive only: a target cannot weaken deleted-test
+        detection by leaving ``test_dirs`` empty (M4)."""
+        return ENGINE_TEST_DIRS + self.test_dirs
 
     @classmethod
     def myapp(cls) -> TargetPolicy:
@@ -178,6 +294,7 @@ class TargetPolicy:
                 "tests/test_invariants_append_only_game_edit_event.py",
                 "tests/test_purchase_payment_received_at_immutable.py",
             ),
+            test_dirs=("src/tests/", "frontend/__tests__/"),
             migration_globs=("alembic/*", "alembic/**/*"),
             frontend_prefixes=("frontend/", "apps/", "packages/"),
             frontend_gate=(
@@ -205,6 +322,32 @@ def _as_str_tuple(value: object, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _as_inert_safe_globs(value: object) -> tuple[str, ...]:
+    """Validate ``safe_globs`` entries against the inert-extension allowlist (M5).
+
+    ``safe_globs`` feed the L1 no-review auto-merge lane, so a target may only
+    ADD inert data catalogues - never widen L1 to cover code. Each glob must
+    end in a literal ``.<ext>`` with ``ext`` on :data:`INERT_SAFE_EXTENSIONS`:
+    a glob without that constraint (``src/**`` - fnmatch's ``*`` crosses ``/``
+    and matches ``src/evil.py``), with a code extension (``**/*.py``), or with
+    a wildcard in the suffix (``*.json*``) is rejected at PARSE time, failing
+    the whole policy closed. Loud beats silent: match-time skipping would hide
+    the misconfiguration while the Director believes the lane exists.
+    Casefolded like the matcher (H8), so ``*.PY`` is still code and ``*.PO``
+    is still a catalogue.
+    """
+    globs = _as_str_tuple(value, "safe_globs")
+    for g in globs:
+        stem, sep, ext = g.casefold().rpartition(".")
+        if not sep or not stem or ext not in INERT_SAFE_EXTENSIONS:
+            raise TargetPolicyError(
+                f"{POLICY_REL}: safe_globs entry {g!r} could match a non-inert "
+                "file; L1 globs must end in a literal inert extension "
+                f"({', '.join('.' + e for e in INERT_SAFE_EXTENSIONS)})"
+            )
+    return globs
+
+
 def parse_target_policy(text: str) -> TargetPolicy:
     """Parse ``policy.toml`` content into a :class:`TargetPolicy`.
 
@@ -223,13 +366,14 @@ def parse_target_policy(text: str) -> TargetPolicy:
         sensitive_globs=_as_str_tuple(data["sensitive_globs"], "sensitive_globs"),
         security_globs=_as_str_tuple(data["security_globs"], "security_globs"),
         invariant_tests=_as_str_tuple(data["invariant_tests"], "invariant_tests"),
+        test_dirs=_as_str_tuple(data["test_dirs"], "test_dirs"),
         migration_globs=_as_str_tuple(data["migration_globs"], "migration_globs"),
         frontend_prefixes=_as_str_tuple(data["frontend_prefixes"], "frontend_prefixes"),
         frontend_gate=_as_str(data["frontend_gate"], "frontend_gate"),
         user_visible_prefixes=_as_str_tuple(
             data["user_visible_prefixes"], "user_visible_prefixes"
         ),
-        safe_globs=_as_str_tuple(data["safe_globs"], "safe_globs"),
+        safe_globs=_as_inert_safe_globs(data["safe_globs"]),
     )
 
 
@@ -253,6 +397,7 @@ def dump_target_policy(policy: TargetPolicy) -> str:
             f"sensitive_globs = {_arr(policy.sensitive_globs)}",
             f"security_globs = {_arr(policy.security_globs)}",
             f"invariant_tests = {_arr(policy.invariant_tests)}",
+            f"test_dirs = {_arr(policy.test_dirs)}",
             f"migration_globs = {_arr(policy.migration_globs)}",
             f"frontend_prefixes = {_arr(policy.frontend_prefixes)}",
             f"frontend_gate = {_s(policy.frontend_gate)}",

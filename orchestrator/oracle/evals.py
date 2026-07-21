@@ -316,7 +316,8 @@ def scaffold_bundle(
     d.mkdir(parents=True)
     (d / BUNDLE_SPEC).write_text(spec_text + "\n", encoding="utf-8", newline="\n")
     (d / BUNDLE_SEED).write_text(
-        merge_diff(repo_root, merge_sha) + "\n", encoding="utf-8", newline="\n"
+        merge_diff(repo_root, merge_sha, task_id) + "\n",
+        encoding="utf-8", newline="\n",
     )
     (d / BUNDLE_EXPECTED).write_text(
         json.dumps(

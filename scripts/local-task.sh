@@ -49,7 +49,8 @@ TRUSTED="${LOCAL_TRUSTED_REPO:-$HOME/myapp}"
 WORK_ROOT="${AGENT_WORK_ROOT:-$HOME/agent-work}"
 
 command -v git >/dev/null || die "git not found"
-command -v python3 >/dev/null || die "python3 not found"
+PY="${PYTHON_BIN:-python3}"
+command -v "$PY" >/dev/null || die "python3 not found (set PYTHON_BIN for a non-default interpreter)"
 [ -d "$SOURCE_REPO/.git" ] || die "LOCAL_SOURCE_REPO has no .git: $SOURCE_REPO"
 
 echo "[local] task=$TASK"
@@ -89,7 +90,7 @@ SPEC_REL="$ARTIFACT_DIR_NAME/specs/$TASK.md"
 # 3. spec must be visible on hub main (the loop clones the hub).
 if [ "$DO_NEW" = "1" ]; then
   echo "[local] authoring spec interactively (--new)"
-  ( cd "$TRUSTED" && python3 -m orchestrator.run "$TASK" --phase new )
+  ( cd "$TRUSTED" && "$PY" -m orchestrator.run "$TASK" --phase new )
   git -C "$TRUSTED" add "$SPEC_REL"
   git -C "$TRUSTED" -c user.name=local -c user.email=local@myapp.local \
       commit -m "spec: $TASK" >/dev/null || true
@@ -112,17 +113,17 @@ export MAX_LOOPS="${MAX_LOOPS:-4}"
 
 cd "$TRUSTED"
 echo "[local] clarify gate (interactive; answer or say 'no questions')..."
-python3 -m orchestrator.run "$TASK" --phase clarify
+"$PY" -m orchestrator.run "$TASK" --phase clarify
 
 # Phase 1.5: design gate - foreground for high-risk tasks; no-op otherwise.
 # A rejection (non-zero) stops the local-task: the loop does not run.
-python3 -m orchestrator.run "$TASK" --phase design || {
+"$PY" -m orchestrator.run "$TASK" --phase design || {
   echo "[local] design gate not approved; not running the loop." >&2
   exit 1
 }
 
 echo "[local] loop (foreground; may take a few minutes - includes the container gate)..."
-python3 -m orchestrator.run "$TASK" --phase loop
+"$PY" -m orchestrator.run "$TASK" --phase loop
 
 echo
 echo "[local] done. If it converged, $TASK is on the hub."

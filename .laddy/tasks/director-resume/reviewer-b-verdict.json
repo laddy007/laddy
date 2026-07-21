@@ -1,0 +1,47 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "orchestrator/gitops.py",
+    "orchestrator/run.py",
+    "tests/test_gitops.py",
+    "tests/test_run_cli.py"
+  ],
+  "claims_verified": [
+    {
+      "claim": "A new GitOps.sync_worktree_to_origin fetches origin and hard-resets the persisted task worktree to origin/<branch> before spec_sha is computed, closing the stale-worktree gap",
+      "evidence": "orchestrator/gitops.py:123-152 (fetch + rev-parse remote ref + hard reset, False when branch absent on origin)",
+      "verified": true
+    },
+    {
+      "claim": "_phase_resume calls the sync AFTER all validation (empty reason, terminal exists, terminal resumable) and BEFORE computing spec_sha / appending the director_resume event",
+      "evidence": "orchestrator/run.py:433-442 - sync_worktree_to_origin(wt, task_id) precedes blob_sha() and append_log()",
+      "verified": true
+    },
+    {
+      "claim": "Sync does not run when validation fails (e.g. still-running task or PATH_GUARD_VIOLATION), so a live/poisoned worktree is never hard-reset",
+      "evidence": "tests/test_run_cli.py:1012-1028 test_resume_does_not_sync_worktree_when_validation_fails monkeypatches sync_worktree_to_origin and asserts it's never called when the terminal is non-resumable",
+      "verified": true
+    },
+    {
+      "claim": "My exact reported scenario (VPS worktree stale at CAP_REACHED, Director pushes a spec correction from a separate clone, then --resume) now delivers the corrected spec, records the correct spec_sha, and the local worktree ends up built on top of the Director's commit (no non-fast-forward push rejection)",
+      "evidence": "tests/test_run_cli.py:1059-1106 test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone: asserts worktree spec content flips from stale to corrected, spec_sha matches the corrected blob's real git hash-object, and `git merge-base HEAD director_tip == director_tip` (HEAD descends from the Director's pushed commit)",
+      "verified": true
+    },
+    {
+      "claim": "Unit-level sync behavior (fast-forward when remote branch has moved; no-op when branch absent on origin) is covered directly on GitOps",
+      "evidence": "tests/test_gitops.py: test_sync_worktree_to_origin_fast_forwards_to_pushed_tip and test_sync_worktree_to_origin_is_noop_when_branch_absent_on_origin, both passing",
+      "verified": true
+    },
+    {
+      "claim": "Full suite green after the fix",
+      "evidence": "`python3 -m pytest -q` -> 733 passed; targeted resume/sync tests -> 13 passed",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "The prior blocker (stale persisted worktree causing the resumed spec correction to be silently dropped and the eventual push to be rejected non-fast-forward) is directly fixed and directly tested: an integration test reproduces the exact multi-clone scenario I verified live in the previous round, plus focused unit tests on the new sync_worktree_to_origin covering both the fast-forward case and the branch-absent no-op case, plus a negative test proving the sync never fires on a refused (still-running/poisoned) resume.",
+  "residual_risks": [
+    "sync_worktree_to_origin runs outside the run_lock held later by _phase_loop; two concurrent `--phase resume` invocations on the same task could race on the hard reset. This is a narrow, self-inflicted scenario (the Director would have to issue two overlapping resume commands) and is outside the scope of the finding I raised, so not blocking here."
+  ]
+}

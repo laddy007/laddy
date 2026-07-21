@@ -22,6 +22,18 @@ def test_local_task_runs_design_between_clarify_and_loop() -> None:
     assert _order_ok((_SCRIPTS / "local-task.sh").read_text(encoding="utf-8"))
 
 
+def test_kickoff_resume_forwards_reason_and_detaches() -> None:
+    # --resume must reach `--phase resume` (forwarding --reason via REST) and
+    # detach the same way the loop does (nohup, unbuffered, heartbeat) so it
+    # survives an SSH drop. Guard the wiring against a silent regression.
+    text = (_SCRIPTS / "kickoff.sh").read_text(encoding="utf-8")
+    resume = next(ln for ln in text.splitlines() if "--phase resume" in ln)
+    assert "nohup" in resume, resume
+    assert "LADDY_LOG_HEARTBEAT=1" in resume, resume
+    assert " -u " in resume, resume
+    assert 'REST[@]' in resume, resume  # forwards --reason "text" verbatim
+
+
 def test_kickoff_launches_loop_observably() -> None:
     # AC#3: the detached loop must run unbuffered (so a crash before the terminal
     # print does not swallow buffered output into an empty $LOG) with the log

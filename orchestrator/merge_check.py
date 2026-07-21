@@ -3,18 +3,30 @@
 The VPS-committed merge-decision.json is NOT trusted: this module
 RECOMPUTES the policy decision from the actual diff and the artifact log,
 and fails on any mismatch. local_merge calls `check()` with an explicit
-task_id (spec §3) as one of the trial-merge gates before a local merge is
+task_id (spec sec. 3) as one of the trial-merge gates before a local merge is
 allowed to proceed.
 
-Returns (exit_code, message): 0 = decision echoed in the message
-("decision=<...>"), 1 = check failed (mismatch / missing artifacts / stale
-SHAs).
+Returns (exit_code, message): 0 = the recomputed decision echoed in the
+message ("decision=<...>"), 1 = check failed (mismatch / missing artifacts /
+stale SHAs) OR the recomputed decision is a stop_before_merge with at least
+one LEAKING reason. An honestly-committed stop is consistent, but consistency
+alone is not a pass: the decision VALUE is part of the verdict (H1). The stop
+is scoped to LEAKING reasons only, though: sensitive/security paths (plus the
+computed high_risk they imply) manifest locally by construction - the local
+authority re-derives them from the diff, classifies the branch L3, and routes
+it to a typed human RISK_DECISION, never an auto-merge - so a consistent stop
+carrying ONLY those reasons attests PASSED (same scoping merge_check_local
+applies on the --local route). Every other reason (deleted tests, destructive
+migrations, senior deadlock, a DECLARED high risk on non-sensitive paths, the
+report-only guards) has no local manifestation and keeps exiting 1.
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from orchestrator import TARGET_DIR_NAME
 from orchestrator.artifacts import MERGE_DECISION, STATE, TaskArtifacts
@@ -33,15 +45,99 @@ from orchestrator.spec import SpecError, parse_spec
 from orchestrator.target_policy import load_target_policy
 
 
+@dataclass(frozen=True)
+class CommittedDecision:
+    """Typed view of the UNTRUSTED branch-committed merge-decision.json.
+
+    Only the field the check compares (``decision``) is modeled; everything
+    else in the artifact is recomputed from trusted inputs, never read. A
+    non-string decision folds to None, which can never equal a recomputed
+    decision - fail closed, exactly like an absent key.
+    """
+
+    decision: str | None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> CommittedDecision | None:
+        """None for a payload that is not a JSON object (missing artifact)."""
+        if not isinstance(payload, dict):
+            return None
+        decision = payload.get("decision")
+        return cls(decision=decision if isinstance(decision, str) else None)
+
+
+@dataclass(frozen=True)
+class CommittedState:
+    """Typed view of the UNTRUSTED branch-committed state.json.
+
+    Only ``head_sha`` is compared (against the recomputed code sha); a
+    non-string value folds to None and can never match - fail closed.
+    """
+
+    head_sha: str | None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> CommittedState | None:
+        """None for a payload that is not a JSON object (missing artifact)."""
+        if not isinstance(payload, dict):
+            return None
+        head_sha = payload.get("head_sha")
+        return cls(head_sha=head_sha if isinstance(head_sha, str) else None)
+
+
+# Stop reasons whose local manifestation is the L3 RISK_DECISION route (see
+# _leaking_stop_reasons); matched by prefix because policy.merge_decision
+# suffixes them with the offending paths.
+_SENSITIVE_REASON_PREFIXES = ("policy_sensitive_paths", "security_auth_paths")
+
+
+def _leaking_stop_reasons(reasons: Sequence[str]) -> list[str]:
+    """The stop reasons with NO local manifestation in the caller's own gates.
+
+    Sensitive/security paths DO manifest locally: gather_gates re-derives them
+    from the diff, classifies the branch L3, and decide() holds it as a
+    RISK_DECISION - the digest plus typed exact-task-id confirmation is
+    precisely the human decision the stop asks for (merge_check_local encodes
+    the same scoping for --local). The COMPUTED ``high_risk`` those paths
+    imply rides with them. Everything else (deleted tests, destructive
+    migrations, senior deadlock, ``high_risk`` on non-sensitive paths - i.e.
+    reviewer-declared - and stale gate approvals) would leak: nothing
+    downstream re-surfaces it, so it must fail the check (H1).
+    """
+    sensitive_present = any(r.startswith(_SENSITIVE_REASON_PREFIXES) for r in reasons)
+    return [
+        r
+        for r in reasons
+        if not r.startswith(_SENSITIVE_REASON_PREFIXES)
+        and not (r == "high_risk" and sensitive_present)
+    ]
+
+
 def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
-    """Returns (exit_code, message). Pure enough to unit-test on a temp repo."""
+    """Returns (exit_code, message). Pure enough to unit-test on a temp repo.
+
+    A consistent stop_before_merge exits 1 only for LEAKING reasons (see
+    _leaking_stop_reasons); a stop whose every reason manifests locally as
+    the L3 RISK_DECISION route exits 0 echoing the decision. Report-only
+    stops are always leaking: path_guard / nondraft / verify reasons have no
+    local manifestation."""
     task = task_id
     artifacts = TaskArtifacts(repo, task_id)
 
-    committed: Any = artifacts.read_json(MERGE_DECISION)
-    if not isinstance(committed, dict):
+    # A truncated/garbled committed artifact is a FAILED check, not a crash
+    # (M7): return (1, reason) with the parse failure recorded, so the caller
+    # holds THIS task and the rest of its batch keeps processing. The branch
+    # authored these files, so unparseable JSON is its defect - fail closed.
+    try:
+        committed = CommittedDecision.from_payload(artifacts.read_json(MERGE_DECISION))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return 1, f"reason=unparseable_merge_decision: {exc!r}"
+    if committed is None:
         return 1, "reason=missing_merge_decision"
-    state: Any = artifacts.read_json(STATE)
+    try:
+        state = CommittedState.from_payload(artifacts.read_json(STATE))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return 1, f"reason=unparseable_state: {exc!r}"
 
     try:
         spec = parse_spec(repo / TARGET_DIR_NAME / "specs" / f"{task}.md")
@@ -55,7 +151,7 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
     gitops = GitOps(
         repo_url="unused", work_root=repo.parent, default_branch=base.split("/")[-1]
     )
-    changed = gitops.changed_files(repo)
+    changed = gitops.changed_files(repo, task)
 
     if spec.report_only:
         recomputed = report_only_decision(
@@ -67,14 +163,14 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
             ),
         )
     else:
-        if not isinstance(state, dict):
+        if state is None:
             return 1, "reason=missing_state"
         # recompute code_sha from the actual history and compare to state.json
         # (a fabricated state.json must not survive)
-        actual_code_sha = gitops.code_sha(repo)
-        if state.get("head_sha") != actual_code_sha:
+        actual_code_sha = gitops.code_sha(repo, task)
+        if state.head_sha != actual_code_sha:
             return 1, (
-                f"reason=state_sha_mismatch state={state.get('head_sha')} "
+                f"reason=state_sha_mismatch state={state.head_sha} "
                 f"actual={actual_code_sha}"
             )
         # rebuild gate states + declared risk from the artifacts, NOT from the
@@ -95,17 +191,37 @@ def check(repo: Path, base: str, task_id: str) -> tuple[int, str]:
         recomputed = merge_decision(
             policy=load_target_policy(repo, ref=base),
             changed_files=changed,
-            diff_lines=gitops.diff_line_count(repo),
+            diff_lines=gitops.diff_line_count(repo, task),
             declared_risk=declared_risk_from_verdicts(artifacts),
             gates=gates,
-            changed_statuses=gitops.changed_statuses(repo),
+            changed_statuses=gitops.changed_statuses(repo, task),
             migration_texts=_read,
             senior_deadlock=deadlock,
         )
 
-    if recomputed.decision != committed.get("decision"):
+    if recomputed.decision != committed.decision:
         return 1, (
-            f"reason=policy_mismatch committed={committed.get('decision')} "
+            f"reason=policy_mismatch committed={committed.decision} "
             f"recomputed={recomputed.decision} recomputed_reasons={list(recomputed.reasons)}"
         )
+    if recomputed.decision == "stop_before_merge":
+        # Consistent stop == stop: the chain is honest, but the verdict says
+        # STOP. The caller reads only the exit code, so exit 0 would turn an
+        # honestly-computed stop into a green policy gate whenever a reason
+        # (test_files_deleted, declared high_risk, senior deadlock, ...) has
+        # no independent local manifestation (H1). Scoped, not unconditional:
+        # sensitive/security-path reasons (and the computed high_risk they
+        # imply) ARE re-derived locally as blast L3 -> RISK_DECISION, so a
+        # stop carrying only those must not read as BROKEN - exit 1 only for
+        # the LEAKING reasons. Report-only stops stay unconditional: their
+        # reasons never manifest locally.
+        leaking = (
+            list(recomputed.reasons)
+            if spec.report_only
+            else _leaking_stop_reasons(recomputed.reasons)
+        )
+        if leaking:
+            return 1, (
+                f"reason=recomputed_stop_before_merge recomputed_reasons={leaking}"
+            )
     return 0, f"decision={recomputed.decision}"

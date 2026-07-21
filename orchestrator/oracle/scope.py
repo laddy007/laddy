@@ -17,7 +17,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from orchestrator.gitops import policy_pathspec
+from orchestrator.gitdiff import policy_pathspec
 from orchestrator.merge_subject import parse_merge_subject
 from orchestrator.oracle import run_git
 from orchestrator.policy import L1, classify_blast_radius
@@ -105,14 +105,14 @@ def merged_tasks_in_range(
     for sha, task_id in _iter_task_merges(repo, "--reverse", f"{from_sha}..{to_ref}"):
         _, files = run_git(
             repo, "diff", "--no-renames", "--name-only", f"{sha}^1", sha,
-            *policy_pathspec(),
+            *policy_pathspec(task_id),
         )
         changed = tuple(files.splitlines())
         if not changed:
-            # An artifact-only merge (report-only task: everything under
-            # <agent-dir>/tasks/ is pathspec-excluded) ships no product
-            # diff - nothing for the oracle to review. Letting it through
-            # would hit classify_blast_radius's fail-closed L3 for () -
+            # An artifact-only merge (report-only task: everything under the
+            # task's own <agent-dir>/tasks/<id>/ is pathspec-excluded) ships
+            # no product diff - nothing for the oracle to review. Letting it
+            # through would hit classify_blast_radius's fail-closed L3 for () -
             # right for the merge gate, wrong here: it would fire the
             # high-risk trigger and skew the L3 denominator on every
             # report task.

@@ -95,6 +95,47 @@ def test_lock_is_single_flight(tmp_path: Path) -> None:
         pass
 
 
+def test_enqueue_is_serialized_by_the_queue_lock(tmp_path: Path) -> None:
+    # L-D5-2: enqueue now runs UNDER queue.lock(), so its dup-check -> next-seq
+    # -> write cannot interleave with another enqueue or a queue runner. While
+    # the lock is held (a live holder), a concurrent enqueue must be refused, not
+    # race on the sequence number.
+    holder = TaskQueue(tmp_path)
+    with holder.lock():
+        with pytest.raises(QueueLocked):
+            TaskQueue(tmp_path).enqueue("alpha")
+    # released after the run: the same enqueue now succeeds.
+    TaskQueue(tmp_path).enqueue("alpha")
+    assert [i.task_id for i in TaskQueue(tmp_path).items()] == ["alpha"]
+
+
+def test_queue_lock_reclaims_stale_lock_from_dead_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # L-D5-1: a crashed --phase queue runner orphans the .lock; the next lock()
+    # must reclaim it (dead pid) instead of raising QueueLocked forever.
+    q = TaskQueue(tmp_path)
+    q.dir.mkdir(parents=True)
+    (q.dir / ".lock").write_text("424242\n")
+    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: False)
+    with q.lock():
+        assert (q.dir / ".lock").exists()
+    assert not (q.dir / ".lock").exists()
+
+
+def test_queue_lock_refuses_when_holder_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # L-D5-1: a lock held by a LIVE pid still blocks (not reclaimed).
+    q = TaskQueue(tmp_path)
+    q.dir.mkdir(parents=True)
+    (q.dir / ".lock").write_text("424242\n")
+    monkeypatch.setattr("orchestrator.queue._pid_alive", lambda pid: True)
+    with pytest.raises(QueueLocked):
+        with q.lock():
+            pass
+
+
 def test_items_ordered_numerically_not_lexicographically(tmp_path: Path) -> None:
     q = TaskQueue(tmp_path)
     q.dir.mkdir(parents=True)

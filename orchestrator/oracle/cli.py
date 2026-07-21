@@ -155,7 +155,8 @@ def _cmd_prepare(repo: Path, args: argparse.Namespace) -> int:
     ).read_text(encoding="utf-8")
     phase1 = build_phase1_prompt(
         task_id=task_id, spec_text=spec_text,
-        diff_text=merge_diff(repo, task.merge_sha), worktree=wt, class_slugs=slugs,
+        diff_text=merge_diff(repo, task.merge_sha, task_id), worktree=wt,
+        class_slugs=slugs,
     )
     art = TaskArtifacts(repo, task_id)
     phase2 = build_phase2_prompt(
@@ -199,7 +200,10 @@ def _cmd_escape(repo: Path, args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
     log_rel = f"{TARGET_DIR_NAME}/tasks/{args.task}/{LOG}"
     print(f"[oracle] raised {flag_id} ({args.grade}, {args.class_slug})")
-    print(f"[oracle] commit it: git add {log_rel} && "
+    # Commit the run-log provenance record ALONGSIDE the flag: the run log is
+    # the authenticity anchor iter_escapes cross-checks, so a flag committed
+    # without it would read as forged (uncounted) on a fresh checkout.
+    print(f"[oracle] commit it: git add {log_rel} {RUN_LOG_PATH} && "
           f'git commit -m "oracle: escape {flag_id}"')
     return 0
 

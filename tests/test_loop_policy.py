@@ -8,10 +8,16 @@ from pathlib import Path
 import pytest
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.artifacts import MERGE_DECISION, STATE, TaskArtifacts
+from orchestrator.artifacts import (
+    MERGE_DECISION,
+    RW1_VERDICT,
+    RW2_VERDICT,
+    STATE,
+    TaskArtifacts,
+)
 from orchestrator.gitops import GitOps
 from orchestrator.handoff import NtfyNotifier
-from orchestrator.loop import Orchestrator
+from orchestrator.loop import Orchestrator, declared_risk_from_verdicts
 from tests.fakes import FakeRunner, FakeShell, blocker, verdict_json, write_policy_toml
 
 
@@ -140,6 +146,41 @@ def test_sensitive_path_stops_before_merge(
     assert _git("-C", str(remote), "rev-parse", "refs/heads/t1")
 
 
+def test_resumed_merge_decided_runs_a_developer_round(
+    remote: Path, tmp_path: Path, roles_dir: Path
+) -> None:
+    """director-resume flagship (the spec's cited mcp example): a task that
+    ended MERGE_DECIDED:stop_before_merge, whose tail is push:ok (so the pure
+    derivation yields 'done'), must - once resumed - run a REAL developer round
+    that receives the Director note, NOT silently re-record the same terminal via
+    the 'done' branch. Drives the resumed task through the full _run_phases with
+    policy enabled (the coverage the un-stick-only tests could not give)."""
+    # 1. first run stops before merge (sensitive path touched).
+    dev1 = TouchingRunner(["done"], "myapp/models.py", "STATE = 2\n")
+    orch1 = _orch(remote, tmp_path, roles_dir, dev1,
+                  FakeRunner([verdict_json("APPROVED")]), NtfyNotifier(None))
+    assert orch1.run("t1") == "MERGE_DECIDED:stop_before_merge"
+
+    wt = orch1.gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    # 2. Director resumes with a corrected ask.
+    art.append_log(action="director_resume", outcome="ok",
+                   reason="models change needs a migration guard")
+
+    # 3. second run (fresh fakes): the resume must DEVELOP, not re-record.
+    dev2 = TouchingRunner(["reworked per the note"], "myapp/api_helper.py", "y = 2\n")
+    orch2 = _orch(remote, tmp_path, roles_dir, dev2,
+                  FakeRunner([verdict_json("APPROVED")]), NtfyNotifier(None))
+    terminal = orch2.run("t1")
+
+    assert terminal.startswith("MERGE_DECIDED:")  # productive re-run reached a decision
+    log = art.read_log()
+    idx = max(i for i, e in enumerate(log) if e.get("action") == "director_resume")
+    dev_after = [e for e in log[idx + 1:] if e.get("action") == "developer"]
+    assert len(dev_after) == 1  # exactly one developer round ran after the resume
+    assert "models change needs a migration guard" in dev2.calls[0].prompt  # note delivered
+
+
 def test_artifact_commits_do_not_invalidate_approvals(
     remote: Path, tmp_path: Path, roles_dir: Path
 ) -> None:
@@ -153,7 +194,28 @@ def test_artifact_commits_do_not_invalidate_approvals(
 
     wt = orch.gitops.task_worktree("t1")
     # HEAD (with artifact commits) differs from the code SHA the gates keyed on
-    assert orch.gitops.head_sha(wt) != orch.gitops.code_sha(wt)
+    assert orch.gitops.head_sha(wt) != orch.gitops.code_sha(wt, "t1")
+
+
+def test_declared_risk_from_verdicts_normalizes_out_of_enum_to_high(
+    tmp_path: Path,
+) -> None:
+    # M8: a raw out-of-enum risk_level ("CRITICAL", "HIGH") ranked as high but
+    # was RETURNED raw, so == "high" consumers (loop escalation, merge
+    # decision) never saw it. It must come back as the enum value "high".
+    art = TaskArtifacts(tmp_path, "t1")
+    art.write_json(RW1_VERDICT, {"risk_level": "CRITICAL"})
+    art.write_json(RW2_VERDICT, {"risk_level": "low"})
+    assert declared_risk_from_verdicts(art) == "high"
+
+
+def test_declared_risk_from_verdicts_takes_the_max_enum_level(
+    tmp_path: Path,
+) -> None:
+    art = TaskArtifacts(tmp_path, "t1")
+    art.write_json(RW1_VERDICT, {"risk_level": "medium"})
+    art.write_json(RW2_VERDICT, {"risk_level": "low"})
+    assert declared_risk_from_verdicts(art) == "medium"
 
 
 def test_cap_reached_writes_handback_and_notifies(

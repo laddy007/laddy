@@ -20,16 +20,23 @@ for that newer commit. A stopgap until bounce-to-VPS exists.
 Decision by blast radius (policy.classify_blast_radius, trust-model S8):
   L1 safe-by-construction : merge after the mechanical gates, no review
   L2 ordinary logic       : the agents ARE the gate (rw2 + security panel)
-  L3 sensitive surface    : never auto-merge; digest -> human Y/N
+  L3 sensitive surface    : never auto-merge; digest -> human risk decision
+
+EVERY merge side-effect into local main - L1, L2, and L3 alike - additionally
+requires the merge-safety confirmation: the operator types the EXACT task id
+(H4). A wrong or blank id declines and merges nothing; --no-input is a true
+dry run that never prompts and never merges.
 
 Deterministic gates (block on red): local full test re-run, diff-coverage,
 semgrep, gitleaks, and (for a fetched VPS tip) artifact attestation via
-merge_check. Judgment gates (escalate, never silently block): rw2 re-run, the
-security panel.
+merge_check - or, under --local, the fail-closed policy recompute on the fix
+tree via merge_check_local (H5). Judgment gates (escalate, never silently
+block): rw2 re-run, the security panel.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -38,7 +45,19 @@ from enum import Enum
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME, default_work_root
+from orchestrator.agent_retry import request_verdict
 from orchestrator.agents import AgentRunner
+
+# Hub-main tripwire (spec S5, audit M3) - deletion / rewind / divergence
+# detection lives in orchestrator.hub_tripwire (a leaf module, like
+# merge_subject); the boolean wrapper stays re-exported for existing call
+# sites and tests.
+from orchestrator.hub_tripwire import (
+    HubMainCheck,
+    HubMainState,
+    check_hub_main,
+    hub_main_ancestor_of_local,
+)
 from orchestrator.human_text import untrusted_inline
 
 # Re-exported for backward-compat call sites (tests/fakes.py, historical
@@ -52,26 +71,38 @@ from orchestrator.merge_subject import (
 )
 from orchestrator.policy import L2, L3, classify_blast_radius
 from orchestrator.target_policy import load_target_policy
-from orchestrator.testgate import BindingGate, BindingResult, restored_infra_paths
-from orchestrator.verdict import Verdict, VerdictError, request_verdict
+from orchestrator.testgate import (
+    BindingGate,
+    BindingResult,
+    frontend_touched,
+    restored_infra_paths,
+)
+from orchestrator.verdict import Verdict, VerdictError
 
 __all__ = [
     "ArtifactAttestation",
     "ArtifactAttestationState",
     "GateResults",
+    "HubMainCheck",
+    "HubMainState",
     "LocalMergeEngine",
     "MergePreparationError",
     "MergeRequest",
     "MergeVerdict",
     "_MERGE_SUBJECT",
+    "check_hub_main",
     "decide",
+    "hub_main_ancestor_of_local",
     "merge_subject",
     "parse_merge_subject",
     "render_advisory",
     "run_security_panel",
 ]
 
-# (repo, base, task_id) -> (exit_code, message) - wraps merge_check.check
+# (repo, base, task_id) -> (exit_code, message) - wraps merge_check.check.
+# ``base`` is the trusted LOCAL base branch name (config.default_branch): the
+# policy recompute loads policy.toml from that local ref, not from a possibly
+# -stale origin/<base> remote-tracking ref (M1).
 MergeCheckFn = Callable[[Path, str, str], tuple[int, str]]
 
 # --- results & verdict -------------------------------------------------------
@@ -90,11 +121,23 @@ class ArtifactAttestation:
     """Result of checking the VPS-authored state/decision artifact chain.
 
     The check is applicable to a fetched VPS task tip: its committed artifacts
-    must describe that exact code history. It is deliberately not applicable
+    must describe that exact code history AND the recomputed policy decision
+    must carry no LEAKING stop reason - merge_check exits non-zero for a
+    consistent stop_before_merge whose reasons have no local manifestation
+    (deleted tests, declared high risk, senior deadlock, ...), so an
+    honestly-committed stop holds here instead of laundering into a green
+    policy gate (H1). A consistent stop carrying ONLY sensitive/security-path
+    reasons (plus the computed high_risk they imply) attests PASSED instead:
+    those reasons are re-derived locally as blast L3 and decide() routes the
+    branch to RISK_DECISION - the typed human confirmation the stop asks for,
+    never an auto-merge. It is deliberately not applicable
     to ``--local`` because a Director-authored code commit makes those inherited
     artifacts stale by construction; the fresh trusted-local gates judge that
-    commit instead. Keeping this as a typed state avoids laundering N/A into a
-    fake successful policy check.
+    commit instead. The --local route still runs the fail-closed policy
+    recompute on the fix tree (merge_check_local, H5): a stop it recomputes is
+    carried here as FAILED, so an honestly-stopped branch cannot be laundered
+    by re-judging a trivial fix with --local. Keeping this as a typed state
+    avoids laundering N/A into a fake successful policy check.
     """
 
     state: ArtifactAttestationState
@@ -121,7 +164,7 @@ class GateResults:
     sensitive_files: tuple[str, ...] = ()  # the paths that made it L3
     head_sha: str = ""  # the exact commit these gates verified (TOCTOU pin)
     # Gate-infra paths this branch changed whose branch version the gate did NOT
-    # run: it restored trusted main's copy over them (NÁLEZ 1). Empty for every
+    # run: it restored trusted main's copy over them (FINDING 1). Empty for every
     # branch that leaves the gate infra alone - i.e. almost all of them.
     infra_overridden: tuple[str, ...] = ()
 
@@ -135,6 +178,9 @@ BROKEN = "broken"
 #   dry_run       : --no-input dry run -> would auto-merge, but nothing is
 #                   touched (no local-main mutation, no push)
 DRY_RUN = "dry_run"
+#   declined      : gates green and mergeable, but the operator did not type
+#                   the exact task id (H4) -> nothing merged, branch stays ready
+DECLINED = "declined"
 
 
 @dataclass(frozen=True)
@@ -172,12 +218,13 @@ def build_digest(
     advisory: Sequence[str] = (),
 ) -> str:
     """One-screen summary. For a RISK_DECISION it names what is sensitive and
-    asks Y/N; for a BROKEN hold it diagnoses what failed, why, and what is
-    needed - and does NOT offer a merge (you fix broken code, not merge it).
+    asks for the merge-safety confirmation (type the exact task id); for a
+    BROKEN hold it diagnoses what failed, why, and what is needed - and does
+    NOT offer a merge (you fix broken code, not merge it).
 
     ``advisory`` (non-empty only on an --advisory RISK_DECISION) lists the
-    judgment-gate findings being WAIVED, so the Y/N prompt is honest: it never
-    claims "all gates passed" for a change the panel objected to."""
+    judgment-gate findings being WAIVED, so the confirmation prompt is honest:
+    it never claims "all gates passed" for a change the panel objected to."""
     safe_task = untrusted_inline(task_id)
     lines = [f"# Merge hold: {safe_task}  (blast {gates.blast}, {kind})", ""]
 
@@ -198,7 +245,8 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{safe_task}` into main under --advisory? (y/N) - you decide",
+                f"Merge `{safe_task}` into main under --advisory? Type the",
+                "exact task id to merge; anything else declines - you decide",
                 "on this summary, not by reading the diff.",
                 "",
             ]
@@ -210,8 +258,9 @@ def build_digest(
                 "",
                 "## Your decision",
                 "",
-                f"Merge `{safe_task}` into main? (y/N) - you decide on this",
-                "summary, not by reading the diff.",
+                f"Merge `{safe_task}` into main? Type the exact task id to",
+                "merge; anything else declines - you decide on this summary,",
+                "not by reading the diff.",
                 "",
             ]
         return "\n".join(lines)
@@ -334,8 +383,8 @@ def decide(
     # blocking; it may never touch deterministic (the trust invariant).
     blocking = deterministic + ([] if advisory_mode else judgment)
     if blocking:
-        # No _L3_REASON here: this branch returns before the L3 y/N prompt can
-        # ever be offered, so naming a "human risk decision" would advertise a
+        # No _L3_REASON here: this branch returns before the L3 confirmation
+        # can ever be offered, so naming a "human risk decision" would advertise a
         # decision the Director is not being given. The blast level still
         # reaches them through the digest header.
         reasons = tuple(blocking)
@@ -470,14 +519,45 @@ class MergePreparationError(RuntimeError):
 MergeOne = Callable[[MergeRequest], bool]
 
 
+def _engine_failure_verdict(task_id: str, exc: Exception) -> MergeVerdict:
+    """BROKEN hold for a task the ENGINE failed to process (M7).
+
+    One malformed branch - e.g. a truncated committed merge-decision.json
+    raising JSONDecodeError out of the verify path - must never abort the
+    batch. The failure is RECORDED on this task's verdict: reason and digest
+    carry the exception repr, so a programming error is never swallowed
+    invisibly, and the digest says plainly this is an engine-side failure -
+    no gate verdict exists for the change - not a policy stop.
+    """
+    safe_exc = untrusted_inline(repr(exc))
+    safe_task = untrusted_inline(task_id)
+    reasons = (f"engine failure while processing this task: {safe_exc}",)
+    digest = (
+        f"# Merge hold: {safe_task}  (broken - engine failure)\n\n"
+        "## What failed\n\n"
+        f"- {safe_exc}\n\n"
+        "The merge ENGINE failed while processing this task - an engine-side\n"
+        "error (e.g. a malformed committed artifact), NOT a policy stop and\n"
+        "NOT a gate verdict on the change: no gate result exists for it.\n\n"
+        "## What is needed\n\n"
+        "Inspect the error above and the branch's committed artifacts; push a\n"
+        "fixed revision of the branch (or fix the engine defect) and re-run.\n"
+        "The other ready tasks were processed normally.\n\n"
+        f"`{safe_task}` is NOT merged and NOT deleted.\n"
+    )
+    return MergeVerdict(task_id, "hold", BROKEN, reasons, digest)
+
+
 @dataclass
 class LocalMergeEngine:
     list_ready: ListReady
     verify_one: VerifyOne
     merge_one: MergeOne
     on_verdict: Callable[[MergeVerdict], None] = field(default=lambda v: None)
-    # consulted for a RISK_DECISION hold (L3, gates green): return True to
-    # approve the merge. Default declines (non-interactive: L3 stays held).
+    # consulted before ANY merge side-effect on local main - an L1/L2
+    # AUTO_MERGE decision as well as an L3 RISK_DECISION hold (H4): return
+    # True to approve. The interactive implementation accepts only the EXACT
+    # task id. Default declines (fail closed: nothing merges unconfirmed).
     confirm: Callable[[MergeVerdict], bool] = field(default=lambda v: False)
     # dry run (--no-input): report what WOULD auto-merge but never mutate local
     # main or push. Without this, --no-input still auto-merged every L1/L2 green
@@ -499,82 +579,120 @@ class LocalMergeEngine:
         landed - a pair that passes in isolation but conflicts once combined is
         caught here, not left in a red main. A hold never blocks the others.
         Never fixes anything - there is no fix path. A BROKEN hold is never
-        offered for merge; only a RISK_DECISION (all gates green, just
-        sensitive) is put to the confirm() callback.
+        offered for merge. EVERY merge side-effect on local main is put to the
+        confirm() callback PER TASK with that task's verdict - an L1/L2
+        AUTO_MERGE decision as well as an L3 RISK_DECISION (H4); interactively
+        that means typing the exact task id. A declined task merges nothing
+        and the batch continues; a dry run never confirms and never merges.
+
+        Per-task isolation (M7): an UNEXPECTED exception while judging one
+        task (e.g. a truncated committed merge-decision.json raising out of
+        verify_one) becomes a BROKEN hold for THAT task, with the failure
+        recorded on its verdict, and the batch continues - the fail-closed
+        reading of "a hold never blocks the others". Exception (never
+        BaseException) is the isolation boundary: KeyboardInterrupt and
+        SystemExit still abort the whole run.
         """
         results: list[MergeVerdict] = []
         for task_id in self.list_ready():
-            gates = self.verify_one(task_id)
-            verdict = decide(task_id, gates, advisory_mode=self.advisory_mode)
-            if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
-                if self.confirm(verdict):
-                    # replace() (not a fresh 3-arg construct) so verdict.advisory
-                    # survives the L3 confirm - else an advisory L3 merge would
-                    # silently drop its record (AC5). kind stays RISK_DECISION.
-                    verdict = replace(verdict, decision="merge")
-            if verdict.merged and self.dry_run:
-                # dry run: record what WOULD auto-merge, but touch nothing. The
-                # advisory tuple is CARRIED (not dropped): the whole point of the
-                # preview is to inspect before committing to --advisory, so a
-                # branch that would waive judgment findings must read differently
-                # from a fully-clean one (constraint 5 - honest labeling).
-                if verdict.advisory:
-                    reasons = (
-                        "would merge under --advisory (dry run: --no-input, "
-                        "nothing changed); judgment gates WOULD be waived:",
-                        *verdict.advisory,
-                    )
-                    digest = (
-                        f"# Dry run (--advisory): {untrusted_inline(task_id)}\n\n"
-                        "Would merge into local main under --advisory, WAIVING the "
-                        "judgment-gate findings below and recording them in "
-                        "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
-                        "## Judgment-gate findings that WOULD be waived\n\n"
-                        + "\n".join(f"- {r}" for r in verdict.advisory)
-                        + "\n\nRe-run without --no-input to apply.\n"
-                    )
-                else:
-                    reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
-                    digest = (
-                        f"# Dry run: {untrusted_inline(task_id)}\n\n"
-                        "Would auto-merge into local main; "
-                        "re-run without --no-input to apply.\n"
-                    )
-                verdict = MergeVerdict(
-                    task_id, "hold", DRY_RUN, reasons, digest,
-                    advisory=verdict.advisory,
+            try:
+                verdict = self._judge_one(task_id)
+            except Exception as exc:  # noqa: BLE001 - per-task isolation (M7)
+                verdict = _engine_failure_verdict(task_id, exc)
+            self.on_verdict(verdict)
+            results.append(verdict)
+        return results
+
+    def _judge_one(self, task_id: str) -> MergeVerdict:
+        """Judge (and, when confirmed, merge) ONE ready task - the loop body
+        run() isolates per task (M7)."""
+        gates = self.verify_one(task_id)
+        verdict = decide(task_id, gates, advisory_mode=self.advisory_mode)
+        if verdict.decision == "hold" and verdict.kind == RISK_DECISION:
+            if self.confirm(verdict):
+                # replace() (not a fresh 3-arg construct) so verdict.advisory
+                # survives the L3 confirm - else an advisory L3 merge would
+                # silently drop its record (AC5). kind stays RISK_DECISION.
+                verdict = replace(verdict, decision="merge")
+        elif verdict.merged and not self.dry_run and not self.confirm(verdict):
+            # AUTO_MERGE (L1/L2): the merge side-effect needs the SAME
+            # merge-safety confirmation as L3 (H4) - auto-merge means "no
+            # review required", never "no human at the merge". A dry run is
+            # excluded here only because it never merges at all (the swap
+            # below), so there is nothing to confirm and nothing prompts.
+            reasons = (
+                "merge not confirmed (the exact task id was not typed); "
+                "nothing merged",
+            )
+            verdict = MergeVerdict(
+                task_id, "hold", DECLINED, reasons,
+                f"# Merge hold: {untrusted_inline(task_id)} (not confirmed)\n\n"
+                "The merge-safety confirmation declined this merge: the exact\n"
+                "task id was not typed. Nothing was merged and no state was\n"
+                "changed; the branch stays ready. Re-run merge-verified.sh to\n"
+                "be asked again.\n",
+            )
+        if verdict.merged and self.dry_run:
+            # dry run: record what WOULD auto-merge, but touch nothing. The
+            # advisory tuple is CARRIED (not dropped): the whole point of the
+            # preview is to inspect before committing to --advisory, so a
+            # branch that would waive judgment findings must read differently
+            # from a fully-clean one (constraint 5 - honest labeling).
+            if verdict.advisory:
+                reasons = (
+                    "would merge under --advisory (dry run: --no-input, "
+                    "nothing changed); judgment gates WOULD be waived:",
+                    *verdict.advisory,
                 )
-            if verdict.merged:
-                request = MergeRequest(task_id, gates.head_sha, verdict.advisory)
-                try:
-                    merged = self.merge_one(request)
-                except MergePreparationError as exc:
-                    reasons = (
-                        "merge preparation failed before commit; nothing landed: "
-                        + untrusted_inline(str(exc)),
-                    )
+                digest = (
+                    f"# Dry run (--advisory): {untrusted_inline(task_id)}\n\n"
+                    "Would merge into local main under --advisory, WAIVING the "
+                    "judgment-gate findings below and recording them in "
+                    "merge-advisory.md. This is NOT a fully-verified merge.\n\n"
+                    "## Judgment-gate findings that WOULD be waived\n\n"
+                    + "\n".join(f"- {r}" for r in verdict.advisory)
+                    + "\n\nRe-run without --no-input to apply.\n"
+                )
+            else:
+                reasons = ("would auto-merge (dry run: --no-input, nothing changed)",)
+                digest = (
+                    f"# Dry run: {untrusted_inline(task_id)}\n\n"
+                    "Would auto-merge into local main; "
+                    "re-run without --no-input to apply.\n"
+                )
+            verdict = MergeVerdict(
+                task_id, "hold", DRY_RUN, reasons, digest,
+                advisory=verdict.advisory,
+            )
+        if verdict.merged:
+            request = MergeRequest(task_id, gates.head_sha, verdict.advisory)
+            try:
+                merged = self.merge_one(request)
+            except MergePreparationError as exc:
+                reasons = (
+                    "merge preparation failed before commit; nothing landed: "
+                    + untrusted_inline(str(exc)),
+                )
+                verdict = MergeVerdict(
+                    task_id,
+                    "hold",
+                    BROKEN,
+                    reasons,
+                    build_digest(task_id, gates, BROKEN, reasons),
+                )
+            else:
+                if not merged:
                     verdict = MergeVerdict(
                         task_id,
                         "hold",
                         BROKEN,
-                        reasons,
-                        build_digest(task_id, gates, BROKEN, reasons),
+                        ("branch no longer applies cleanly to main after a "
+                         "prior merge; re-run the task",),
+                        f"# Merge hold: {untrusted_inline(task_id)}\n\n"
+                        "Branch no longer applies cleanly to main. Re-run "
+                        "the task on the VPS.\n",
                     )
-                else:
-                    if not merged:
-                        verdict = MergeVerdict(
-                            task_id,
-                            "hold",
-                            BROKEN,
-                            ("branch no longer applies cleanly to main after a "
-                             "prior merge; re-run the task",),
-                            f"# Merge hold: {untrusted_inline(task_id)}\n\n"
-                            "Branch no longer applies cleanly to main. Re-run "
-                            "the task on the VPS.\n",
-                        )
-            self.on_verdict(verdict)
-            results.append(verdict)
-        return results
+        return verdict
 
 
 # --- real gatherers (trusted local infra; the CLI wires these) ---------------
@@ -616,8 +734,19 @@ def discover_ready(
     The hub is a closed namespace (spec: discovery selector): every branch
     except ``base_branch`` IS a task. The readiness filter is unchanged -
     the selector widened, the bar did not move.
+
+    --prune drops the tracking refs of deleted TASK branches (push_and_cleanup
+    deletes merged ones), but it must never touch the base branch's tracking
+    ref: that ref is the tripwire's memory of the last verified hub main (M3),
+    and pruning it would make a hub whose main was deleted look like a benign
+    fresh hub on the next run. The negative refspec excludes the base branch
+    from both fetching and pruning; check_hub_main alone advances that ref.
     """
-    _git(repo, "fetch", branch_remote, "--prune")
+    _git(
+        repo, "fetch", "--prune", branch_remote,
+        f"+refs/heads/*:refs/remotes/{branch_remote}/*",
+        f"^refs/heads/{base_branch}",
+    )
     _, out = _git(
         repo, "for-each-ref", "--format=%(refname:strip=3)",
         f"refs/remotes/{branch_remote}",
@@ -635,31 +764,6 @@ def discover_ready(
     return ready
 
 
-def hub_main_ancestor_of_local(
-    repo: Path, branch_remote: str, base_branch: str = "main"
-) -> bool:
-    """False = the hub's main moved where only local may write (spec S5).
-
-    The VPS never writes main; a diverged hub main is suspicion of an
-    unauthorized write (possibly including ~/laddy itself), so the CALLER
-    must abort the entire run - no branch from that hub is trustworthy.
-
-    A hub that has never seeded a main ref at all (fresh/never-pushed hub)
-    is explicitly NOT a tripwire: there is nothing to compare against, and
-    discover_ready would find no branches there either - a missing remote
-    ref is benign, not suspicious, so it is checked for and short-circuited
-    BEFORE the merge-base call (which would otherwise just fail).
-    """
-    remote_main = f"refs/remotes/{branch_remote}/{base_branch}"
-    exists, _ = _git(repo, "rev-parse", "--verify", "--quiet", remote_main, check=False)
-    if exists != 0:
-        return True
-    code, _ = _git(
-        repo, "merge-base", "--is-ancestor", remote_main, base_branch, check=False,
-    )
-    return code == 0
-
-
 @dataclass
 class GateTools:
     """Injected real tools for gathering gates (fakeable in tests)."""
@@ -672,6 +776,11 @@ class GateTools:
     rw2_runner: AgentRunner
     security_runners: Sequence[AgentRunner]
     roles_dir: Path
+    # --local ONLY: the fail-closed policy recompute on the Director's fix tree
+    # (merge_check_local.check_local_fix, H5). None = use the real one; injected
+    # here so tests can spy/fake it like merge_check_fn. NEVER consulted on the
+    # fetched-branch path (which keeps running merge_check_fn unchanged).
+    local_check_fn: MergeCheckFn | None = None
 
 
 # Agent-config entry points a headless claude/codex loads from its working
@@ -682,31 +791,54 @@ class GateTools:
 # does, not the CLI's own startup config loading. Stripped from the review
 # worktree before any CLI runs; a code reviewer reviews the diff (agent-config
 # changes are also L3 by policy), it never honors the branch's agent config.
-_UNTRUSTED_AGENT_CONFIG: tuple[str, ...] = (
-    ".claude",
-    ".codex",
-    ".mcp.json",
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
+#
+# Matched by NAME at every depth (H7), not just the repo root: the CLIs
+# auto-ingest steering/MCP config from subdirectories they descend into, and
+# ENGINE_SENSITIVE_GLOBS flags **/CLAUDE.md etc. for the same reason. Names
+# compare casefolded: on a case-insensitive filesystem (WSL DrvFs) the CLI
+# opening "CLAUDE.md" finds a branch-shipped "Claude.md" just the same.
+_UNTRUSTED_CONFIG_DIR_NAMES: frozenset[str] = frozenset({".claude", ".codex"})
+_UNTRUSTED_CONFIG_FILE_NAMES: frozenset[str] = frozenset(
+    {"claude.md", "claude.local.md", "agents.md", "gemini.md", ".mcp.json"}
 )
 
 
 def _neutralize_agent_config(wt: Path) -> None:
-    """Remove branch-shipped agent config from a review worktree (C2).
+    """Remove branch-shipped agent config from a review worktree (C2), at any
+    depth (H7): nested ``pkg/CLAUDE.md`` / ``pkg/.mcp.json`` / ``pkg/.claude/``
+    steer or execute exactly like their root counterparts.
 
     Only the working tree is touched (never a commit), so the commit-range diffs
     that drive classification and merge_check are unaffected - a malicious
-    agent-config change still shows in the diff and routes to L3.
+    agent-config change still shows in the diff and routes to L3. Removing the
+    checkout's own root CLAUDE.md/AGENTS.md (e.g. laddy dogfooding itself as
+    the target) has always been this function's contract - reviewers read the
+    diff, never the branch's steering files - and the recursion just extends
+    that same contract to nested paths.
     """
-    for rel in _UNTRUSTED_AGENT_CONFIG:
-        target = wt / rel
+
+    def _remove(target: Path) -> None:
         if target.is_symlink():
             target.unlink(missing_ok=True)  # unlink the link, never follow it
         elif target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
-        elif target.exists():
+        else:
             target.unlink(missing_ok=True)
+
+    for root, dirs, files in os.walk(wt, topdown=True):
+        descend: list[str] = []
+        for name in dirs:
+            folded = name.casefold()
+            if folded == ".git":
+                continue  # git metadata: keep, never descend
+            if folded in _UNTRUSTED_CONFIG_DIR_NAMES:
+                _remove(Path(root) / name)
+                continue  # removed: nothing left to descend into
+            descend.append(name)
+        dirs[:] = descend
+        for name in files:
+            if name.casefold() in _UNTRUSTED_CONFIG_FILE_NAMES:
+                _remove(Path(root) / name)
 
 
 def _worktree_at_sha(repo: Path, task_id: str, work_root: Path, sha: str) -> Path:
@@ -791,6 +923,7 @@ def _binding_on_merged_tree(
     branch_sha: str,
     binding_gate: BindingGate,
     coverage_package: str,
+    frontend_gate: str = "",
 ) -> BindingResult:
     """Run the deterministic gate on the branch TRIAL-MERGED into current local
     main, not on the branch alone (#11).
@@ -803,6 +936,11 @@ def _binding_on_merged_tree(
     scope THIS change against the tree it is actually merging into - not the
     stale ``origin/main`` remote-tracking ref. A textual merge conflict is a
     fail (the real merge would conflict too), reported as a broken gate.
+
+    ``frontend_gate`` (M-D2-4) is the TRUSTED base policy's frontend command,
+    non-empty only when this diff touches the target's frontend_prefixes; the
+    authoritative gate then builds/tests the frontend too, mirroring the VPS
+    DockerGate instead of relying on that advisory pre-filter.
     """
     mwt = work_root / f"verify-merge-{task_id}"
     _git(repo, "worktree", "prune")
@@ -830,7 +968,12 @@ def _binding_on_merged_tree(
             )
         merge_sha = _worktree_sha(mwt)
         return binding_gate.run(
-            mwt, merge_sha, coverage_package, trusted_ref=base_sha, compare_ref=base_sha
+            mwt,
+            merge_sha,
+            coverage_package,
+            trusted_ref=base_sha,
+            compare_ref=base_sha,
+            frontend_gate=frontend_gate,
         )
     finally:
         _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
@@ -853,6 +996,10 @@ def gather_gates(
     binding gate, security panel, rw2, and ``head_sha`` TOCTOU pin are identical.
     Only the VPS artifact attestation is N/A: state.json and the VPS log describe
     the older task tip by construction once the Director adds a local code fix.
+    The policy recompute is NOT skipped with it (H5): check_local_fix re-derives
+    every stop still recomputable from the FIXED tree (deleted tests, destructive
+    migrations, inherited declared high risk, senior deadlock, the report-only
+    guard) and a recomputed stop is a deterministic FAILED - fail closed.
     """
     wt = (
         _local_worktree(repo, task_id, work_root, local_ref)
@@ -861,8 +1008,13 @@ def gather_gates(
     )
     try:
         verified_sha = _worktree_sha(wt)
+        # The recompute (and --local's stop recompute below) is keyed to the
+        # trusted LOCAL base branch (M1): policy loads from local <base_branch>
+        # - the same trusted ref the binding gate uses - never from a possibly
+        # -stale origin/<base> remote-tracking ref, and never from a literal
+        # "main" on a target whose default branch is named differently.
         if local_ref is None:
-            code, msg = tools.merge_check_fn(wt, "origin/main", task_id)
+            code, msg = tools.merge_check_fn(wt, base_branch, task_id)
             artifact_attestation = ArtifactAttestation(
                 ArtifactAttestationState.PASSED
                 if code == 0
@@ -870,16 +1022,34 @@ def gather_gates(
                 msg,
             )
         else:
-            artifact_attestation = ArtifactAttestation(
-                ArtifactAttestationState.NOT_APPLICABLE,
-                "Director-authored --local commit is judged by fresh trusted-local gates",
-            )
+            local_check = tools.local_check_fn
+            if local_check is None:
+                from orchestrator.merge_check_local import (
+                    check_local_fix as local_check,
+                )
+            code, msg = local_check(wt, base_branch, task_id)
+            if code == 0:
+                artifact_attestation = ArtifactAttestation(
+                    ArtifactAttestationState.NOT_APPLICABLE,
+                    "Director-authored --local commit is judged by fresh "
+                    f"trusted-local gates; policy recompute found no stop ({msg})",
+                )
+            else:
+                # A stop the fix tree still manifests (deleted tests, declared
+                # high risk, senior deadlock, ...) is NOT waived by the trusted
+                # route: --local accommodates only the checks the fix commit
+                # invalidates by construction (H5), never the decision value.
+                artifact_attestation = ArtifactAttestation(
+                    ArtifactAttestationState.FAILED, msg
+                )
 
         from orchestrator.gitops import GitOps
 
-        gitops = GitOps(repo_url="unused", work_root=work_root, default_branch="main")
-        changed = gitops.changed_files(wt)
-        statuses = gitops.changed_statuses(wt)
+        gitops = GitOps(
+            repo_url="unused", work_root=work_root, default_branch=base_branch
+        )
+        changed = gitops.changed_files(wt, task_id)
+        statuses = gitops.changed_statuses(wt, task_id)
         # Per-target policy from TRUSTED main (base_branch) via git show, NOT the
         # branch worktree - a branch cannot weaken its own classification (M1);
         # editing .laddy/policy.toml is itself L3.
@@ -898,22 +1068,33 @@ def gather_gates(
         # and re-verifies against prior merges this batch already landed. The
         # gate infra (compose/Dockerfile/semgrep) is restored from local main,
         # not the branch, so a branch cannot ship a hostile container definition
-        # that escapes during verification (NÁLEZ 1). verified_sha (the branch
+        # that escapes during verification (FINDING 1). verified_sha (the branch
         # tip) stays the TOCTOU pin merge_branch integrates.
+        # M-D2-4: when the diff touches the TRUSTED policy's frontend_prefixes,
+        # thread that policy's frontend_gate into the authoritative gate so the
+        # frontend is deterministically built/tested on the trust boundary (the
+        # VPS DockerGate that also runs it is only an advisory pre-filter). Both
+        # the prefixes and the command come from base_sha's policy, never the
+        # branch's, so a branch cannot disable its own frontend gate.
+        frontend_gate = (
+            policy.frontend_gate
+            if frontend_touched(changed, policy.frontend_prefixes)
+            else ""
+        )
         binding = _binding_on_merged_tree(
             repo, task_id, work_root, base_sha, verified_sha, tools.binding_gate,
-            policy.coverage_package,
+            policy.coverage_package, frontend_gate,
         )
 
         security: tuple[Verdict, ...] = ()
         rw2: Verdict | None = None
         if blast in (L2, L3):
             prompt = SECURITY_PANEL_PROMPT.format(
-                role=_role(tools.roles_dir, "security"), task=task_id, base="main"
+                role=_role(tools.roles_dir, "security"), task=task_id, base=base_branch
             )
             security = tuple(run_security_panel(tools.security_runners, prompt, wt))
         if blast == L2:
-            rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir)
+            rw2 = _rw2(tools.rw2_runner, task_id, wt, tools.roles_dir, base_branch)
 
         return GateResults(
             blast=blast,
@@ -937,8 +1118,12 @@ def _role(roles_dir: Path, name: str) -> str:
     return (roles_dir / f"{name}.md").read_text(encoding="utf-8")
 
 
-def _rw2(runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path) -> Verdict | None:
-    prompt = RW2_LOCAL_PROMPT.format(role=_role(roles_dir, "rw2"), task=task_id, base="main")
+def _rw2(
+    runner: AgentRunner, task_id: str, wt: Path, roles_dir: Path, base_branch: str
+) -> Verdict | None:
+    prompt = RW2_LOCAL_PROMPT.format(
+        role=_role(roles_dir, "rw2"), task=task_id, base=base_branch
+    )
     try:
         verdict, _ = request_verdict(runner, prompt, wt)
         return verdict
@@ -1097,6 +1282,7 @@ def _default_tools(config: object) -> GateTools:
     from orchestrator.agents import ClaudeRunner, CodexRunner
     from orchestrator.config import OrchestratorConfig
     from orchestrator.merge_check import check as _merge_check
+    from orchestrator.merge_check_local import check_local_fix as _local_check
     from orchestrator.run import default_roles_dir
 
     assert isinstance(config, OrchestratorConfig)
@@ -1115,19 +1301,60 @@ def _default_tools(config: object) -> GateTools:
             CodexRunner(config.review_codex_cmd),  # cross-vendor lens, read-only
         ),
         roles_dir=default_roles_dir(),
+        # --local ONLY: the fail-closed policy recompute on the fix tree (H5)
+        local_check_fn=_local_check,
     )
 
 
 def _interactive_confirm(v: MergeVerdict) -> bool:
-    """RISK_DECISION (L3) prompt: show what is sensitive, ask y/N."""
-    print("\n" + v.digest)
-    # Keep the authorization prompt itself entirely static. All dynamic,
-    # attacker-influenced context is rendered safely above it.
-    return input("[risk] authorize this merge into main? (y/N) > ").strip().lower() == "y"
+    """Merge-safety confirmation for ANY merge into local main (H4).
+
+    L1/L2 AUTO_MERGE and L3 RISK_DECISION alike: the operator must type the
+    EXACT task id. A wrong or blank id declines - nothing is merged and the
+    task simply stays ready/held. A task id the terminal cannot reproduce
+    (hostile control characters) is untypeable and therefore unmergeable:
+    that is fail-closed, not a defect.
+    """
+    if v.digest:  # L3 risk context; an L1/L2 auto-merge has no digest
+        print("\n" + v.digest)
+    # The candidate id is rendered safely here; the input() prompt itself
+    # stays entirely static so attacker-influenced text can never restyle it.
+    print(f"\n[confirm] merge candidate: {untrusted_inline(v.task_id)}")
+    print("[confirm] merging into local main requires typing the EXACT task id;")
+    print("[confirm] anything else declines and merges nothing.")
+    typed = input("[confirm] type the exact task id to merge (blank declines) > ")
+    if typed.strip() != v.task_id:
+        print("[confirm] declined - the typed id does not match; nothing merged.")
+        return False
+    return True
 
 
 def _ask(prompt: str) -> bool:
     return input(prompt).strip().lower() == "y"
+
+
+# One headline per tamper shape (M3) so the Director knows WHAT happened, not
+# just that something did; check_hub_main's detail then names the shas.
+_TRIPWIRE_HEADLINES: Mapping[HubMainState, str] = {
+    HubMainState.DELETED: (
+        "[TRIPWIRE] hub main DISAPPEARED: the hub had a main and now has none."
+    ),
+    HubMainState.REWOUND: (
+        "[TRIPWIRE] hub main was REWOUND: force-pushed off the fast-forward path."
+    ),
+    HubMainState.DIVERGED: (
+        "[TRIPWIRE] hub main is NOT an ancestor of local main."
+    ),
+}
+
+
+def _print_tripwire(check: HubMainCheck, branch_remote: str) -> None:
+    print(_TRIPWIRE_HEADLINES[check.state])
+    if check.detail:
+        print(f"[TRIPWIRE] {check.detail}")
+    print("The VPS must never write main - this is suspicion of an")
+    print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
+    print(f"hub ({branch_remote}) and ~/laddy on the VPS, then decide.")
 
 
 def main(
@@ -1185,49 +1412,62 @@ def main(
     work_root.mkdir(parents=True, exist_ok=True)
     tools = _default_tools(config)
 
-    # Dirty-tree guard (--local only): what is judged must be exactly a committed
-    # revision, so nothing uncommitted can ride along into the merged tree
-    # (judged == merged). Refuse before any gate runs; nothing is merged.
-    if local_ref is not None:
-        _, porcelain = _git(repo, "status", "--porcelain")
-        if porcelain.strip():
-            print("[dirty] the target working tree has uncommitted changes.")
+    # Dirty-tree guard (both routes): the merge lands in this working tree, so
+    # nothing uncommitted may ride along into the merged tree (judged ==
+    # merged). On the normal route a dirty tree would otherwise make git fail
+    # the merge and misreport a clean branch as "no longer applies cleanly" -
+    # a re-run-the-whole-VPS-task signal for what a stash fixes. Refuse before
+    # any gate runs; nothing is merged.
+    #
+    # The tool's OWN artifact lane (<agent-dir>/tasks/) is excluded: every held
+    # or dry-run verdict writes merge-hold.md there, so counting it dirty made
+    # each run block the next one until the operator committed the tool's own
+    # leftovers. Those artifacts are never staged by the merge (a merge commit
+    # takes the index; advisory records are staged explicitly), so judged ==
+    # merged is unaffected by ignoring them here.
+    _, porcelain = _git(
+        repo, "status", "--porcelain", "--", ".",
+        f":(exclude){TARGET_DIR_NAME}/tasks",
+    )
+    if porcelain.strip():
+        print("[dirty] the target working tree has uncommitted changes.")
+        if local_ref is not None:
             print("--local judges a committed revision so judged == merged;")
-            print("commit or stash your changes first. NOTHING was merged.")
-            return 1
-
-    # Tripwire (spec S5) - before the engine runs, and discover_ready also
-    # fetches inside list_ready, so fetch explicitly here first. In --local mode
-    # the tripwire is honoured when the remote is REACHABLE (a diverged hub main
-    # is a real tamper signal regardless of mode), but an absent/unreachable
-    # remote only warns and proceeds - the whole point of --local is "no VPS".
-    if local_ref is not None:
-        code, _ = _git(repo, "fetch", config.branch_remote, "--prune", check=False)
-        if code == 0:
-            if not hub_main_ancestor_of_local(
-                repo, config.branch_remote, config.default_branch
-            ):
-                print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
-                print("The VPS must never write main - this is suspicion of an")
-                print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
-                print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
-                return 2
         else:
-            print(f"[WARN] branch remote '{config.branch_remote}' is absent/unreachable;")
-            print("--local proceeds with no hub to consult (the 'no VPS' case).")
-    else:
-        _git(repo, "fetch", config.branch_remote, "--prune")
-        if not hub_main_ancestor_of_local(repo, config.branch_remote, config.default_branch):
-            print("[TRIPWIRE] hub main is NOT an ancestor of local main.")
-            print("The VPS must never write main - this is suspicion of an")
-            print("unauthorized write (spec S5). NOTHING was merged. Inspect the")
-            print(f"hub ({config.branch_remote}) and ~/laddy on the VPS, then decide.")
+            print("merging needs a clean tree so judged == merged;")
+        print("commit or stash your changes first. NOTHING was merged.")
+        return 1
+
+    # Tripwire (spec S5, M3) - before the engine runs, and deliberately with NO
+    # fetch first: check_hub_main consults the hub via ls-remote and compares
+    # against the remote-tracking ref, git's own record of the last verified
+    # hub main. The old pre-check `fetch --prune` erased exactly that evidence,
+    # so a deleted hub main read as a benign fresh hub (M3a). In --local mode
+    # an absent/unreachable remote only warns and proceeds - the whole point of
+    # --local is "no VPS"; in the default mode a hub that cannot be consulted
+    # cannot be tripwire-checked either, so the run fails closed.
+    check = check_hub_main(repo, config.branch_remote, config.default_branch)
+    if check.state is HubMainState.UNREACHABLE:
+        if local_ref is None:
+            print(f"[TRIPWIRE] branch remote '{config.branch_remote}' is "
+                  "absent/unreachable;")
+            print("the hub-main tripwire cannot be verified, so NOTHING is")
+            print("merged (fail closed). Fix the remote and re-run.")
             return 2
+        print(f"[WARN] branch remote '{config.branch_remote}' is absent/unreachable;")
+        print("--local proceeds with no hub to consult (the 'no VPS' case).")
+    elif not check.ok:
+        _print_tripwire(check, config.branch_remote)
+        return 2
 
     _confirm = confirm or ((lambda v: False) if args.no_input else _interactive_confirm)
     _ask_fn = ask or ((lambda p: False) if args.no_input else _ask)
     _push = pusher or (
-        lambda r, tasks: push_and_cleanup(r, tasks, branch_remote=config.branch_remote)
+        lambda r, tasks: push_and_cleanup(
+            r, tasks,
+            base_branch=config.default_branch,
+            branch_remote=config.branch_remote,
+        )
     )
     merged: list[str] = []
 
@@ -1285,7 +1525,14 @@ def main(
         # sha is a local commit; there may be no reachable remote).
         list_ready=lambda: (
             args.task if local_ref is not None
-            else (args.task or discover_ready(repo, branch_remote=config.branch_remote))
+            else (
+                args.task
+                or discover_ready(
+                    repo,
+                    base_branch=config.default_branch,
+                    branch_remote=config.branch_remote,
+                )
+            )
         ),
         # In the default path the call signature is unchanged (no local_ref
         # kwarg), so existing gather_gates fakes/tests are untouched; --local
@@ -1297,6 +1544,7 @@ def main(
         ),
         merge_one=lambda request: merge_branch(
             repo, request.task_id, request.verified_sha,
+            base_branch=config.default_branch,
             branch_remote=config.branch_remote,
             fetch=local_ref is None,
             advisory=request.advisory,
@@ -1323,7 +1571,7 @@ def main(
         print(
             "[push] not pushed. Merged locally: "
             + ", ".join(untrusted_inline(task) for task in merged)
-            + ". Push with: git push origin main"
+            + f". Push with: git push origin {config.default_branch}"
         )
 
     return 1 if held else 0

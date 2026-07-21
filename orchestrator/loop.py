@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator import TARGET_DIR_NAME
+from orchestrator.agent_retry import request_payload, request_verdict
 from orchestrator.agents import AgentRunner
 from orchestrator.artifacts import (
     AUTHORITATIVE,
@@ -47,18 +48,17 @@ from orchestrator.policy import (
     MergeDecision,
     merge_decision,
     nondraft_report_specs,
+    normalize_risk,
     path_guard,
     report_only_decision,
     touches_invariant_tests,
 )
 from orchestrator.quota import QuotaAwareRunner, QuotaBudget, QuotaPolicy, QuotaTimeout
 from orchestrator.target_policy import load_target_policy
-from orchestrator.terminals import terminal_spec
+from orchestrator.terminals import clears_terminal, terminal_spec
 from orchestrator.testgate import DockerGate, ShellRunner, frontend_touched, run_fast
 from orchestrator.verdict import (
     VerdictError,
-    request_payload,
-    request_verdict,
     validate_rw2,
 )
 from orchestrator.verdict import (
@@ -94,15 +94,92 @@ def _recorded_terminal(entries: Sequence[Mapping[str, Any]]) -> str | None:
     QuotaBudget is per-run) must RESUME and finish the task, not return the
     stale state forever. They read as non-terminal here; the log entry stays
     as a record and derive_resume_point replays the last real phase.
+
+    A sticky terminal is ALSO un-stuck by a resume event recorded AFTER it
+    (director-resume): a log action that ``terminals.clears_terminal`` admits
+    for that state, appearing later in the log, returns None so the loop runs
+    once more. "After" is positional (append-only order), never a parsed ts -
+    one event buys exactly one run (an event OLDER than the terminal does not
+    un-stick it, so a resumed run that hits a new terminal is sticky again).
+    The rule is table-driven in terminals.py; this scan hardcodes no event name.
+    """
+    for idx in range(len(entries) - 1, -1, -1):
+        action = entries[idx].get("action")
+        if action == "terminal":
+            outcome = str(entries[idx].get("outcome"))
+            if not terminal_spec(outcome).sticky:
+                return None
+            state = outcome
+        elif action == "push" and entries[idx].get("outcome") == "ok":
+            state = "PUSHED"
+        else:
+            continue
+        if any(
+            clears_terminal(str(e.get("action")), state) for e in entries[idx + 1 :]
+        ):
+            return None
+        return state
+    return None
+
+
+def last_terminal_state(entries: Sequence[Mapping[str, Any]]) -> str | None:
+    """The RAW last recorded terminal state (or None), ignoring stickiness and
+    any newer resume event. Distinct from ``_recorded_terminal``: this answers
+    "what did this run last finish as?" for the resume CLI's validation gate
+    (is it a state director_resume may clear?), not "should run() short-circuit
+    now?". The un-stick decision stays in ``_recorded_terminal`` alone.
     """
     for entry in reversed(entries):
         action = entry.get("action")
         if action == "terminal":
-            outcome = str(entry.get("outcome"))
-            return outcome if terminal_spec(outcome).sticky else None
+            return str(entry.get("outcome"))
         if action == "push" and entry.get("outcome") == "ok":
             return "PUSHED"
     return None
+
+
+def _director_note(entries: Sequence[Mapping[str, Any]]) -> str | None:
+    """The Director's ``reason`` for the LAST director_resume, or None.
+
+    Positional and self-clearing (director-resume): scanning back from the end,
+    a phase action seen first means a developer round already ran AFTER the
+    resume, so the note has been delivered and must not repeat. Only when the
+    newest director_resume is newer than every phase action does its reason
+    render - the first developer round after the resume, once.
+    """
+    for entry in reversed(entries):
+        if entry.get("action") in _PHASE_ACTIONS:
+            return None
+        if entry.get("action") == "director_resume":
+            return entry.get("reason")
+    return None
+
+
+def _resume_developer_point(
+    entries: Sequence[Mapping[str, Any]], rp: ResumePoint
+) -> ResumePoint | None:
+    """Force the next phase to a developer round when an UNCONSUMED
+    director_resume is present, else None (director-resume).
+
+    The un-stick primitive only makes ``run()`` re-enter; on its own the pure
+    derivation then routes the resumed run straight back to a terminal - a
+    PUSHED/MERGE_DECIDED tail derives ``done``, a CAP_REACHED tail re-caps, an
+    ESCALATED_DEADLOCK tail re-``deadlock``s - so NO developer round runs and
+    the corrected spec + note are silently dropped (the whole Goal). This
+    override, a sibling of ``_override_phase`` and likewise layered ON TOP of
+    the untouched pure derivation, gives the Director's resume exactly one
+    developer round to act on the corrected ask, at the next round number
+    (``rounds_used + 1``). It self-clears: once that developer entry lands,
+    ``_director_note`` is None and the loop derives normally (one event, one
+    run - the run then continues to its next terminal, re-capping/re-deadlocking
+    only if it fails to converge again). ``derive_resume_point`` is NOT touched
+    (director_resume stays out of ``_PHASE_ACTIONS``); rp's sessions are kept so
+    the developer resumes its session.
+    """
+    if _director_note(entries) is None:
+        return None
+    rounds_used = sum(1 for e in entries if e.get("action") == "developer")
+    return dataclasses.replace(rp, phase="developer", round=rounds_used + 1)
 
 
 def derive_resume_point(
@@ -238,15 +315,16 @@ def declared_risk_from_verdicts(artifacts: TaskArtifacts) -> str:
     Both the VPS decision and the off-VPS merge check derive declared risk
     this way - never from the (untrusted) merge-decision.json - so a
     fabricated decision cannot launder a reviewer-declared high risk.
-    Uses policy.RISK_ORDER; an unknown level is treated as high (fail
-    safe), matching policy.effective_risk's default.
+    Each raw level is folded onto the RISK_ORDER enum by
+    policy.normalize_risk (unknown -> high, fail safe; M8), so consumers
+    comparing against enum literals never see an out-of-enum string.
     """
     risk = "low"
     for name in (RW1_VERDICT, RW2_VERDICT):
         verdict = artifacts.read_json(name)
         if isinstance(verdict, dict):
-            level = str(verdict.get("risk_level", "low"))
-            if RISK_ORDER.get(level, 2) > RISK_ORDER.get(risk, 2):
+            level = normalize_risk(str(verdict.get("risk_level", "low")))
+            if RISK_ORDER[level] > RISK_ORDER[risk]:
                 risk = level
     return risk
 
@@ -455,6 +533,17 @@ EXPLORATION_SECTION = """
 ```
 """
 
+DIRECTOR_NOTE_SECTION = """
+## Director note (the ask was corrected; resume)
+
+The Director put this task back to work and left a note. The spec on the
+branch may have changed - re-read it. Their note, verbatim:
+
+```
+{reason}
+```
+"""
+
 EXPLORER_PROMPT = """\
 {role}
 
@@ -644,7 +733,8 @@ class Orchestrator:
         if phase in ("authoritative", "push") and not senior_ran(entries):
             # post-approval senior gate: high-risk change or test/invariant edits
             if self._declared_risk_high(artifacts) or touches_invariant_tests(
-                load_target_policy(wt), self.gitops.changed_files(wt)
+                load_target_policy(wt),
+                self.gitops.changed_files(wt, artifacts.task_id),
             ):
                 return "senior"
         return phase
@@ -711,13 +801,22 @@ class Orchestrator:
             self._run_explorer(task_id, wt, artifacts, spec_rel)
 
         while True:
+            entries = artifacts.read_log()
             rp = derive_resume_point(
-                artifacts.read_log(),
+                entries,
                 self.max_loops,
                 with_rw2=self.rw2_runner is not None,
                 with_authoritative=self.docker_gate is not None,
             )
-            phase = self._override_phase(rp.phase, artifacts, wt)
+            # A fresh director_resume re-arms one developer round (delivering the
+            # corrected spec + note), overriding whatever the pure derivation and
+            # the backstop produced - otherwise the un-stuck run derives straight
+            # back to a terminal. Sibling of _override_phase, on top of derive.
+            resumed = _resume_developer_point(entries, rp)
+            if resumed is not None:
+                rp, phase = resumed, "developer"
+            else:
+                phase = self._override_phase(rp.phase, artifacts, wt)
 
             if phase == "developer":
                 self._run_developer(task_id, wt, artifacts, spec_rel, rp)
@@ -852,8 +951,8 @@ class Orchestrator:
     def _decide_merge(
         self, task_id: str, wt: Path, artifacts: TaskArtifacts
     ) -> MergeDecision:
-        head_sha = self.gitops.code_sha(wt)
-        changed = self.gitops.changed_files(wt)
+        head_sha = self.gitops.code_sha(wt, task_id)
+        changed = self.gitops.changed_files(wt, task_id)
         # The DECISION always requires all three gates (S8 auto-merge
         # precondition) - a composition that skipped rw2 or the docker gate
         # can push, but never auto-merge.
@@ -883,10 +982,10 @@ class Orchestrator:
         return merge_decision(
             policy=load_target_policy(wt),
             changed_files=changed,
-            diff_lines=self.gitops.diff_line_count(wt),
+            diff_lines=self.gitops.diff_line_count(wt, task_id),
             declared_risk=declared_risk_from_verdicts(artifacts),
             gates=gates,
-            changed_statuses=self.gitops.changed_statuses(wt),
+            changed_statuses=self.gitops.changed_statuses(wt, task_id),
             migration_texts=_read_wt,
             senior_deadlock=deadlock,
         )
@@ -918,6 +1017,12 @@ class Orchestrator:
         exploration = artifacts.read_text(EXPLORATION)
         if exploration and rp.round == 1:
             context = EXPLORATION_SECTION.format(exploration=exploration) + context
+        # A Director resume prepends its note ADDITIVELY (director-resume): the
+        # developer reads both the corrected ask and the verdict/tail that
+        # stopped it. Self-clears after the next developer round (see helper).
+        note = _director_note(entries)
+        if note is not None:
+            context = DIRECTOR_NOTE_SECTION.format(reason=note) + context
 
         prompt = DEVELOPER_PROMPT.format(
             role=self._role(role_name),
@@ -1042,7 +1147,7 @@ class Orchestrator:
             )
             self.gitops.commit_all(wt, f"Verified findings for {task_id}")
 
-        ok, offending = path_guard(task_id, self.gitops.changed_files(wt))
+        ok, offending = path_guard(task_id, self.gitops.changed_files(wt, task_id))
         if not ok:
             artifacts.append_log(
                 action="path_guard", outcome="violation", detail="; ".join(offending)[:2000]
@@ -1051,7 +1156,7 @@ class Orchestrator:
 
         terminal = "PUSHED"
         if self.policy_enabled:
-            changed_now = self.gitops.changed_files(wt)
+            changed_now = self.gitops.changed_files(wt, task_id)
             decision = report_only_decision(
                 task_id=task_id,
                 changed_files=changed_now,
@@ -1123,7 +1228,7 @@ class Orchestrator:
             outcome="approved" if verdict.approved else "changes_requested",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
         self.gitops.commit_all(wt, f"Round {rp.round}: rw1 review for {task_id}")
@@ -1188,7 +1293,7 @@ class Orchestrator:
             outcome="nogo" if nogo else "go",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             fingerprint=verdict_fingerprint(verdict) if nogo else None,
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
@@ -1198,9 +1303,10 @@ class Orchestrator:
         self, task_id: str, wt: Path, artifacts: TaskArtifacts, rp: ResumePoint
     ) -> None:
         assert self.docker_gate is not None
-        sha = self.gitops.code_sha(wt)
+        sha = self.gitops.code_sha(wt, task_id)
         include_frontend = frontend_touched(
-            self.gitops.changed_files(wt), load_target_policy(wt).frontend_prefixes
+            self.gitops.changed_files(wt, task_id),
+            load_target_policy(wt).frontend_prefixes,
         )
         result = self.docker_gate.run(wt, sha, include_frontend)
         # flaky = this exact SHA failed the gate before and passes now (S7)
@@ -1261,7 +1367,7 @@ class Orchestrator:
             outcome="approved" if verdict.approved else "changes_requested",
             round=rp.round,
             session_id=result.session_id,
-            sha=self.gitops.code_sha(wt),
+            sha=self.gitops.code_sha(wt, task_id),
             detail="; ".join(f.summary for f in verdict.blockers)[:2000],
         )
         self.gitops.commit_all(wt, f"Senior escalation verdict for {task_id}")

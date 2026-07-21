@@ -174,6 +174,117 @@ def test_binding_gate_command_runs_everything_in_container_offline() -> None:
     assert "exit $(( L || T || P || C || S || G ))" in cmd
 
 
+def test_binding_gate_omits_frontend_when_no_frontend_gate_given() -> None:
+    # M-D2-4: a backend-only diff (or a target with no frontend) passes no
+    # frontend_gate, so the frontend step, its @@GATE token and its exit term
+    # are ABSENT - the authoritative gate must not spuriously depend on a
+    # frontend that the change never touched (no regression).
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert "frontend=" not in cmd
+    assert "F=$?" not in cmd
+    assert "exit $(( L || T || P || C || S || G ))" in cmd
+
+
+def test_binding_gate_runs_the_frontend_gate_when_the_diff_touches_frontend() -> None:
+    # M-D2-4: when the caller determines the diff touched the target's
+    # frontend_prefixes it threads the TRUSTED policy's frontend_gate in; the
+    # authoritative local gate then builds/tests the frontend (parity with the
+    # advisory VPS DockerGate), its exit is captured as F, echoed for
+    # diagnostics, and folded into the composite exit so a red frontend fails.
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command(
+        "abc", "myapp", frontend_gate="pnpm -r build && pnpm -r test"
+    )
+    assert "pnpm -r build && pnpm -r test; F=$?" in cmd
+    assert "frontend=$F" in cmd
+    assert "exit $(( L || T || P || C || S || G || F ))" in cmd
+    # the frontend step runs AFTER the backend/scan steps, BEFORE the @@GATE echo
+    assert cmd.index("gitleaks detect") < cmd.index("pnpm -r build")
+    assert cmd.index("pnpm -r build") < cmd.index("echo @@GATE")
+
+
+def test_parse_binding_red_frontend_holds_the_gate_without_claiming_tampering() -> None:
+    # M-D2-4: a red frontend (frontend=1) on a non-zero exit must hold the gate
+    # as a genuine failure, NOT be mislabelled the all-green-with-nonzero
+    # "possible tampering" case (every other step green).
+    from orchestrator.testgate import parse_binding_output
+
+    out = "@@GATE lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=1\n"
+    r = parse_binding_output(out, container_rc=1)
+    assert r.tests_passed is False
+    assert not any("tamper" in f.lower() for f in r.scan_findings)
+
+
+def test_parse_binding_green_frontend_passes() -> None:
+    # a green frontend token does not by itself fail the gate.
+    from orchestrator.testgate import parse_binding_output
+
+    out = "@@GATE lint=0 types=0 tests=0 coverage=0 semgrep=0 gitleaks=0 frontend=0\n"
+    r = parse_binding_output(out, container_rc=0)
+    assert r.tests_passed and r.coverage_ok and r.scan_findings == ()
+
+
+def test_binding_gate_passes_gitleaks_an_explicit_trusted_config() -> None:
+    # H-D2-3: gitleaks auto-discovers a branch `.gitleaks.toml` (allowlist) if no
+    # --config is given, so a branch could suppress its own secret. The gate must
+    # pass an EXPLICIT trusted config (restored under <agent-dir>/security) to
+    # disable auto-discovery.
+    from orchestrator.testgate import GITLEAKS_CONFIG, BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert f"gitleaks detect --no-banner --config {GITLEAKS_CONFIG}" in cmd
+    assert GITLEAKS_CONFIG == f"{TARGET_DIR_NAME}/security/gitleaks.toml"
+
+
+def test_binding_gate_pins_pytest_cache_plugin_off() -> None:
+    # H-D2-1 (defense-in-depth): the branch-writable .pytest_cache must not steer
+    # collection. (conftest autoload is NOT closable at the gate - that is closed
+    # by L3 classification; see test_policy.)
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("abc", "myapp")
+    assert "pytest -p no:cacheprovider -n auto" in cmd
+
+
+def test_binding_gate_neutralizes_branch_scanner_config_with_trusted_ref() -> None:
+    # H-D2-2 / H-D2-3 (LOAD-BEARING): a branch `.semgrepignore` / `.semgrep/` /
+    # `.gitleaks.toml` / `.gitleaksignore` is auto-honored and makes the scan pass
+    # vacuously. Before the scan the gate restores trusted main's copy over the
+    # clone, or deletes the branch's when trusted main ships none.
+    from orchestrator.testgate import NEUTRALIZED_SCAN_CONFIGS, BindingGate
+
+    # .coveragerc rides the same vacuous-gate vector: coverage.py auto-discovers
+    # it and a `[run] omit` empties coverage.xml so diff-cover passes on nothing.
+    assert ".coveragerc" in NEUTRALIZED_SCAN_CONFIGS
+    # ruff/basedpyright config for the lint/type steps: same vacuous-pass class.
+    for cfg in ("ruff.toml", ".ruff.toml", "pyrightconfig.json"):
+        assert cfg in NEUTRALIZED_SCAN_CONFIGS
+    cmd = BindingGate(compose_rel="c.yml").command(
+        "branchsha", "myapp", trusted_ref="trustedsha"
+    )
+    for p in NEUTRALIZED_SCAN_CONFIGS:
+        assert p in cmd, p
+    # restore-from-trusted, else delete the branch's copy
+    assert 'git -C "$tmp/repo" checkout trustedsha -- "$p" 2>/dev/null' in cmd
+    assert '|| rm -rf "$tmp/repo/$p"' in cmd
+    # runs AFTER the branch sha checkout and BEFORE cd + docker compose
+    assert cmd.index("checkout -q branchsha") < cmd.index("for p in")
+    assert cmd.index("for p in") < cmd.index("docker compose")
+
+
+def test_binding_gate_scanner_neutralization_absent_without_trusted_ref() -> None:
+    # the VPS pre-filter (DockerGate/no trusted ref) is not a trust boundary; the
+    # neutralization loop must be absent there, not empty/broken.
+    from orchestrator.testgate import BindingGate
+
+    cmd = BindingGate(compose_rel="c.yml").command("branchsha", "myapp")
+    assert "for p in" not in cmd
+    assert '|| rm -rf "$tmp/repo/$p"' not in cmd
+
+
 def test_binding_gate_command_uses_custom_compare_ref() -> None:
     # #11: the local gate baselines the scanners to the current local-main sha
     # (the trial-merge parent), not the stale origin/main remote-tracking ref.
@@ -196,7 +307,7 @@ def test_binding_gate_command_single_quotes_gate_so_rc_survives() -> None:
 
 
 def test_binding_gate_runs_trusted_infra_not_the_branch() -> None:
-    # NÁLEZ 1: the compose file / Dockerfile / semgrep ruleset the gate BUILDS
+    # FINDING 1: the compose file / Dockerfile / semgrep ruleset the gate BUILDS
     # and RUNS must come from TRUSTED main, not the untrusted branch clone -
     # else a branch adds `privileged: true` / a host bind-mount to
     # compose.test.yml and escapes onto the Director's daemon DURING
@@ -342,3 +453,34 @@ def test_binding_gate_run_keys_off_exit_code(tmp_path: Path) -> None:
     r = BindingGate(compose_rel="c.yml", shell=shell).run(tmp_path, "abc", "myapp")
     assert r.tests_passed is False
     assert shell.calls[0][1] == tmp_path
+
+
+def test_gate_shell_never_reads_the_callers_stdin(tmp_path: Path) -> None:
+    # The containerized gate runs untrusted branch code; an inherited stdin
+    # would let it swallow the operator's typed merge confirmation (the
+    # interactive prompt then reads EOF) and read the trusted terminal. The
+    # gate shell must run with stdin closed (DEVNULL): a command that reads
+    # stdin gets nothing, and the caller's stdin stays untouched.
+    import subprocess
+    import sys
+
+    probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from orchestrator.testgate import _subprocess_shell_split\n"
+        "rc, out, err = _subprocess_shell_split('cat', Path(sys.argv[2]))\n"
+        "print('OUT=' + repr(out))\n"
+    )
+    engine_root = str(Path(__file__).resolve().parent.parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", probe, engine_root, str(tmp_path)],
+        input="SECRET-STDIN\n",  # what an inherited stdin would hand the gate
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "SECRET-STDIN" not in proc.stdout  # the gate never saw it
+    assert "OUT=''" in proc.stdout

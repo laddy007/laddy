@@ -10,6 +10,7 @@ from orchestrator import TARGET_DIR_NAME
 from orchestrator.target_policy import (
     ENGINE_SAFE_GLOBS,
     ENGINE_SENSITIVE_GLOBS,
+    INERT_SAFE_EXTENSIONS,
     POLICY_REL,
     TargetPolicy,
     TargetPolicyError,
@@ -23,6 +24,7 @@ coverage_package = "acme"
 sensitive_globs = ["acme/models.py"]
 security_globs = ["acme/auth.py"]
 invariant_tests = ["tests/test_contract.py"]
+test_dirs = ["src/tests/"]
 migration_globs = ["migrations/*"]
 frontend_prefixes = ["web/"]
 frontend_gate = "npm run build"
@@ -49,6 +51,18 @@ def test_all_sensitive_merges_engine_product_and_invariants() -> None:
     assert POLICY_REL in merged
 
 
+def test_all_test_dirs_merges_engine_default_and_product() -> None:
+    # M4: a target ADDS test locations; the engine default (literal tests/)
+    # is always present - an empty test_dirs cannot weaken deleted-test
+    # detection.
+    pol = parse_target_policy(_MINIMAL)
+    assert "src/tests/" in pol.all_test_dirs
+    assert "tests/" in pol.all_test_dirs
+    from dataclasses import replace
+
+    assert "tests/" in replace(pol, test_dirs=()).all_test_dirs
+
+
 def test_all_safe_merges_engine_and_product() -> None:
     pol = parse_target_policy(_MINIMAL)
     assert "web/i18n/**/*.json" in pol.all_safe_globs
@@ -63,6 +77,7 @@ def test_all_safe_merges_engine_and_product() -> None:
         "sensitive_globs",
         "security_globs",
         "invariant_tests",
+        "test_dirs",
         "migration_globs",
         "frontend_prefixes",
         "frontend_gate",
@@ -127,6 +142,60 @@ def test_shipped_laddy_policy_is_dogfood_specific() -> None:
     assert pol.sensitive_globs == ()
     assert pol.frontend_prefixes == ()
     assert pol.migration_globs == ()
+
+
+# M5 (C2+C3 audit): a target's safe_globs feed the L1 no-review auto-merge
+# lane, so the engine validates them at PARSE time - a glob that could match a
+# non-inert file (code, scripts, config without an inert extension constraint)
+# fails the whole policy closed instead of silently widening L1 to cover code.
+
+
+@pytest.mark.parametrize(
+    "glob",
+    [
+        "**/*.py",  # the audit's repro: arbitrary python rides L1
+        "*.PY",  # matching is casefolded (H8), so validation must be too
+        "src/**",  # no extension constraint: fnmatch '*' matches src/evil.py
+        "*.sh",
+        "web/**/*.ts",
+        "conftest.py",
+        "Makefile",
+        "*.json*",  # trailing wildcard: could match .jsonnet etc. - fail closed
+        "locales/*",  # directory allowlist, not an extension allowlist
+        ".md",  # no stem: a literal dotfile named '.md', not an extension rule
+    ],
+)
+def test_non_inert_safe_glob_fails_closed(glob: str) -> None:
+    bad = _MINIMAL.replace(
+        'safe_globs = ["web/i18n/**/*.json"]', f'safe_globs = ["{glob}"]'
+    )
+    with pytest.raises(TargetPolicyError, match="safe_globs"):
+        parse_target_policy(bad)
+
+
+@pytest.mark.parametrize(
+    "glob",
+    [
+        "web/i18n/**/*.json",  # the documented use case: i18n catalogues
+        "data/**/*.csv",
+        "locales/*.PO",  # casefolded: gettext catalogues in any case
+        "notes/*.txt",
+        "docs/extra/*.md",
+    ],
+)
+def test_inert_safe_glob_is_accepted(glob: str) -> None:
+    ok = _MINIMAL.replace(
+        'safe_globs = ["web/i18n/**/*.json"]', f'safe_globs = ["{glob}"]'
+    )
+    assert glob in parse_target_policy(ok).safe_globs
+
+
+def test_engine_safe_globs_satisfy_the_inert_rule() -> None:
+    # the engine's own L1 allowlist must obey the same inert-extension contract
+    # it enforces on targets (drift pin).
+    for g in ENGINE_SAFE_GLOBS:
+        stem, sep, ext = g.casefold().rpartition(".")
+        assert sep and stem and ext in INERT_SAFE_EXTENSIONS, g
 
 
 def test_dump_target_policy_round_trips() -> None:

@@ -138,6 +138,41 @@ def test_append_eval_rejects_unknown_result(tmp_path: Path) -> None:
         )
 
 
+def test_append_and_read_escapes_and_authentic_ids(tmp_path: Path) -> None:
+    from orchestrator.oracle.runlog import (
+        append_escape,
+        authentic_escape_ids,
+        read_escapes,
+    )
+
+    append_escape(tmp_path, task="t1", flag_id="t1#1", class_slug="regression",
+                  grade="confirmed")
+    append_escape(tmp_path, task="t2", flag_id="t2#3", class_slug="edge-case",
+                  grade="plausible")
+    events = read_escapes(tmp_path)
+    assert [e["action"] for e in events] == ["escape-raised", "escape-raised"]
+    assert events[0]["task"] == "t1" and events[0]["flag_id"] == "t1#1"
+    assert authentic_escape_ids(tmp_path) == {("t1", "t1#1"), ("t2", "t2#3")}
+
+
+def test_append_escape_requires_task_and_flag_id(tmp_path: Path) -> None:
+    from orchestrator.oracle.runlog import append_escape
+
+    with pytest.raises(ValueError, match="required"):
+        append_escape(tmp_path, task="", flag_id="t1#1", class_slug="c", grade="confirmed")
+
+
+def test_escape_events_do_not_move_watermark_or_appear_in_read_runs(tmp_path: Path) -> None:
+    from orchestrator.oracle.runlog import append_escape
+
+    append_run(tmp_path, from_sha="a" * 40, to_sha="b" * 40,
+               reviewed={"L2": ["t1"]}, skipped={}, findings=[])
+    append_escape(tmp_path, task="t1", flag_id="t1#1", class_slug="regression",
+                  grade="confirmed")
+    assert watermark(tmp_path) == "b" * 40  # oracle-run events only
+    assert len(read_runs(tmp_path)) == 1
+
+
 def test_eval_events_do_not_move_watermark_and_are_invisible_to_read_runs(
     tmp_path: Path,
 ) -> None:

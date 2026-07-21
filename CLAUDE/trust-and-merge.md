@@ -35,9 +35,11 @@ switches your own branch.
 3. Per ready branch, `orchestrator.local_merge` re-derives every gate on
    trusted infra in a sibling worktree and either merges the **verified sha**
    (not the mutable branch ref) into local `main`, or holds with a digest.
-4. Merging into local `main` requires typing the **exact task id**
-   (merge-safety confirmation). `--no-input` stays a true dry run: it never
-   merges and never prompts.
+4. ANY merge into local `main` - an L1/L2 auto-merge decision as much as an
+   L3 risk decision - requires typing the **exact task id** (merge-safety
+   confirmation); a wrong or blank id declines and merges nothing (the task
+   just stays ready/held). `--no-input` stays a true dry run: it never merges
+   and never prompts.
 
 ## Blast-radius tiers (L1 / L2 / L3)
 
@@ -54,7 +56,11 @@ VPS-written `merge-decision.json` is never trusted.
 - **L2 ordinary logic** -> the agents ARE the gate (tests + cross-vendor rw2 +
   security panel); auto-merge if green.
 - **L3 sensitive / security surface** -> security panel -> digested risk ->
-  human `Y/N`. Never auto-merge.
+  human risk decision. Never auto-merge.
+
+"Auto-merge" means no review or risk decision is required - not "no human at
+the merge": the step-4 merge-safety confirmation (typing the exact task id)
+still gates every actual merge side-effect, L1 and L2 included.
 
 The sensitive surface is the target's `policy.toml` plus the engine-wide
 constants (`target_policy.ENGINE_SENSITIVE_GLOBS`): secrets, `.claude`/`.mcp`

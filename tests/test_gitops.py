@@ -91,6 +91,46 @@ def test_task_worktree_resumes_existing_remote_branch(
     assert (wt / "work.txt").is_file(), "worktree must resume the pushed branch"
 
 
+def test_sync_worktree_to_origin_fast_forwards_to_pushed_tip(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    # A worktree finishes and pushes t1; then a SEPARATE clone pushes a newer
+    # commit on top. sync must fast-forward the (reused, stale) worktree to it.
+    wt = gitops.task_worktree("t1")
+    (wt / "work.txt").write_text("v1\n", encoding="utf-8")
+    gitops.commit_all(wt, "v1")
+    gitops.push(wt, "t1")
+
+    clone = tmp_path / "other"
+    _git("clone", str(remote), str(clone))
+    _git("-C", str(clone), "checkout", "t1")
+    (clone / "work.txt").write_text("v2\n", encoding="utf-8")
+    _git("-C", str(clone), "add", "work.txt")
+    _git("-C", str(clone), *IDENTITY, "commit", "-m", "v2")
+    _git("-C", str(clone), "push", "origin", "t1")
+    tip = _git("-C", str(remote), "rev-parse", "t1")
+
+    assert (wt / "work.txt").read_text(encoding="utf-8") == "v1\n"  # stale before sync
+    assert gitops.sync_worktree_to_origin(wt, "t1") is True
+    assert (wt / "work.txt").read_text(encoding="utf-8") == "v2\n"  # synced
+    assert gitops.head_sha(wt) == tip
+
+
+def test_sync_worktree_to_origin_is_noop_when_branch_absent_on_origin(
+    gitops: GitOps,
+) -> None:
+    # a purely local task the branch of which was never pushed: nothing to sync
+    # onto, so the function does nothing (no crash, worktree untouched) and
+    # reports False.
+    wt = gitops.task_worktree("t1")  # branched off origin/main; t1 not on origin
+    (wt / "local.txt").write_text("local\n", encoding="utf-8")
+    gitops.commit_all(wt, "local only")
+    head_before = gitops.head_sha(wt)
+    assert gitops.sync_worktree_to_origin(wt, "t1") is False
+    assert gitops.head_sha(wt) == head_before  # untouched
+    assert (wt / "local.txt").is_file()
+
+
 def test_commit_all_returns_sha_and_skips_clean_tree(gitops: GitOps) -> None:
     wt = gitops.task_worktree("t1")
     assert gitops.commit_all(wt, "nothing to do") is None
@@ -115,7 +155,7 @@ def test_changed_files_lists_paths_vs_origin_main(gitops: GitOps) -> None:
     (wt / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
     (wt / "README.md").write_text("changed\n", encoding="utf-8")
     gitops.commit_all(wt, "changes")
-    assert sorted(gitops.changed_files(wt)) == ["README.md", "pkg/mod.py"]
+    assert sorted(gitops.changed_files(wt, "t1")) == ["README.md", "pkg/mod.py"]
 
 
 def test_diff_text_contains_patch(gitops: GitOps) -> None:
@@ -143,8 +183,8 @@ def test_changed_files_shows_renamed_away_test_as_deletion(
     subprocess.run(["git", "-C", str(wt), "mv", "tests/test_arch.py", "notes.py"], check=True)
     gitops.commit_all(wt, "move test out")
 
-    statuses = gitops.changed_statuses(wt)
-    files = gitops.changed_files(wt)
+    statuses = gitops.changed_statuses(wt, "t1")
+    files = gitops.changed_files(wt, "t1")
     # with --no-renames the move is D(old) + A(new), so the old tests/ path is
     # visible to deleted_test_files / touches_invariant_tests / sensitive_paths
     assert "tests/test_arch.py" in files
@@ -152,18 +192,48 @@ def test_changed_files_shows_renamed_away_test_as_deletion(
     assert "notes.py" in files
 
 
-def test_changed_files_excludes_task_artifacts(gitops: GitOps) -> None:
-    # <agent-dir>/tasks/** must not count toward policy inputs (VPS/CI diff drift)
+def test_changed_files_excludes_own_task_artifacts(gitops: GitOps) -> None:
+    # <agent-dir>/tasks/<own-task>/** must not count toward policy inputs
+    # (VPS/CI diff drift)
     wt = gitops.task_worktree("t1")
     (wt / "real.py").write_text("x = 1\n", encoding="utf-8")
     art_dir = wt / TARGET_DIR_NAME / "tasks" / "t1"
     art_dir.mkdir(parents=True)
     (art_dir / "iteration-log.jsonl").write_text('{"a":1}\n', encoding="utf-8")
     gitops.commit_all(wt, "code + artifacts")
-    files = gitops.changed_files(wt)
+    files = gitops.changed_files(wt, "t1")
     assert "real.py" in files
     assert not any(f.startswith(f"{TARGET_DIR_NAME}/tasks/") for f in files)
-    assert gitops.diff_line_count(wt) == 1  # only real.py's one line counts
+    assert gitops.diff_line_count(wt, "t1") == 1  # only real.py's one line counts
+
+
+def test_changed_files_includes_files_planted_in_other_task_dirs(
+    gitops: GitOps,
+) -> None:
+    # M2: only the branch's OWN artifact lane is exempt from the policy view.
+    # A file planted under ANOTHER task's dir lands in the integrated tree, so
+    # it must count for classification, sizing, statuses AND code_sha - a
+    # blanket tasks/ exclusion let it ship unclassified.
+    wt = gitops.task_worktree("t1")
+    own_dir = wt / TARGET_DIR_NAME / "tasks" / "t1"
+    own_dir.mkdir(parents=True)
+    (own_dir / "iteration-log.jsonl").write_text('{"a":1}\n', encoding="utf-8")
+    first_sha = gitops.commit_all(wt, "own artifacts only")
+    planted_dir = wt / TARGET_DIR_NAME / "tasks" / "t2"
+    planted_dir.mkdir(parents=True)
+    (planted_dir / "x.py").write_text("evil = 1\n", encoding="utf-8")
+    gitops.commit_all(wt, "planted file in another task's lane")
+
+    planted = f"{TARGET_DIR_NAME}/tasks/t2/x.py"
+    files = gitops.changed_files(wt, "t1")
+    assert planted in files
+    assert not any(f.startswith(f"{TARGET_DIR_NAME}/tasks/t1/") for f in files)
+    assert gitops.changed_statuses(wt, "t1").get(planted) == "A"
+    assert gitops.diff_line_count(wt, "t1") == 1  # the planted line counts
+    # the plant moves code_sha (approvals re-key), unlike own-artifact commits
+    assert first_sha is not None
+    assert gitops.code_sha(wt, "t1") != first_sha
+    assert gitops.code_sha(wt, "t1") == gitops.head_sha(wt)
 
 
 def test_refresh_base_syncs_working_tree_to_remote_head(
@@ -196,3 +266,58 @@ def test_gitops_module_has_no_merge_operation() -> None:
 
     source = Path(gitops_module.__file__).read_text(encoding="utf-8")
     assert "merge" not in source.lower()
+
+
+# --- chained worktrees (queue --chain) ---------------------------------------
+
+
+def _push_branch_commit(remote: Path, tmp_path: Path, branch: str, fname: str) -> str:
+    """Push one commit on <branch>; returns its sha."""
+    seed = tmp_path / f"seed-{branch}"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", branch)
+    (seed / fname).write_text(f"{branch}\n", encoding="utf-8")
+    _git("-C", str(seed), "add", fname)
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", f"work on {branch}")
+    _git("-C", str(seed), "push", "origin", branch)
+    return _git("-C", str(seed), "rev-parse", "HEAD")
+
+
+def test_task_worktree_chain_base_starts_from_predecessor_branch(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    tip = _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    wt = gitops.task_worktree("t2", base_task="t1")
+    assert _git("-C", str(wt), "rev-parse", "HEAD") == tip  # built on t1's tip
+    assert _git("-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD") == "t2"
+
+
+def test_task_worktree_chain_base_missing_is_a_hard_error(gitops: GitOps) -> None:
+    # The predecessor never pushed: silently basing t2 on main would ship it
+    # without the code it was ordered after - refuse instead.
+    with pytest.raises(GitError, match="chain base branch"):
+        gitops.task_worktree("t2", base_task="t1")
+
+
+def test_task_worktree_existing_remote_branch_wins_over_chain_base(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    # t2 already has its own pushed branch (a resumed task): the chain base
+    # must NOT re-point it.
+    _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    t2_tip = _push_branch_commit(remote, tmp_path, "t2", "two.txt")
+    wt = gitops.task_worktree("t2", base_task="t1")
+    assert _git("-C", str(wt), "rev-parse", "HEAD") == t2_tip
+
+
+def test_chain_base_satisfied_true_on_descendant_false_on_stale(
+    gitops: GitOps, remote: Path, tmp_path: Path
+) -> None:
+    _push_branch_commit(remote, tmp_path, "t1", "one.txt")
+    chained = gitops.task_worktree("t2", base_task="t1")
+    assert gitops.chain_base_satisfied(chained, "t1")
+    # a worktree cut from main (no t1 content) does not satisfy the chain
+    stale = gitops.task_worktree("t3")
+    assert not gitops.chain_base_satisfied(stale, "t1")
+    # an unknown predecessor ref is not satisfied either (no exception)
+    assert not gitops.chain_base_satisfied(stale, "never-pushed")

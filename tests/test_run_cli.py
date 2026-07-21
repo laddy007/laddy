@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -368,6 +369,37 @@ def test_enqueue_all_queues_candidates_and_skips_unready(
     assert [i.task_id for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()] == ["qt1"]
 
 
+def test_enqueue_explicit_id_rejects_high_risk_without_design_approval(
+    remote: Path, tmp_path: Path
+) -> None:
+    # L-D1-1: the explicit-id enqueue path must pre-check the high-risk ->
+    # design-approval gate too (like --all), rejecting all-or-nothing so a
+    # high-risk task cannot be queued before its design is approved.
+    env = _env(remote, tmp_path)
+    _push_spec(remote, tmp_path, "hr",
+               "---\ntype: feature\nrisk: high\n---\n# t\nTouch .laddy/orchestrator/run.py.\n")
+    _mark_clarified(env, "hr")
+    rc = main(["hr", "--phase", "enqueue"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert TaskQueue(Path(env["AGENT_WORK_ROOT"])).items() == []
+
+
+def test_enqueue_explicit_id_queues_high_risk_after_design_approval(
+    remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _push_spec(remote, tmp_path, "hr",
+               "---\ntype: feature\nrisk: high\n---\n# t\nTouch .laddy/orchestrator/run.py.\n")
+    _mark_clarified(env, "hr")
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("hr")
+    TaskArtifacts(wt, "hr").append_log(action="design", outcome="approved")
+    rc = main(["hr", "--phase", "enqueue"], env=env, deps=_deps([]))
+    assert rc == 0
+    assert [i.task_id for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()] == ["hr"]
+
+
 def test_enqueue_all_skips_high_risk_without_design_approval(remote: Path, tmp_path: Path) -> None:
     env = _env(remote, tmp_path)
     _push_spec(remote, tmp_path, "hr",
@@ -455,13 +487,28 @@ def test_queue_processes_fifo_and_removes_after_terminal(
     assert TaskQueue(Path(env["AGENT_WORK_ROOT"])).items() == []
 
 
-def test_queue_refuses_when_locked(remote: Path, tmp_path: Path) -> None:
+def test_queue_refuses_when_locked_by_a_live_holder(remote: Path, tmp_path: Path) -> None:
+    # A queue lock held by a LIVE process still refuses (rc 3). Our own pid is a
+    # guaranteed-live holder, so the crash-reclaim (L-D5-1) must NOT take it over.
     env = _env(remote, tmp_path)
     q = TaskQueue(Path(env["AGENT_WORK_ROOT"]))
     q.dir.mkdir(parents=True, exist_ok=True)
-    (q.dir / ".lock").write_text("999\n", encoding="utf-8")
+    (q.dir / ".lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
     rc = main(["--phase", "queue"], env=env, deps=_deps([]))
     assert rc == 3
+
+
+def test_queue_reclaims_stale_lock_from_dead_holder(remote: Path, tmp_path: Path) -> None:
+    # L-D5-1: a --phase queue runner that crashed mid-batch orphans the .lock;
+    # a later --phase queue must reclaim it (dead pid) and run to empty, not stay
+    # wedged at rc 3 until a human deletes the file. 999999999 is above pid_max,
+    # so it is deterministically dead.
+    env = _env(remote, tmp_path)
+    q = TaskQueue(Path(env["AGENT_WORK_ROOT"]))
+    q.dir.mkdir(parents=True, exist_ok=True)
+    (q.dir / ".lock").write_text("999999999\n", encoding="utf-8")
+    rc = main(["--phase", "queue"], env=env, deps=_deps([]))
+    assert rc == 0
 
 
 def test_queue_list_prints_items(capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path) -> None:
@@ -776,7 +823,7 @@ def test_flag_resolve_oracle_escape_refused_at_loop_cli(
     from orchestrator.flags import ORACLE_ESCAPE, raise_flag
 
     fid = raise_flag(TaskArtifacts(wt, "t1"), ORACLE_ESCAPE, "esc",
-                     needs_director=True)
+                     needs_director=True, allow_oracle_escape=True)
     rc = main(["t1", "--phase", "flag", "--resolve", fid,
                "--resolution", "dismissed"], env=env, deps=_deps([]))
     assert rc == 2
@@ -933,3 +980,433 @@ def test_loop_refuses_high_risk_without_design_approval(remote: Path, tmp_path: 
     _mark_clarified(env, "hr3")
     rc = main(["hr3", "--phase", "loop", "--skip-clarify"], env=env, deps=_deps([]))
     assert rc == 2  # refused: high-risk, no design/approved marker
+
+
+# --- director resume channel (--phase resume) --------------------------------
+
+
+def _seed_terminal(env: dict[str, str], task_id: str, state: str) -> None:
+    """Give a task a recorded terminal, as a finished run leaves it."""
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree(task_id)
+    art = TaskArtifacts(wt, task_id)
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome=state)
+
+
+def _resume_events(env: dict[str, str], task_id: str) -> list[dict[str, object]]:
+    return [e for e in _task_log(env, task_id) if e.get("action") == "director_resume"]
+
+
+def test_resume_empty_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume", "--reason", "   "], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_missing_reason_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+    rc = main(["t1", "--phase", "resume"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_path_guard_violation_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    rc = main(["t1", "--phase", "resume", "--reason", "fix it"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_refuses_retryable_terminal_with_rekickoff_hint(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # a transient/retryable terminal (QUOTA_TIMEOUT) is NOT poisoned - it already
+    # resumes on a plain re-kickoff, so the refusal must say that, not "discard".
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "QUOTA_TIMEOUT")
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+    err = capsys.readouterr().err
+    assert "re-kickoff" in err and "poisoned" not in err
+
+
+def test_resume_refuses_task_with_no_terminal_writes_nothing(
+    remote: Path, tmp_path: Path
+) -> None:
+    # t1 exists on main but never ran (no terminal) -> refuse, nothing written
+    env = _env(remote, tmp_path)
+    rc = main(["t1", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_unknown_task_exits_2_writes_nothing(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    rc = main(["nope", "--phase", "resume", "--reason", "go"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert _resume_events(env, "nope") == []
+
+
+def test_resume_does_not_sync_worktree_when_validation_fails(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The origin sync (a hard reset of the worktree) must run ONLY after the
+    # terminal is confirmed resumable - never for a refused resume (e.g. a still-
+    # running or PATH_GUARD_VIOLATION task), so a live worktree is never reset.
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "PATH_GUARD_VIOLATION")
+    synced: list[str] = []
+    monkeypatch.setattr(
+        GitOps, "sync_worktree_to_origin",
+        lambda self, wt, tid: synced.append(tid) or False,
+    )
+    rc = main(["t1", "--phase", "resume", "--reason", "x"], env=env, deps=_deps([]))
+    assert rc == 2
+    assert synced == []  # tree untouched for a non-resumable terminal
+    assert _resume_events(env, "t1") == []
+
+
+def test_resume_happy_path_appends_one_event_and_starts_loop(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    _seed_terminal(env, "t1", "CAP_REACHED")
+
+    # stub the loop so the test asserts the append + that the loop is entered
+    # with clarify skipped, without running a full round.
+    from orchestrator import run as run_mod
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_loop(config: object, task_id: str, deps: object, skip_clarify: bool) -> int:
+        calls.append((task_id, skip_clarify))
+        return 0
+
+    monkeypatch.setattr(run_mod, "_phase_loop", fake_loop)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    assert events[0]["reason"] == "added throttling"
+    assert events[0]["outcome"] == "ok"
+    assert events[0].get("spec_sha")  # a recorded receipt sha is present
+    assert calls == [("t1", True)]  # loop entered, clarify skipped
+
+
+def test_resume_fetches_director_spec_correction_pushed_from_a_separate_clone(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, tmp_path: Path
+) -> None:
+    # The documented Director workflow (USAGE.md §8): correct the spec on the
+    # task branch from a SEPARATE clone and push it, then --resume on the VPS,
+    # whose persisted worktree is still at its pre-terminal commit. The resume
+    # must fetch that correction, or the developer reads the stale spec and the
+    # final push is rejected non-fast-forward (rw2 blocker).
+    env = _env(remote, tmp_path)
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    # 1. VPS worktree finishes a run at CAP_REACHED; branch pushed to origin/t1.
+    wt = gitops.task_worktree("t1")
+    art = TaskArtifacts(wt, "t1")
+    art.append_log(action="developer", outcome="ok", round=1)
+    art.append_log(action="terminal", outcome="CAP_REACHED")
+    gitops.commit_all(wt, "CAP_REACHED for t1")
+    gitops.push(wt, "t1")
+    stale_spec = (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8")
+
+    # 2. Director edits + pushes the spec correction from a separate clone.
+    clone = tmp_path / "director-clone"
+    _git("clone", str(remote), str(clone))
+    _git("-C", str(clone), "checkout", "t1")
+    corrected = "# t1\n\nNOW WITH THE THROTTLING REQUIREMENT THE SPEC OMITTED\n"
+    (clone / TARGET_DIR_NAME / "specs" / "t1.md").write_text(corrected, encoding="utf-8")
+    _git("-C", str(clone), *IDENTITY, "commit", "-am", "spec: add throttling")
+    _git("-C", str(clone), "push", "origin", "HEAD:t1")
+    director_tip = _git("-C", str(remote), "rev-parse", "t1")
+    # the VPS worktree is still stale before the resume
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == stale_spec
+
+    # 3. resume (loop stubbed): must sync the worktree to origin first.
+    from orchestrator import run as run_mod
+    monkeypatch.setattr(run_mod, "_phase_loop", lambda *a, **k: 0)
+    rc = main(["t1", "--phase", "resume", "--reason", "added throttling"],
+              env=env, deps=_deps([]))
+    assert rc == 0
+
+    # the corrected spec is now in the worktree, and spec_sha reflects it
+    assert (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8") == corrected
+    events = _resume_events(env, "t1")
+    assert len(events) == 1
+    corrected_sha = _git("-C", str(clone), "hash-object", f"{TARGET_DIR_NAME}/specs/t1.md")
+    assert events[0]["spec_sha"] == corrected_sha
+    # the resume commit builds ON TOP of the Director's correction, so the
+    # eventual gitops.push fast-forwards instead of being rejected
+    assert _git("-C", str(wt), "merge-base", "HEAD", director_tip) == director_tip
+
+
+def test_resume_path_does_not_push_or_merge_or_skip_review(remote: Path, tmp_path: Path) -> None:
+    # AC11 (trust): the resume CLI itself un-sticks + notes only. It never pushes
+    # to origin, decides a merge, or bypasses a reviewer - the resumed loop
+    # re-traverses every gate. Guard the source so a future edit can't sneak a
+    # push/merge onto this path.
+    import inspect
+
+    from orchestrator.run import _phase_resume
+
+    src = inspect.getsource(_phase_resume)
+    assert ".push(" not in src
+    assert "merge_decision" not in src and "MERGE_DECISION" not in src
+    assert "code_sha" not in src
+    # it delegates to the normal loop (which re-runs rw1/rw2/authoritative)
+    assert "_phase_loop(" in src
+
+
+# --- code-ready kickoff (--code-ready) ---------------------------------------
+
+
+def _push_task_branch_code(remote: Path, tmp_path: Path, task_id: str) -> None:
+    """Commit finished code on the bare <task> branch, as the Director would
+    before a kickoff --code-ready."""
+    seed = tmp_path / f"code-{task_id}"
+    _git("clone", str(remote), str(seed))
+    _git("-C", str(seed), "checkout", "-b", task_id)
+    (seed / "feature.py").write_text("X = 1\n", encoding="utf-8")
+    _git("-C", str(seed), "add", "-A")
+    _git("-C", str(seed), *IDENTITY, "commit", "-m", "finished code")
+    _git("-C", str(seed), "push", "origin", task_id)
+
+
+def test_code_ready_adopts_branch_code_and_starts_at_review_chain(
+    remote: Path, tmp_path: Path
+) -> None:
+    # Finished code sits committed on the t1 branch. --code-ready must adopt it
+    # as round 1's developer output: the FIRST runner call is rw1 (its verdict
+    # is the only scripted output - a developer call would consume it and fail),
+    # and the run converges to a terminal push.
+    env = _env(remote, tmp_path)
+    _push_task_branch_code(remote, tmp_path, "t1")
+    deps = _deps(
+        [verdict_json("APPROVED")],  # rw1 ONLY - no developer output scripted
+        shell=FakeShell(results=[(0, "ok"), (0, "ok")]),  # fast + docker gate
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=deps,
+    )
+    assert rc == 0
+    log = _task_log(env, "t1")
+    devs = [e for e in log if e.get("action") == "developer"]
+    assert len(devs) == 1
+    assert devs[0]["round"] == 1
+    assert "code-ready" in str(devs[0].get("detail"))
+    assert any(e.get("action") == "rw1" for e in log)  # review chain ran
+
+
+def test_code_ready_refuses_fresh_task_without_branch_code(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # No committed change on the t1 branch -> nothing to review; refuse before
+    # any event is appended and before any runner is consulted.
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    assert "no committed change" in capsys.readouterr().err
+    assert [e for e in _task_log(env, "t1") if e.get("action") == "developer"] == []
+
+
+def test_code_ready_refuses_task_already_under_way(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    # A developer round already ran: --code-ready must not re-label history.
+    env = _env(remote, tmp_path)
+    _push_task_branch_code(remote, tmp_path, "t1")
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("t1")
+    TaskArtifacts(wt, "t1").append_log(action="developer", outcome="ok", round=1)
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "already has a developer round" in err
+    log = _task_log(env, "t1")
+    assert len([e for e in log if e.get("action") == "developer"]) == 1  # unchanged
+
+
+def test_code_ready_refuses_finished_task_points_at_resume(
+    capsys: pytest.CaptureFixture[str], remote: Path, tmp_path: Path
+) -> None:
+    env = _env(remote, tmp_path)
+    config = OrchestratorConfig.from_env(env)
+    gitops = GitOps(config.repo_url, config.work_root, config.default_branch)
+    wt = gitops.task_worktree("t1")
+    TaskArtifacts(wt, "t1").append_log(action="terminal", outcome="CAP_REACHED")
+    rc = main(
+        ["t1", "--phase", "loop", "--skip-clarify", "--code-ready"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 2
+    assert "resume" in capsys.readouterr().err
+
+
+def test_code_ready_rejected_on_queue_family_phases(
+    remote: Path, tmp_path: Path
+) -> None:
+    # kickoff forwards the same args to clarify/design/loop (accepted there);
+    # the queue family and resume must refuse it - their start semantics differ.
+    with pytest.raises(SystemExit):
+        main(["t1", "--phase", "enqueue", "--code-ready"],
+             env=_env(remote, tmp_path), deps=_deps([]))
+    with pytest.raises(SystemExit):
+        main(["t1", "--phase", "resume", "--reason", "x", "--code-ready"],
+             env=_env(remote, tmp_path), deps=_deps([]))
+
+
+# --- chained queue runs (enqueue --chain) ------------------------------------
+
+
+def _queued(env: dict[str, str]) -> list[tuple[str, str | None]]:
+    return [
+        (i.task_id, i.base_task)
+        for i in TaskQueue(Path(env["AGENT_WORK_ROOT"])).items()
+    ]
+
+
+def test_enqueue_chain_links_tasks_in_given_order(remote: Path, tmp_path: Path) -> None:
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    _push_spec(remote, tmp_path, "qt3", "# qt3\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "qt3", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert _queued(env) == [("qt1", None), ("qt2", "qt1"), ("qt3", "qt2")]
+
+
+def test_enqueue_chain_creates_no_worktrees(remote: Path, tmp_path: Path) -> None:
+    # A fresh worktree cut from main at enqueue time would later SHADOW the
+    # chain base (an existing worktree wins in task_worktree) - chain
+    # validation must therefore never create one.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert not (Path(env["AGENT_WORK_ROOT"]) / "wt" / "qt1").exists()
+    assert not (Path(env["AGENT_WORK_ROOT"]) / "wt" / "qt2").exists()
+
+
+def test_enqueue_chain_argparse_guards(remote: Path, tmp_path: Path) -> None:
+    env = _env(remote, tmp_path)
+    with pytest.raises(SystemExit):  # fewer than two tasks
+        main(["qt1", "--phase", "enqueue", "--chain"], env=env, deps=_deps([]))
+    with pytest.raises(SystemExit):  # only explicit lists can be chained
+        main(["--phase", "enqueue", "--all", "--chain"], env=env, deps=_deps([]))
+    with pytest.raises(SystemExit):  # chain is an enqueue concept
+        main(["qt1", "--phase", "loop", "--chain"], env=env, deps=_deps([]))
+
+
+def test_queue_chain_second_task_builds_on_first_tasks_branch(
+    remote: Path, tmp_path: Path
+) -> None:
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    deps = _deps(
+        ["qt1 dev", verdict_json("APPROVED"), "qt2 dev", verdict_json("APPROVED")],
+        shell=FakeShell(results=[(0, "ok")] * 4),
+        rw2_outputs=[verdict_json("APPROVED"), verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == []
+    # qt2's pushed branch must CONTAIN qt1's tip (it was built on it)
+    qt1_tip = _git("-C", str(remote), "rev-parse", "refs/heads/qt1")
+    contains = subprocess.run(
+        ["git", "-C", str(remote), "rev-list", "refs/heads/qt2"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert qt1_tip in contains
+
+
+def test_queue_chain_failure_stops_descendants_but_not_independents(
+    remote: Path, tmp_path: Path
+) -> None:
+    # qt1 (chain head) dies on a developer error with MAX_LOOPS=1 ->
+    # CAP_REACHED (rc 1, removed from queue). Chained qt2 must be LEFT queued
+    # and never run; independent qt3 must still run to its terminal.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    _push_spec(remote, tmp_path, "qt3", "# qt3\n")
+    env = _env(remote, tmp_path)
+    env["MAX_LOOPS"] = "1"
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    assert main(["qt3", "--phase", "enqueue", "--skip-clarify"], env=env, deps=_deps([])) == 0
+    deps = _deps(
+        [
+            AgentResult(text="boom", session_id="s1", exit_reason="error", returncode=1),
+            "qt3 dev",
+            verdict_json("APPROVED"),
+        ],
+        shell=FakeShell(results=[(0, "ok")] * 4),
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == [("qt2", "qt1")]  # chain stopped, qt2 kept
+    # the independent qt3 still ran and pushed
+    assert _git("-C", str(remote), "rev-parse", "refs/heads/qt3")
+
+
+def test_queue_chain_stale_worktree_blocks_the_link(
+    remote: Path, tmp_path: Path
+) -> None:
+    # qt2's worktree already exists (cut from main by an earlier clarify) and
+    # does NOT contain qt1's branch: the runner must refuse to run qt2 on the
+    # wrong tree - it stays queued with the chain stopped.
+    _push_spec(remote, tmp_path, "qt1", "# qt1\n")
+    _push_spec(remote, tmp_path, "qt2", "# qt2\n")
+    env = _env(remote, tmp_path)
+    _mark_clarified(env, "qt2")  # side effect: creates qt2's worktree from main
+    rc = main(
+        ["qt1", "qt2", "--phase", "enqueue", "--chain", "--skip-clarify"],
+        env=env, deps=_deps([]),
+    )
+    assert rc == 0
+    deps = _deps(
+        ["qt1 dev", verdict_json("APPROVED")],
+        shell=FakeShell(results=[(0, "ok")] * 2),
+        rw2_outputs=[verdict_json("APPROVED")],
+    )
+    rc = main(["--phase", "queue"], env=env, deps=deps)
+    assert rc == 0
+    assert _queued(env) == [("qt2", "qt1")]  # left queued, chain stopped

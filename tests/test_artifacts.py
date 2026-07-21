@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from orchestrator import TARGET_DIR_NAME
-from orchestrator.artifacts import LOG, SPEC, ArtifactPathError, TaskArtifacts
+from orchestrator.artifacts import (
+    LOG,
+    SPEC,
+    ArtifactPathError,
+    LogCorruptionError,
+    TaskArtifacts,
+)
 
 
 def _artifacts(tmp_path: Path) -> TaskArtifacts:
@@ -83,6 +89,20 @@ def test_read_log_tolerates_truncated_final_line(tmp_path: Path) -> None:
         fh.write('{"ts": "2026-')  # torn, no newline
     entries = art.read_log()
     assert [e["action"] for e in entries] == ["developer"]
+
+
+def test_read_log_raises_on_malformed_interior_line(tmp_path: Path) -> None:
+    # L-D4-3: a completed append is always a whole line, so a malformed INTERIOR
+    # line is real corruption, not a torn append. Silently dropping it would hole
+    # the replayed state; read_log fails closed (raises) instead.
+    art = _artifacts(tmp_path)
+    art.append_log(action="developer", outcome="ok")
+    log = tmp_path / TARGET_DIR_NAME / "tasks" / "t1" / LOG
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("{not json}\n")  # corrupt interior line, fully terminated
+    art.append_log(action="rw1", outcome="approved")  # a later, valid line
+    with pytest.raises(LogCorruptionError):
+        art.read_log()
 
 
 def test_write_read_json(tmp_path: Path) -> None:

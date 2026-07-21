@@ -15,7 +15,7 @@ You scope an ambiguous or bug-hunt task BEFORE any code is written.
     that is not listed (denylist vs allowlist).
   - Side-effect-freedom: does any read / validate / "does nothing" path
     create or mutate state (a file, a branch, a lock)? It must not.
-  - Callers across modules of every symbol you change — will the change
+  - Callers across modules of every symbol you change -- will the change
     break one?
   - Express each behavioural contract as an acceptance-criterion test the
     developer must write.

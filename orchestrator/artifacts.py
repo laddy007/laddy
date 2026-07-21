@@ -71,23 +71,42 @@ def append_jsonl(path: Path, event: dict[str, Any]) -> None:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Every parseable event, in file order; missing file = [].
+class LogCorruptionError(Exception):
+    """A malformed INTERIOR line was found in an append-only JSONL log.
 
-    Torn-final-line tolerant: a crash mid-append leaves a torn final line -
-    that append never completed, so skipping it (never raising) is correct
-    for an append-only log and keeps every reader alive.
+    A completed append is always one whole line, so only the FINAL line can be
+    torn by a crash. A malformed interior line is therefore real corruption,
+    not a partial write - dropping it would silently hole the replayed state, so
+    the reader fails closed (raises) instead of proceeding on a gap."""
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Every event, in file order; missing file = [].
+
+    Torn-final-line tolerant, interior-strict: a crash mid-append can leave a
+    torn FINAL line (that append never completed), so a malformed last line is
+    skipped and never raises. A malformed INTERIOR line, by contrast, is real
+    corruption - a completed append is always a whole line - so it raises
+    LogCorruptionError rather than silently dropping the event. Consumers
+    replay state from this log and must fail closed on a hole, never proceed.
     """
     if not path.is_file():
         return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    last = len(lines) - 1
     entries: list[dict[str, Any]] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for i, raw in enumerate(lines):
         if not raw.strip():
             continue
         try:
             entries.append(json.loads(raw))
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            if i == last:
+                continue  # torn final append: tolerate, keep every reader alive
+            raise LogCorruptionError(
+                f"{path}: malformed interior line {i + 1} - append-only log "
+                "corruption (a completed append is always a whole line)"
+            ) from exc
     return entries
 
 

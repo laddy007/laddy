@@ -1,0 +1,9 @@
+{
+  "task": "director-resume",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}

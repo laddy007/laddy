@@ -50,18 +50,32 @@ def _gates(
     )
 
 
-def test_path_guard_allows_task_artifacts_specs_and_docs() -> None:
+def test_path_guard_allows_task_artifacts_and_markdown_specs() -> None:
     ok, offending = path_guard(
         "t1",
         [
             f"{TARGET_DIR_NAME}/tasks/t1/report.md",
             f"{TARGET_DIR_NAME}/tasks/t1/findings.json",
             f"{TARGET_DIR_NAME}/specs/t1-fix.md",
-            "docs/development/notes.md",
         ],
     )
     assert ok is True
     assert offending == []
+
+
+def test_path_guard_blocks_docs_tree_and_non_md_spec_files() -> None:
+    # LOW (C2+C3 audit): docs/ admitted executable files (docs/conftest.py runs
+    # at every host pytest after merge; there is no docs/ tree by design), and
+    # a non-.md file under the spec dir is not an inert proposal. Both out.
+    for path in (
+        "docs/conftest.py",
+        "docs/development/notes.md",
+        f"{TARGET_DIR_NAME}/specs/evil.py",
+        f"{TARGET_DIR_NAME}/specs/conftest.py",
+    ):
+        ok, offending = path_guard("t1", [path])
+        assert ok is False, path
+        assert offending == [path], path
 
 
 def test_path_guard_blocks_source_files() -> None:
@@ -162,8 +176,18 @@ def test_dependency_and_payment_files_classify_l3() -> None:
     assert classify_blast_radius(["frontend/pnpm-lock.yaml"]) == L3
 
 
+def test_note_server_is_engine_sensitive() -> None:
+    # note_server/ is product code living in the engine repo; it must ride L3
+    # like every other engine code dir when laddy dogfoods itself - before the
+    # glob landed it was the one code dir auto-merging as L2.
+    from orchestrator.policy import L3
+
+    assert classify_blast_radius(["note_server/server.py"]) == L3
+    assert classify_blast_radius(["note_server/sub/util.py"]) == L3
+
+
 def test_gate_own_security_ruleset_is_sensitive() -> None:
-    # NÁLEZ 4: the gate's own semgrep ruleset (<agent-dir>/security/*) must be
+    # FINDING 4: the gate's own semgrep ruleset (<agent-dir>/security/*) must be
     # sensitive - a branch that weakens the rules must not auto-merge as L2,
     # or the weakened rules become the trusted version next time.
     from orchestrator.policy import L3
@@ -219,6 +243,31 @@ def test_effective_risk_is_max() -> None:
     assert effective_risk("high", "low") == "high"
     assert effective_risk("low", "medium") == "medium"
     assert effective_risk("low", "low") == "low"
+
+
+def test_effective_risk_normalizes_out_of_enum_declared_to_high() -> None:
+    # M8: an out-of-enum declared risk was ORDERED as high (rank 2) but
+    # returned as the RAW string, and the only consumer compares == "high" -
+    # fail-safe inverted. It must come back as the enum value "high".
+    assert effective_risk("HIGH", "low") == "high"
+    assert effective_risk("critical", "low") == "high"
+    assert effective_risk("unknown-nonsense", "medium") == "high"
+    # an absent declaration is the caller's legitimate default, not junk
+    assert effective_risk("", "low") == "low"
+
+
+def test_merge_decision_stops_on_out_of_enum_declared_risk() -> None:
+    # M8 acceptance: declared "HIGH" / "critical" produce the high_risk stop.
+    for declared in ("HIGH", "critical"):
+        d = merge_decision(
+            changed_files=["a.py"],
+            diff_lines=5,
+            declared_risk=declared,
+            gates=_gates(),
+        )
+        assert d.decision == "stop_before_merge", declared
+        assert "high_risk" in d.reasons
+        assert d.risk_level == "high"
 
 
 def test_user_visible() -> None:
@@ -297,6 +346,39 @@ def test_stop_on_deleted_test_files() -> None:
     assert any("test_files_deleted" in r for r in d.reasons)
 
 
+def test_stop_on_deleted_test_under_configured_test_dir() -> None:
+    # M4: the myapp sample policy declares src/tests/ and frontend/__tests__/
+    # as extra test locations (test_dirs); a deletion there must raise
+    # test_files_deleted exactly like a deletion under literal tests/.
+    for deleted in ("src/tests/test_x.py", "frontend/__tests__/App.test.tsx"):
+        d = merge_decision(
+            changed_files=["a.py"],
+            diff_lines=5,
+            declared_risk="low",
+            gates=_gates(),
+            changed_statuses={deleted: "D", "a.py": "M"},
+        )
+        assert d.decision == "stop_before_merge", deleted
+        assert any("test_files_deleted" in r for r in d.reasons), deleted
+
+
+def test_deleted_tests_dir_detected_even_when_target_configures_nothing() -> None:
+    # Fail-closed: literal tests/ is an ENGINE default a target can only ADD
+    # to, never remove - a policy with empty test_dirs still detects it.
+    from dataclasses import replace
+
+    d = _policy.merge_decision(
+        policy=replace(_POL, test_dirs=()),
+        changed_files=["a.py"],
+        diff_lines=5,
+        declared_risk="low",
+        gates=_gates(),
+        changed_statuses={"tests/test_x.py": "D"},
+    )
+    assert d.decision == "stop_before_merge"
+    assert any("test_files_deleted" in r for r in d.reasons)
+
+
 def test_stop_on_destructive_migration() -> None:
     texts = {"alembic/versions/9_drop.py": "op.drop_table('usage_record')"}
     d = merge_decision(
@@ -357,6 +439,15 @@ def test_spec_is_high_risk_by_front_matter():
     assert spec_is_high_risk("# t\nchange play SPA copy\n", "high") is True
 
 
+def test_spec_is_high_risk_by_out_of_enum_declared_risk():
+    # M8: an unknown declared level fails SAFE to high - "critical" must not
+    # slip past a literal == "high" comparison.
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", "HIGH") is True
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", "critical") is True
+    # absence stays a non-declaration, not junk
+    assert spec_is_high_risk("# t\nchange play SPA copy\n", None) is False
+
+
 def test_spec_is_high_risk_by_sensitive_path_in_text():
     # orchestrator/run.py is a root-level engine surface post-split (spec
     # 2026-07-13 S3 step 0), not TARGET_DIR_NAME/orchestrator/run.py (dead).
@@ -373,6 +464,22 @@ def test_spec_is_high_risk_by_bare_sensitive_path():
     assert spec_is_high_risk(
         "Update orchestrator/run.py to add a phase.\n", None
     ) is True
+
+
+def test_spec_is_high_risk_by_slashless_sensitive_filename():
+    # LOW: a bare sensitive filename (no "/") must still hit the sensitive
+    # globs - naming pyproject.toml / .env / CLAUDE.md is the same surface
+    # whether or not the spec spells a directory prefix.
+    assert spec_is_high_risk("Bump the pinned deps in pyproject.toml\n", None) is True
+    assert spec_is_high_risk("Load settings from `.env` at startup.\n", None) is True
+    assert spec_is_high_risk("Refresh the CLAUDE.md agent rules.\n", None) is True
+
+
+def test_spec_is_high_risk_ignores_dotted_prose_tokens():
+    # calibration: dotted prose (abbreviations, versions, bare filenames that
+    # match no sensitive glob) must not explode into false positives.
+    body = "Target python 3.11, e.g. tweak games.py validation, etc.\n"
+    assert spec_is_high_risk(body, None) is False
 
 
 # --- blast-radius classification (trust-model doc S8) -------------------------
@@ -393,15 +500,102 @@ def test_blast_radius_l1_safe_by_construction() -> None:
     assert classify_blast_radius([]) == L3
 
 
-def test_added_test_files_are_not_safe_by_construction() -> None:
+def test_spec_files_are_never_l1_even_as_pure_markdown() -> None:
+    # H2: a spec is an executable task description, not inert markdown - a
+    # merged `status: ready` spec runs autonomously on the next kickoff. An
+    # all-markdown diff adding a spec must never ride the L1 no-review lane;
+    # it falls to L2 so the security panel + rw2 gate it.
+    from dataclasses import replace
+
     from orchestrator.policy import L2
 
-    # NÁLEZ 3: a test file is executable Python, not data. An added conftest.py
-    # can neutralize the gate via collection hooks, and every merged test then
-    # runs on the host at each `pytest -n auto`. So added tests are L2 (the
-    # agents review them cheaply), never L1 safe-by-construction.
+    spec = f"{TARGET_DIR_NAME}/specs/next.md"
+    assert classify_blast_radius([spec]) == L2
+    # even mixed with genuinely inert markdown, the spec pulls the diff to L2
+    assert classify_blast_radius(["README.md", spec]) == L2
+    # engine guard: a target's safe_globs cannot re-admit the spec dir to L1
+    pol = replace(_POL, safe_globs=(f"{TARGET_DIR_NAME}/specs/*.md",))
+    assert _policy.classify_blast_radius(pol, [spec]) == L2
+
+
+def test_added_test_files_are_not_safe_by_construction() -> None:
+    from orchestrator.policy import L2, L3
+
+    # FINDING 3: a test file is executable Python, not data - every merged test
+    # runs on the host at each `pytest -n auto`. An added ordinary test is L2
+    # (the agents review it cheaply), never L1 safe-by-construction.
     assert classify_blast_radius(["tests/test_new.py"], {"tests/test_new.py": "A"}) == L2
-    assert classify_blast_radius(["tests/conftest.py"], {"tests/conftest.py": "A"}) == L2
+    # H-D2-1: conftest.py can neutralize the gate via a collection hook
+    # (pytest_sessionfinish -> exitstatus 0), so it is engine-sensitive -> L3, a
+    # strictly stronger lane than the old L2 (a human reviews the hook diff; it
+    # never auto-merges).
+    assert classify_blast_radius(["tests/conftest.py"], {"tests/conftest.py": "A"}) == L3
+
+
+def test_env_dot_config_files_are_sensitive() -> None:
+    # H-D7-1: env.local / env.vps (no leading dot, so `.env*` missed them) are
+    # `set -a; source`d on the trusted machine. They must classify L3 so an
+    # untracked-turned-tracked env.* never rides the L2 auto-merge lane. The
+    # only tracked matches are the harmless *.example files (also L3, fine).
+    from orchestrator.policy import L3
+
+    for path in ("env.local", "env.vps", "sub/env.local", "env.local.example"):
+        assert sensitive_paths([path]) == [path], path
+        assert classify_blast_radius([path]) == L3, path
+
+
+def test_pytest_and_scanner_config_files_are_sensitive() -> None:
+    # H-D2-1/2/3: config auto-discovered by a tool the gate runs (pytest,
+    # semgrep, gitleaks). Each escaped the sensitive set and rode L2; a branch
+    # could forge a gate step green through it. Classify L3 so a human sees it.
+    from orchestrator.policy import L3
+
+    for path in (
+        "conftest.py",
+        "tests/conftest.py",
+        "deep/nested/conftest.py",
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "src/setup.cfg",
+        ".semgrepignore",
+        ".semgrep/rules.yml",
+        ".gitleaks.toml",
+        ".gitleaksignore",
+        # coverage.py auto-discovers a dedicated .coveragerc; a `[run] omit`
+        # drops the branch's changed files from coverage.xml so
+        # diff-cover --fail-under=90 passes vacuously (same class as H-D2-2/3).
+        ".coveragerc",
+        "sub/.coveragerc",
+        # ruff auto-reads ruff.toml/.ruff.toml and basedpyright reads
+        # pyrightconfig.json: config for the lint/type gate steps, same
+        # vacuous-pass class as the scanner/coverage configs.
+        "ruff.toml",
+        ".ruff.toml",
+        "sub/ruff.toml",
+        "pyrightconfig.json",
+        "svc/pyrightconfig.json",
+    ):
+        assert sensitive_paths([path]) == [path], path
+        assert classify_blast_radius([path]) == L3, path
+
+
+def test_conftest_sessionfinish_forge_is_closed_by_l3_classification() -> None:
+    # H-D2-1 acceptance: a committed `tests/conftest.py` with a
+    # `pytest_sessionfinish` hook forcing `session.exitstatus = 0` forges a green
+    # binding gate (real coverage.xml, container exit 0). The deterministic gate
+    # cannot tell that hook from a benign conftest (no flag disables conftest
+    # autoload). The close is CLASSIFICATION: the diff carries conftest.py, which
+    # is engine-sensitive, so the merge routes L3 and never auto-merges - a human
+    # reviews the collection-hook diff before it can land.
+    from orchestrator.policy import L2, L3
+
+    diff = ["myapp/api/routers/games.py", "tests/conftest.py"]
+    # without conftest the same product change would be ordinary L2 (auto-merge);
+    # the presence of conftest.py is what pulls the whole diff to L3.
+    assert classify_blast_radius(["myapp/api/routers/games.py"]) == L2
+    assert classify_blast_radius(diff) == L3
+    assert sensitive_paths(diff) == ["tests/conftest.py"]
 
 
 def test_blast_radius_l2_ordinary_logic() -> None:

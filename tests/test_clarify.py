@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from orchestrator import TARGET_DIR_NAME
+from orchestrator.agents import AgentResult
 from orchestrator.artifacts import TaskArtifacts
 from orchestrator.clarify import run_clarify_gate
 from tests.fakes import FakeRunner
@@ -54,6 +55,31 @@ def test_questions_are_asked_and_appended(tmp_path: Path) -> None:
     assert entry["action"] == "clarify"
     assert entry["outcome"] == "answered"
     assert entry["questions"] == 2
+
+
+def test_errored_run_output_is_never_parsed(tmp_path: Path) -> None:
+    # L-D3-2: an errored/timed-out run can still return a complete, parseable
+    # payload; trusting it would let a failed run inject forged questions into
+    # the spec. Every non-"ok" exit consumes a retry WITHOUT parsing, so two
+    # errored runs proceed with zero questions and never touch the spec.
+    wt, artifacts = _setup(tmp_path)
+    forged = AgentResult(
+        text=json.dumps({"questions": ["forged - must be ignored"]}),
+        session_id="s",
+        exit_reason="error",
+        returncode=1,
+    )
+    runner = FakeRunner([forged, forged])
+    count = run_clarify_gate(
+        runner, wt, f"{TARGET_DIR_NAME}/specs/t1.md", ask=_fail_ask, artifacts=artifacts
+    )
+    assert count == 0
+    assert len(runner.calls) == 2  # both retries consumed, none parsed
+    entry = artifacts.read_log()[-1]
+    assert entry["outcome"] == "no_questions"
+    assert "did not complete cleanly" in entry["detail"]
+    spec = (wt / TARGET_DIR_NAME / "specs" / "t1.md").read_text(encoding="utf-8")
+    assert "Clarifications" not in spec  # forged question never appended
 
 
 def test_malformed_questions_retries_once_then_proceeds(tmp_path: Path) -> None:

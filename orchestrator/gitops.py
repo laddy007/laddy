@@ -1,4 +1,4 @@
-"""Git operations for task branches (design doc S11: gitops.py).
+"""Git provisioning for task branches (design doc S11: gitops.py).
 
 Clone/fetch the base repo, maintain one worktree per task on a bare
 `<task>` branch, commit and push that branch. The hub is a closed
@@ -6,15 +6,20 @@ namespace where every non-default branch IS a task id (spec: discovery
 selector) - so `task_id` doubles as the branch name, and any id equal to
 `default_branch` is rejected before any git command runs. Nothing here
 can write the default branch: pushes go exclusively to bare `<task>` refs.
+
+Stateless diff sizing/classification lives in orchestrator.gitdiff; the
+method forms below are thin binders (worktree + default_branch) kept
+because the loop and the policy recheckers call them on the GitOps instance.
 """
 
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 
-from orchestrator import TARGET_DIR_NAME
+from orchestrator import gitdiff
+from orchestrator.gitdiff import GitError as GitError  # re-export (one error type)
+from orchestrator.gitdiff import git_out
 
 _IDENTITY = (
     "-c",
@@ -23,30 +28,6 @@ _IDENTITY = (
     "user.email=agent@myapp.local",
 )
 
-
-class GitError(RuntimeError):
-    """A git command failed."""
-
-
-def _run(args: Sequence[str], cwd: Path | None = None) -> str:
-    proc = subprocess.run(
-        list(args), cwd=cwd, capture_output=True, text=True, check=False
-    )
-    if proc.returncode != 0:
-        raise GitError(
-            f"git command failed ({proc.returncode}): {' '.join(args)}\n{proc.stderr}"
-        )
-    return proc.stdout.strip()
-
-
-def policy_pathspec() -> list[str]:
-    """The policy view of a diff: everything EXCEPT <agent-dir>/tasks/**.
-
-    Task artifacts (iteration logs, verdicts) ride every branch; the policy
-    and the oracle both classify by the PRODUCT diff. One home for
-    the exclusion so no caller restates it (convergence R1/R3).
-    """
-    return ["--", ".", f":(exclude){TARGET_DIR_NAME}/tasks"]
 
 
 class GitOps:
@@ -65,9 +46,9 @@ class GitOps:
         """Clone the repo once; fetch on every later call."""
         if not (self.base_dir / ".git").is_dir():
             self.base_dir.parent.mkdir(parents=True, exist_ok=True)
-            _run(["git", "clone", self.repo_url, str(self.base_dir)])
+            git_out(["git", "clone", self.repo_url, str(self.base_dir)])
         else:
-            _run(["git", "-C", str(self.base_dir), "fetch", "origin"])
+            git_out(["git", "-C", str(self.base_dir), "fetch", "origin"])
         return self.base_dir
 
     def refresh_base(self) -> Path:
@@ -78,8 +59,8 @@ class GitOps:
         because ensure_base only fetches - its working tree stays at
         clone-time state, and enqueue discovery must read CURRENT specs."""
         base = self.ensure_base()
-        _run(["git", "-C", str(base), "checkout", "-q", self.default_branch])
-        _run(
+        git_out(["git", "-C", str(base), "checkout", "-q", self.default_branch])
+        git_out(
             [
                 "git", "-C", str(base), "reset", "--hard", "-q",
                 f"origin/{self.default_branch}",
@@ -95,68 +76,131 @@ class GitOps:
             )
         return task_id
 
-    def task_worktree(self, task_id: str) -> Path:
+    def task_worktree(self, task_id: str, base_task: str | None = None) -> Path:
         """Worktree at the bare `<task>` branch: resume the remote branch if
-        it exists, otherwise branch off origin/<default_branch>."""
+        it exists, otherwise branch off origin/<default_branch>.
+
+        ``base_task`` (chained queue runs) changes ONLY the fresh-start ref:
+        a brand-new task branches off the PREDECESSOR task's pushed branch
+        instead of the default branch, so chained work builds on the chain's
+        code before it lands. An existing worktree or an existing remote
+        `<task>` branch wins over the chain base (the task is already under
+        way on its own line); a MISSING predecessor branch is a hard error -
+        silently basing a chained task on the default branch would ship it
+        without the code it was ordered after.
+        """
         branch = self._branch(task_id)
         base = self.ensure_base()
         wt = self.work_root / "wt" / task_id
         if (wt / ".git").exists():
             return wt
-        _run(["git", "-C", str(base), "worktree", "prune"])
+        git_out(["git", "-C", str(base), "worktree", "prune"])
+
+        def _remote_ref_exists(ref: str) -> bool:
+            return (
+                subprocess.run(
+                    ["git", "-C", str(base), "rev-parse", "--verify", "--quiet", ref],
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+
+        remote_ref = f"origin/{branch}"
+        if _remote_ref_exists(remote_ref):
+            start = remote_ref
+        elif base_task is not None:
+            chain_ref = f"origin/{self._branch(base_task)}"
+            if not _remote_ref_exists(chain_ref):
+                raise GitError(
+                    f"chain base branch {chain_ref} not found on origin - "
+                    f"predecessor task {base_task!r} has not pushed; run it "
+                    "first (or drop the chain link)"
+                )
+            start = chain_ref
+        else:
+            start = f"origin/{self.default_branch}"
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        git_out(
+            ["git", "-C", str(base), "worktree", "add", "-B", branch, str(wt), start]
+        )
+        return wt
+
+    def sync_worktree_to_origin(self, wt: Path, task_id: str) -> bool:
+        """Fast-forward an EXISTING task worktree to the branch tip on origin
+        (fetch first). Returns True when a sync happened, False when origin has
+        no such branch (a purely local task - nothing to sync onto).
+
+        ``task_worktree`` reuses an existing worktree WITHOUT fetching, so a
+        persisted worktree stays at the commit its last run left. A resume must
+        build on the branch as the hub has it NOW: the Director may have pushed a
+        spec correction from a separate clone since (director-resume's whole
+        point). Skip this and the developer reads the pre-correction spec AND the
+        resumed run's final push is rejected non-fast-forward, stranding the task.
+        A run that reached a (resumable) terminal committed + pushed everything,
+        so the worktree is clean and a hard reset onto ``origin/<task>`` is safe -
+        the same reasoning ``refresh_base`` uses to reset the base clone."""
+        branch = self._branch(task_id)
+        git_out(["git", "-C", str(wt), "fetch", "origin"])
         remote_ref = f"origin/{branch}"
         has_remote = (
             subprocess.run(
-                ["git", "-C", str(base), "rev-parse", "--verify", "--quiet", remote_ref],
+                ["git", "-C", str(wt), "rev-parse", "--verify", "--quiet", remote_ref],
                 capture_output=True,
                 check=False,
             ).returncode
             == 0
         )
-        start = remote_ref if has_remote else f"origin/{self.default_branch}"
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        _run(
-            ["git", "-C", str(base), "worktree", "add", "-B", branch, str(wt), start]
-        )
-        return wt
+        if not has_remote:
+            return False
+        git_out(["git", "-C", str(wt), "reset", "--hard", remote_ref])
+        return True
 
     def commit_all(self, wt: Path, message: str) -> str | None:
         """Stage and commit everything; None when the tree is clean."""
-        if not _run(["git", "-C", str(wt), "status", "--porcelain"]):
+        if not git_out(["git", "-C", str(wt), "status", "--porcelain"]):
             return None
-        _run(["git", "-C", str(wt), "add", "-A"])
-        _run(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
+        git_out(["git", "-C", str(wt), "add", "-A"])
+        git_out(["git", "-C", str(wt), *_IDENTITY, "commit", "-q", "-m", message])
         return self.head_sha(wt)
 
-    def head_sha(self, wt: Path) -> str:
-        return _run(["git", "-C", str(wt), "rev-parse", "HEAD"])
+    def chain_base_satisfied(self, wt: Path, base_task: str) -> bool:
+        """True iff the predecessor's pushed branch tip is contained in this
+        worktree's HEAD - i.e. the chained task really builds on it.
 
-    def code_sha(self, wt: Path) -> str:
-        """SHA of the last commit touching anything OUTSIDE <agent-dir>/tasks/.
-
-        Gate results are keyed to this, not HEAD: artifact commits (verdicts,
-        logs) move HEAD but do not change the reviewed code, so they must not
-        invalidate approvals. Any real code commit does.
+        Guards the chained-queue invariant for a REUSED worktree: task_worktree
+        only applies the chain base to a fresh worktree, so one created earlier
+        (a clarify run, a plain kickoff) may sit on the default branch or on an
+        outdated predecessor tip. The caller fetches (ensure_base) first so
+        ``origin/<base>`` is current. Containment is read as "no commit is
+        reachable from the base tip that HEAD lacks" (rev-list), a read-only
+        ancestry question - this module still performs no history-joining
+        operation (spec acceptance 6).
         """
-        out = _run(
-            [
-                "git",
-                "-C",
-                str(wt),
-                "rev-list",
-                "-1",
-                "HEAD",
-                "--",
-                ".",
-                f":(exclude){TARGET_DIR_NAME}/tasks",
-            ]
+        ref = f"origin/{self._branch(base_task)}"
+        proc = subprocess.run(
+            ["git", "-C", str(wt), "rev-list", "--count", ref, "^HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        return out or self.head_sha(wt)
+        if proc.returncode != 0:
+            return False  # unknown ref -> the chain base is not satisfied
+        return proc.stdout.strip() == "0"
+
+    def blob_sha(self, wt: Path, rel_path: str) -> str:
+        """The git blob SHA of a working-tree file (``git hash-object``).
+
+        Used as a receipt for the spec at director-resume time: recorded so the
+        handback shows whether the ask changed. It is a RECORD only - nothing
+        branches on it (that would make it a trust input on a VPS-written log).
+        """
+        return git_out(["git", "-C", str(wt), "hash-object", rel_path])
 
     def push(self, wt: Path, task_id: str) -> None:
         """Push the task branch. The ONLY remote write this module performs."""
         branch = self._branch(task_id)
-        _run(
+        git_out(
             [
                 "git",
                 "-C",
@@ -167,55 +211,22 @@ class GitOps:
             ]
         )
 
-    # Policy inputs (changed_files / changed_statuses / diff_line_count) share
-    # two deliberate flags so the VPS decision and the off-VPS recheck agree
-    # AND cannot be gamed:
-    #   --no-renames  : a `git mv tests/test_x.py elsewhere` shows as
-    #                   D tests/test_x.py + A elsewhere, so a renamed-away
-    #                   invariant/sensitive test is still seen by the guards.
-    #   :(exclude)<agent-dir>/tasks : every task commits its own artifacts there;
-    #                   counting them would (a) inflate size-based risk and
-    #                   (b) make the VPS pre-artifact-commit decision differ
-    #                   from the CI post-artifact-commit recompute.
-    def _range(self) -> str:
-        return f"origin/{self.default_branch}...HEAD"
+    # --- diff helpers: thin binders over orchestrator.gitdiff ---------------
 
-    def _policy_pathspec(self) -> list[str]:
-        return policy_pathspec()
+    def head_sha(self, wt: Path) -> str:
+        return gitdiff.head_sha(wt)
 
-    def changed_files(self, wt: Path) -> list[str]:
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--name-only", self._range()]
-            + self._policy_pathspec()
-        )
-        return [line for line in out.splitlines() if line]
+    def code_sha(self, wt: Path, task_id: str) -> str:
+        return gitdiff.code_sha(wt, task_id)
+
+    def changed_files(self, wt: Path, task_id: str) -> list[str]:
+        return gitdiff.changed_files(wt, task_id, self.default_branch)
 
     def diff_text(self, wt: Path) -> str:
-        return _run(["git", "-C", str(wt), "diff", self._range()])
+        return gitdiff.diff_text(wt, self.default_branch)
 
-    def diff_line_count(self, wt: Path) -> int:
-        """Added+deleted line count for policy sizing (excludes task artifacts)."""
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--numstat", self._range()]
-            + self._policy_pathspec()
-        )
-        total = 0
-        for line in out.splitlines():
-            added, deleted, *_ = line.split("\t")
-            total += (0 if added == "-" else int(added)) + (
-                0 if deleted == "-" else int(deleted)
-            )
-        return total
+    def diff_line_count(self, wt: Path, task_id: str) -> int:
+        return gitdiff.diff_line_count(wt, task_id, self.default_branch)
 
-    def changed_statuses(self, wt: Path) -> dict[str, str]:
-        """path -> git status letter (A/M/D). Renames disabled (see above)."""
-        out = _run(
-            ["git", "-C", str(wt), "diff", "--no-renames", "--name-status", self._range()]
-            + self._policy_pathspec()
-        )
-        statuses: dict[str, str] = {}
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                statuses[parts[-1]] = parts[0]
-        return statuses
+    def changed_statuses(self, wt: Path, task_id: str) -> dict[str, str]:
+        return gitdiff.changed_statuses(wt, task_id, self.default_branch)

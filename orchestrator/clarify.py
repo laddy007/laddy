@@ -73,6 +73,20 @@ def run_clarify_gate(
     detail = ""
     for attempt in range(2):
         result = runner.run(prompt, wt)
+        if result.exit_reason != "ok":
+            # An errored/timed-out run can still return a complete, parseable
+            # payload; trusting it would let a failed run inject forged
+            # questions into the spec. Consume the retry without parsing,
+            # matching agent_retry.request_payload's fail-closed contract.
+            detail = (
+                f"clarify run did not complete cleanly (attempt {attempt + 1}): "
+                f"exit_reason={result.exit_reason!r}, rc={result.returncode}"
+            )
+            prompt = (
+                CLARIFY_PROMPT.format(spec_rel=spec_rel)
+                + "\nYour previous run did not complete. Output ONLY the JSON object."
+            )
+            continue
         try:
             questions = _parse_questions(result.text)
             break
