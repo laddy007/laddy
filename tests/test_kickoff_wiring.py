@@ -42,3 +42,23 @@ def test_kickoff_launches_loop_observably() -> None:
     loop = next(ln for ln in text.splitlines() if "--phase loop" in ln)
     assert "LADDY_LOG_HEARTBEAT=1" in loop, loop
     assert " -u " in loop, loop  # python -u: unbuffered stdout/stderr
+
+
+def test_kickoff_forwards_brief_only_to_new() -> None:
+    # A brief typed after --new must reach ONLY the --phase new invocation
+    # (as --brief) and never clarify/design/loop - the routing bug this spec
+    # fixes (a stray positional crashing --phase clarify).
+    text = (_SCRIPTS / "kickoff.sh").read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    new_line = next(ln for ln in lines if "--phase new" in ln)
+    clarify_line = next(ln for ln in lines if "--phase clarify" in ln)
+    design_line = next(ln for ln in lines if "--phase design" in ln)
+    loop_line = next(ln for ln in lines if "--phase loop" in ln)
+    assert "--brief" in new_line, new_line
+    assert "BRIEF" in new_line, new_line
+    assert "--brief" not in clarify_line, clarify_line
+    assert "--brief" not in design_line, design_line
+    assert "--brief" not in loop_line, loop_line
+    assert "BRIEF" not in clarify_line, clarify_line
+    assert "BRIEF" not in design_line, design_line
+    assert "BRIEF" not in loop_line, loop_line

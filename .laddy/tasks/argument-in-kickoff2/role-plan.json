@@ -1,0 +1,9 @@
+{
+  "task": "argument-in-kickoff2",
+  "type": "feature",
+  "roles": [
+    "developer",
+    "rw1",
+    "rw2"
+  ]
+}
