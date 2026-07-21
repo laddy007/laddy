@@ -204,10 +204,32 @@ def test_no_resume_override_without_a_resume_event() -> None:
     assert _resume_developer_point(entries, _rp("cap_reached")) is None
 
 
-def test_resume_override_self_clears_once_a_developer_round_ran() -> None:
-    # a developer entry AFTER the resume consumes it - no more forcing
+def test_resume_does_not_clobber_a_midflight_phase() -> None:
+    # a developer round ran after the resume and the loop is mid-flight
+    # (fast_tests): the grant only spends on a TERMINAL phase, so a mid-flight
+    # phase flows through the pure derivation untouched - forcing never skips a
+    # gate.
     entries = [_e("terminal", "CAP_REACHED"), _resume(), _e("developer", "ok")]
     assert _resume_developer_point(entries, _rp("fast_tests")) is None
+
+
+def test_resume_grants_three_developer_rounds_past_the_cap() -> None:
+    # One director_resume iterates up to _RESUME_ROUND_GRANT (3) developer rounds
+    # before the loop is allowed to settle back onto a terminal: each time the
+    # run re-caps within the grant, another developer round is forced.
+    base = [_e("terminal", "CAP_REACHED"), _resume()]
+    # round 1 (0 dev rounds since resume): forced over cap_reached
+    forced = _resume_developer_point(base, _rp("cap_reached"))
+    assert forced is not None and forced.phase == "developer"
+    # round 2 (1 dev round since resume, re-capped): still forced
+    base2 = [*base, _e("developer", "ok"), _e("terminal", "CAP_REACHED")]
+    assert _resume_developer_point(base2, _rp("cap_reached")) is not None
+    # round 3 (2 dev rounds since resume, re-capped): still forced
+    base3 = [*base2, _e("developer", "ok"), _e("terminal", "CAP_REACHED")]
+    assert _resume_developer_point(base3, _rp("cap_reached")) is not None
+    # after 3 dev rounds since the resume the grant is spent: the cap stands
+    base4 = [*base3, _e("developer", "ok"), _e("terminal", "CAP_REACHED")]
+    assert _resume_developer_point(base4, _rp("cap_reached")) is None
 
 
 # --- AC7 (pure): the note self-clears once a phase action runs after it -------

@@ -155,11 +155,41 @@ def _director_note(entries: Sequence[Mapping[str, Any]]) -> str | None:
     return None
 
 
+# A director_resume grants a short burst of developer rounds past the cap so one
+# human intervention can actually ITERATE, not fire a single round and re-cap.
+# The grant is measured in developer rounds SINCE the resume. The gate/review
+# steps between developer rounds (below) flow through the pure derivation
+# untouched, so forcing never skips a gate; every other derived phase - a fresh
+# developer round, or a re-stuck terminal (cap_reached / deadlock) - is turned
+# back into a developer round, which also bypasses the _override_phase backstop
+# the Director intervened to break.
+_RESUME_ROUND_GRANT = 3
+_RESUME_FLOWTHROUGH_PHASES = ("fast_tests", "rw1", "rw2", "authoritative", "push")
+
+
+def _dev_rounds_since_resume(entries: Sequence[Mapping[str, Any]]) -> int | None:
+    """Developer rounds recorded AFTER the most recent director_resume.
+
+    None when the log holds no director_resume at all (no grant in play). Note
+    this is distinct from ``_director_note`` (which delivers the resume's note
+    text exactly once, on the first developer round): the note is delivered
+    once, but the round GRANT persists for ``_RESUME_ROUND_GRANT`` rounds.
+    """
+    count = 0
+    for entry in reversed(entries):
+        action = entry.get("action")
+        if action == "director_resume":
+            return count
+        if action == "developer":
+            count += 1
+    return None
+
+
 def _resume_developer_point(
     entries: Sequence[Mapping[str, Any]], rp: ResumePoint
 ) -> ResumePoint | None:
-    """Force the next phase to a developer round when an UNCONSUMED
-    director_resume is present, else None (director-resume).
+    """Force a developer round while a director_resume is still granting rounds,
+    else None (director-resume).
 
     The un-stick primitive only makes ``run()`` re-enter; on its own the pure
     derivation then routes the resumed run straight back to a terminal - a
@@ -167,16 +197,29 @@ def _resume_developer_point(
     ESCALATED_DEADLOCK tail re-``deadlock``s - so NO developer round runs and
     the corrected spec + note are silently dropped (the whole Goal). This
     override, a sibling of ``_override_phase`` and likewise layered ON TOP of
-    the untouched pure derivation, gives the Director's resume exactly one
-    developer round to act on the corrected ask, at the next round number
-    (``rounds_used + 1``). It self-clears: once that developer entry lands,
-    ``_director_note`` is None and the loop derives normally (one event, one
-    run - the run then continues to its next terminal, re-capping/re-deadlocking
-    only if it fails to converge again). ``derive_resume_point`` is NOT touched
-    (director_resume stays out of ``_PHASE_ACTIONS``); rp's sessions are kept so
-    the developer resumes its session.
+    the untouched pure derivation, turns each such terminal back into a
+    developer round for as long as the resume's grant lasts.
+
+    The grant is ``_RESUME_ROUND_GRANT`` developer rounds SINCE the resume, not
+    one: a single intervention gets to iterate a few times before the loop is
+    allowed to settle back onto a terminal. A gate/review phase
+    (``_RESUME_FLOWTHROUGH_PHASES``) flows through the pure derivation untouched
+    so forcing never skips a gate; a re-stuck phase (a fresh ``developer`` that
+    ``_override_phase`` would deadlock, or a ``cap_reached``) is forced back to a
+    developer round. The one exception is a GENUINE convergence after the resume
+    already developed (``done`` with ``since > 0``): that is the result the
+    Director asked for, so it is never re-opened - only the initial un-stick
+    (``since == 0``) develops over a done/pushed tail. Round number stays
+    ``rounds_used + 1`` and rp's sessions are kept so the developer resumes its
+    session. ``derive_resume_point`` is NOT touched (director_resume stays out
+    of ``_PHASE_ACTIONS``).
     """
-    if _director_note(entries) is None:
+    since = _dev_rounds_since_resume(entries)
+    if since is None or since >= _RESUME_ROUND_GRANT:
+        return None
+    if rp.phase in _RESUME_FLOWTHROUGH_PHASES:
+        return None
+    if rp.phase == "done" and since > 0:
         return None
     rounds_used = sum(1 for e in entries if e.get("action") == "developer")
     return dataclasses.replace(rp, phase="developer", round=rounds_used + 1)
