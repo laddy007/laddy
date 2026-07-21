@@ -1,23 +1,47 @@
 FROM python:3.11-slim
+# `RUN --mount=type=cache` (the pip wheel cache below) needs BuildKit. Docker's
+# built-in frontend supports it without a `# syntax=` header, so we DON'T pin
+# the external docker/dockerfile:1 frontend - that header would force an extra
+# Docker Hub pull, a new network dependency on a change whose whole point is
+# network resilience. `docker compose ... run --build` (compose v2, testgate.py)
+# uses BuildKit by default; the ENV timeout/retries keep it resilient regardless.
+
+# Resilience against flaky PyPI downloads: a re-fetch of the full wheel set on
+# a cache miss must not fail the gate on one slow connection (the exact
+# ReadTimeoutError from files.pythonhosted.org that held tasks BROKEN). Mirrors
+# the hardening already in the engine image docker/Dockerfile.test.
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
 
 # Base tooling: git for the checkout, curl+ca-certificates to fetch the pinned
-# gitleaks release binary below, tar to unpack it.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# gitleaks release binary below, tar to unpack it. Acquire::Retries survives a
+# dropped connection to deb.debian.org mid-download - the apt-side twin of the
+# pip resilience above (the gate image has three network-download steps: apt,
+# pip, and the gitleaks curl below; all three must tolerate a flaky link).
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
       git curl ca-certificates tar \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
 
 # Engine dev deps (lint / types / fast tests): pytest, pytest-xdist, ruff,
-# basedpyright.
+# basedpyright. The --mount=type=cache keeps downloaded wheels in a PERSISTENT
+# BuildKit cache on the host, OUTSIDE the image layers - so a re-fetch is
+# served from disk instead of PyPI even when this layer is invalidated (no
+# --no-cache-dir, which would defeat it).
 COPY requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-dev.txt
 
 # Binding-gate scanners (orchestrator/testgate.py _binding_gate). Pinned so the
 # gate is reproducible: pytest-cov drives `--cov`, diff-cover scores
 # changed-line coverage, semgrep is the SAST step. Bump deliberately, never on
 # autopilot - see the "Gate image & pinned scanners" note in CONTRIBUTING.md.
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
       pytest-cov==7.1.0 \
       diff-cover==10.3.0 \
       semgrep==1.169.0
@@ -27,7 +51,7 @@ RUN pip install --no-cache-dir \
 # the VPS / local trusted-machine gate arch.
 ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
-RUN curl -fsSL -o /tmp/gitleaks.tar.gz \
+RUN curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 -o /tmp/gitleaks.tar.gz \
       "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
     && echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
