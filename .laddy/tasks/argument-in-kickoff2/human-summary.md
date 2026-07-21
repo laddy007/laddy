@@ -1,9 +1,9 @@
-# Task argument-in-kickoff2 — CAP_REACHED
+# Task argument-in-kickoff2 — MERGE_DECIDED:stop_before_merge
 
 Branch: `argument-in-kickoff2`
 Fetch: git fetch laddy argument-in-kickoff2  (shows locally as laddy/argument-in-kickoff2)
 
-## ↻ Director resumes: 1×
+## ↻ Director resumes: 2×
 
 Latest: znovu s vyšším MAX_LOOPS
 
@@ -37,3 +37,9 @@ Latest: znovu s vyšším MAX_LOOPS
 - 2026-07-21T13:55:55Z `fast_tests` -> fail — --- stderr ---
 - 2026-07-21T13:59:17Z `developer` -> ok — No code change — same recurring `.venv`-missing gap; the implementation is already committed and unchanged. Re-bootstrapped `.venv`, exact gate command green: `ruff check .` clean, `bas... [truncated]
 - 2026-07-21T13:59:17Z `fast_tests` -> fail — --- stderr ---
+- 2026-07-21T13:59:18Z `terminal` -> CAP_REACHED
+- 2026-07-21T14:49:05Z `developer` -> ok — Re-read the spec on this resume (per the Director's note) — unchanged from what's already implemented. No code change needed: same recurring `.venv`-missing gap, already committed imple... [truncated]
+- 2026-07-21T14:51:45Z `fast_tests` -> pass — d; assign to variable "_" if this is intentional (reportUnusedCallResult)
+- 2026-07-21T14:52:10Z `rw1` -> approved
+- 2026-07-21T14:53:58Z `rw2` -> go
+- 2026-07-21T14:58:07Z `authoritative` -> pass
