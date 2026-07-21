@@ -11,49 +11,49 @@
   "claims_verified": [
     {
       "claim": "kickoff.sh captures a non-flag token after --new as BRIEF and excludes it from REST",
-      "evidence": "scripts/kickoff.sh:63-85, confirmed by manual bash trace: BRIEF captured, REST=--skip-clarify --reason hi when run with (--new --skip-clarify --reason hi)",
+      "evidence": "scripts/kickoff.sh:63-85; manual bash trace with ARGS=(--new --skip-clarify --reason hi) produced BRIEF=[] REST=--skip-clarify --reason hi",
       "verified": true
     },
     {
       "claim": "--brief is forwarded only to the --phase new invocation, never to clarify/design/loop",
-      "evidence": "scripts/kickoff.sh:102 (`--phase new ${BRIEF:+--brief \"$BRIEF\"}`) vs lines 108/114/122 which only expand ${REST[@]+...}; test_kickoff_forwards_brief_only_to_new in tests/test_kickoff_wiring.py:47-64 asserts this statically",
+      "evidence": "scripts/kickoff.sh:102 (`--phase new ${BRIEF:+--brief \"$BRIEF\"}`) vs lines 108/114/122 which expand only ${REST[@]+...}; tests/test_kickoff_wiring.py:47-64 test_kickoff_forwards_brief_only_to_new asserts this statically",
       "verified": true
     },
     {
-      "claim": "${BRIEF:+--brief \"$BRIEF\"} correctly preserves spaces in the brief and expands to nothing when BRIEF is empty",
-      "evidence": "manual bash test: BRIEF=\"hello world with spaces\" produced 2 separate argv tokens [--brief][hello world with spaces]; BRIEF=\"\" produced ARGC=2 with no --brief token",
+      "claim": "${BRIEF:+--brief \"$BRIEF\"} preserves spaces in the brief as one token and expands to nothing when BRIEF is empty",
+      "evidence": "manual bash test: BRIEF=\"hello world with spaces\" -> argv [--brief][hello world with spaces] (2 tokens); BRIEF=\"\" -> ARGC=2, no --brief token emitted",
       "verified": true
     },
     {
-      "claim": "_phase_new seeds spec as f\"# {task_id}\\n\\n{brief}\\n\" when brief given, else bare headline, and reuses the same `seed` var for the post-authoring guard",
+      "claim": "_phase_new seeds spec as f\"# {task_id}\\n\\n{brief}\\n\" when brief given, else bare headline, and the post-authoring guard reuses the same `seed` variable",
       "evidence": "orchestrator/run.py:211-222",
       "verified": true
     },
     {
-      "claim": "empty brief (--brief \"\") behaves as no brief in _phase_new (falsy check)",
-      "evidence": "orchestrator/run.py:212 `if brief else`; test_new_mode_empty_brief_same_as_no_brief in tests/test_run_cli.py",
+      "claim": "empty brief (--brief \"\") behaves as no brief in _phase_new via a falsy check",
+      "evidence": "orchestrator/run.py:212 `seed = ... if brief else ...`; tests/test_run_cli.py test_new_mode_empty_brief_same_as_no_brief asserts seed == '# freshtask\\n' with --brief \"\"",
       "verified": true
     },
     {
-      "claim": "no-brief prompt is byte-identical to pre-change SPEC_AUTHOR_PROMPT",
-      "evidence": "orchestrator/run.py:100-106 appends SPEC_AUTHOR_BRIEF_BLOCK only `if brief`; test_default_author_spec_no_brief_is_byte_identical in tests/test_run_cli.py asserts equality with SPEC_AUTHOR_PROMPT.format(...)",
+      "claim": "no-brief authoring prompt is byte-identical to the pre-change SPEC_AUTHOR_PROMPT",
+      "evidence": "orchestrator/run.py:99-106 appends SPEC_AUTHOR_BRIEF_BLOCK only `if brief`; tests/test_run_cli.py test_default_author_spec_no_brief_is_byte_identical asserts captured prompt == SPEC_AUTHOR_PROMPT.format(...)",
       "verified": true
     },
     {
-      "claim": "Deps.author_spec signature and all call sites/tests updated consistently to accept brief",
-      "evidence": "grep across orchestrator/run.py and tests/test_run_cli.py shows all lambdas/functions updated to 4-arg signature; no stale 3-arg caller found",
+      "claim": "Deps.author_spec signature and every call site/test were updated consistently to the 4-arg (wt, task_id, spec_rel, brief) shape",
+      "evidence": "grep -rn author_spec across orchestrator/run.py and tests/test_run_cli.py: all lambdas/functions use 4 params; no stale 3-arg caller remains",
       "verified": true
     },
     {
-      "claim": "full gate passes on this branch",
-      "evidence": "ruff check . -> 'All checks passed!'; basedpyright -> '0 errors, 2133 warnings, 0 notes'; pytest -n auto -q -> '1113 passed, 9 skipped, 3 warnings'",
+      "claim": "full local gate passes on this branch",
+      "evidence": "ruff check . -> 'All checks passed!'; basedpyright -> '0 errors, 2133 warnings, 0 notes'; pytest -n auto -q -> '1113 passed, 9 skipped, 3 warnings in 71.23s'",
       "verified": true
     }
   ],
   "findings": [],
-  "test_assessment": "AC1 (interactive session with brief in prompt, no clarify crash) covered by test_default_author_spec_threads_brief_into_prompt plus the kickoff.sh routing test and the fixed REST exclusion (manually traced). AC2 (no-brief byte-identical) covered by test_default_author_spec_no_brief_is_byte_identical and test_new_mode_no_brief_seed_and_prompt_unchanged. AC3 (seed contains brief; empty-authoring guard fires against brief-inclusive seed) covered by test_new_mode_with_brief_seeds_spec_and_threads_it and test_new_mode_empty_authoring_guard_fires_with_brief. AC4 (empty brief == no brief) covered by test_new_mode_empty_brief_same_as_no_brief for run.py; kickoff.sh's ${BRIEF:+...} empty-expansion behavior is only exercised by manual verification, not a repo test, but is a one-line, low-risk shell idiom. AC5 (flag-looking token after --new is not swallowed as brief) is only indirectly protected by the kickoff.sh capture logic (`[[ \"${ARGS[$i]}\" != -* ]]`); there is no dedicated automated test for this branch, though it is straightforward and I verified it manually. AC6 (unit tests: brief-only-to-new routing, _phase_new seeding/threading, no-brief regression guard, empty-guard-fires-with-brief) is fully covered by the new tests in both test files. Every new/changed function (_default_author_spec, _phase_new, kickoff.sh parsing loop) has at least one exercising test; the guard's error path (rc==2) is explicitly tested with and without a brief.",
+  "test_assessment": "AC1 (interactive session with brief in prompt, no clarify crash): covered by test_default_author_spec_threads_brief_into_prompt plus the kickoff.sh brief-only-to-new routing test and manual trace confirming --brief never reaches REST/clarify. AC2 (no-brief byte-identical): covered by test_default_author_spec_no_brief_is_byte_identical and test_new_mode_no_brief_seed_and_prompt_unchanged. AC3 (seed contains brief; empty-authoring guard fires against brief-inclusive seed): covered by test_new_mode_with_brief_seeds_spec_and_threads_it and test_new_mode_empty_authoring_guard_fires_with_brief. AC4 (empty brief == no brief): covered for run.py by test_new_mode_empty_brief_same_as_no_brief; for kickoff.sh the ${BRIEF:+...} empty-expansion path has no repo-level test, only my manual shell trace during review (residual risk, not a blocker given it's a one-line, well-understood shell idiom already used elsewhere in the same file for REST). AC5 (flag-looking token after --new not swallowed as brief): protected by the `[[ \"${ARGS[$i]}\" != -* ]]` guard in kickoff.sh but has no dedicated automated test; verified manually. AC6 (unit tests for routing, seeding/threading, no-brief regression, empty-guard-with-brief): fully satisfied by the new tests in tests/test_kickoff_wiring.py and tests/test_run_cli.py. Both new/changed functions (_default_author_spec, _phase_new) and the kickoff.sh parsing loop have at least one exercising test, including the error path (rc==2) with and without a brief.",
   "residual_risks": [
-    "kickoff.sh's --new argument capture and the empty-BRIEF expansion are verified only by static text assertions in tests plus my own manual bash trace, not by an automated test that actually executes kickoff.sh end-to-end; a future shell refactor could silently break this without failing the test suite.",
-    "AC5 (flag-looking token after --new not treated as brief) has no dedicated repo test, relying on manual verification during this review."
+    "kickoff.sh's --new capture logic and the empty-BRIEF expansion are verified only by static text assertions plus manual bash tracing during this review, not by a test that actually executes kickoff.sh end-to-end; a future shell refactor could regress this silently.",
+    "AC5 (flag-looking token after --new treated as a separate flag) has no dedicated repo test."
   ]
 }
