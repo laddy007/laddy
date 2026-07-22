@@ -1440,6 +1440,95 @@ def test_worktree_is_cleaned_up(local_repo: Path, tmp_path: Path) -> None:
     assert not (mw / "verify-t1").exists()
 
 
+def test_worktree_add_survives_leftover_dir(local_repo: Path, tmp_path: Path) -> None:
+    # A prior interrupted run (crashed `worktree add`, or a `worktree remove`
+    # the DrvFs /mnt/c FS refused) can leave a directory at verify-<task> that
+    # git does NOT know as a worktree. The old code's `worktree remove --force`
+    # (check=False) silently failed on it and the next `worktree add` died with
+    # 'already exists'. The create must self-heal: physically clear the path.
+    from orchestrator.local_merge import _branch_worktree
+
+    _push_ready_branch(local_repo, tmp_path, sensitive=False)
+    wr = tmp_path / "wr"
+    leftover = wr / "verify-t1"
+    leftover.mkdir(parents=True)
+    (leftover / "stale.txt").write_text("junk\n", encoding="utf-8")  # not a worktree
+
+    wt = _branch_worktree(local_repo, "t1", wr)  # would raise before the fix
+    assert wt == leftover
+    assert (wt / ".git").exists()  # a real worktree now, not the junk dir
+    assert not (wt / "stale.txt").exists()
+    assert (wt / "myapp" / "api_helper.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_stale_verify_worktrees_selects_verify_prefix_only(tmp_path: Path) -> None:
+    from orchestrator.local_merge import stale_verify_worktrees
+
+    wr = tmp_path / "wr"
+    wr.mkdir()
+    (wr / "verify-a").mkdir()
+    (wr / "verify-merge-b").mkdir()
+    (wr / "selfupgrade-statusfix").mkdir()  # a branch worktree - MUST be left alone
+    (wr / "verify-link").symlink_to(wr / "verify-a")  # never followed/removed
+
+    names = [p.name for p in stale_verify_worktrees(wr)]
+    assert names == ["verify-a", "verify-merge-b"]
+    # a missing work_root is simply "nothing stale", never an error
+    assert stale_verify_worktrees(tmp_path / "nope") == []
+
+
+def test_reconcile_interactive_yes_clears(local_repo: Path, tmp_path: Path) -> None:
+    from orchestrator.local_merge import reconcile_stale_worktrees
+
+    wr = tmp_path / "wr"
+    (wr / "verify-t1").mkdir(parents=True)
+    proceed = reconcile_stale_worktrees(
+        local_repo, wr, lambda _p: True, interactive=True
+    )
+    assert proceed is True
+    assert not (wr / "verify-t1").exists()
+
+
+def test_reconcile_interactive_no_aborts(local_repo: Path, tmp_path: Path) -> None:
+    from orchestrator.local_merge import reconcile_stale_worktrees
+
+    wr = tmp_path / "wr"
+    (wr / "verify-t1").mkdir(parents=True)
+    proceed = reconcile_stale_worktrees(
+        local_repo, wr, lambda _p: False, interactive=True
+    )
+    assert proceed is False
+    assert (wr / "verify-t1").exists()  # declined -> nothing removed, for inspection
+
+
+def test_reconcile_noninteractive_autoclears(local_repo: Path, tmp_path: Path) -> None:
+    # --no-input is a dry run that never merges; it auto-clears scratch (the ask
+    # callback declines by construction there and must NOT be treated as a 'no').
+    from orchestrator.local_merge import reconcile_stale_worktrees
+
+    wr = tmp_path / "wr"
+    (wr / "verify-t1").mkdir(parents=True)
+
+    def _boom(_p: str) -> bool:  # would fire only if wrongly consulted
+        raise AssertionError("ask must not be consulted under --no-input")
+
+    proceed = reconcile_stale_worktrees(local_repo, wr, _boom, interactive=False)
+    assert proceed is True
+    assert not (wr / "verify-t1").exists()
+
+
+def test_reconcile_no_stale_proceeds_silently(local_repo: Path, tmp_path: Path, capsys) -> None:
+    from orchestrator.local_merge import reconcile_stale_worktrees
+
+    wr = tmp_path / "wr"
+    wr.mkdir()
+    proceed = reconcile_stale_worktrees(
+        local_repo, wr, lambda _p: False, interactive=True
+    )
+    assert proceed is True
+    assert "cleanup" not in capsys.readouterr().out  # silent when nothing to do
+
+
 def test_cli_no_ready_branches_returns_zero(local_repo: Path, tmp_path: Path, capsys) -> None:
     from orchestrator.local_merge import main
 

@@ -841,6 +841,113 @@ def _neutralize_agent_config(wt: Path) -> None:
                 _remove(Path(root) / name)
 
 
+def _clear_worktree_path(repo: Path, wt: Path) -> None:
+    """Free ``wt`` for a fresh ``git worktree add``, whatever a prior run left.
+
+    ``git worktree remove --force`` (check=False) is not enough on its own: it
+    fails silently when ``wt`` is no longer a registered worktree (a crashed
+    ``worktree add``, or a prune that dropped the admin record but not the dir)
+    or when the OS refuses the delete (an open handle on a DrvFs ``/mnt/c``
+    path). Either way the directory survives and the next ``worktree add`` dies
+    with 'already exists' - so the create must be idempotent. Prune stale admin
+    records, ask git to remove, then if the path is STILL on disk delete it
+    ourselves and prune again to drop the now-dangling record. If even that
+    leaves the path (a truly locked file), fail closed with an actionable
+    message rather than let ``worktree add`` raise the cryptic collision.
+    """
+    _remove_worktree(repo, wt)
+    if wt.exists():
+        raise RuntimeError(
+            f"could not clear the stale worktree path {wt} before re-adding it "
+            "- a process may be holding a file open on it. Close it (or delete "
+            "the directory by hand) and re-run."
+        )
+
+
+def _remove_worktree(repo: Path, wt: Path) -> None:
+    """Best-effort teardown of an engine scratch worktree, resilient to the
+    DrvFs reality that ``git worktree remove`` can fail to delete the dir.
+
+    Prune stale admin records, ask git to remove, then if the path SURVIVES on
+    disk delete it ourselves and prune again to drop the now-dangling record.
+    Never raises: it is the ``finally`` cleanup after a gate run as well as the
+    pre-add clear, so it must not mask the gate's own result/exception. The
+    caller that needs a guaranteed-clear path re-checks ``wt.exists()`` itself.
+    """
+    _git(repo, "worktree", "prune")
+    if wt.is_symlink():
+        wt.unlink(missing_ok=True)  # never follow it; unlink the link itself
+    elif wt.exists():
+        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+        if wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
+    _git(repo, "worktree", "prune")
+
+
+def stale_verify_worktrees(work_root: Path) -> list[Path]:
+    """Engine scratch worktrees (verify-* / verify-merge-*) left on disk by a
+    prior interrupted run.
+
+    The dedicated merge work_root holds nothing else under the ``verify-``
+    prefix - during a live run each is created and torn down inside a single
+    gate call - so any match is by construction a stale leftover, never a
+    branch checkout the Director is working in (those carry no ``verify-``
+    prefix, e.g. a ``selfupgrade-statusfix`` branch worktree). ``verify-merge-``
+    starts with ``verify-`` too, so the one prefix catches both.
+    """
+    if not work_root.is_dir():
+        return []
+    return sorted(
+        child
+        for child in work_root.iterdir()
+        if child.name.startswith("verify-")
+        and not child.is_symlink()
+        and child.is_dir()
+    )
+
+
+def reconcile_stale_worktrees(
+    repo: Path, work_root: Path, ask: Callable[[str], bool], *, interactive: bool
+) -> bool:
+    """Clear engine scratch worktrees a prior interrupted run left behind, so a
+    fresh batch never collides on ``git worktree add`` ('already exists').
+
+    The scratch is re-derivable (a detached checkout at a sha), so removing it
+    is always safe; still, an interactive operator gets to SEE what will go and
+    veto it. Returns whether the batch may proceed:
+
+    - nothing stale -> proceed (True), silently.
+    - ``interactive`` -> list the leftovers and ask; yes clears and proceeds,
+      no aborts (False) so the operator can inspect by hand.
+    - non-interactive (``--no-input``, a dry run that never merges) -> auto-clear
+      and proceed, mirroring the per-add self-heal; ``ask`` is not consulted (it
+      declines by construction there, which is not a considered 'no').
+
+    The per-add ``_clear_worktree_path`` remains the always-on safety net for
+    anything that appears mid-run or slips past this up-front pass.
+    """
+    stale = stale_verify_worktrees(work_root)
+    if not stale:
+        return True
+    print(f"[cleanup] found {len(stale)} stale verify worktree(s) from a prior run:")
+    for wt in stale:
+        print(f"  - {wt.name}")
+    if interactive and not ask("[cleanup] delete them and continue? (y/N) > "):
+        print("[cleanup] declined - nothing removed and nothing merged. Inspect")
+        print("          them by hand, then re-run.")
+        return False
+    for wt in stale:
+        _remove_worktree(repo, wt)
+    remaining = stale_verify_worktrees(work_root)
+    if remaining:
+        print("[cleanup] could NOT remove: "
+              + ", ".join(wt.name for wt in remaining))
+        print("          a process may be holding a file open; close it and re-run.")
+        return False
+    print("[cleanup] removed. proceeding...")
+    return True
+
+
 def _worktree_at_sha(repo: Path, task_id: str, work_root: Path, sha: str) -> Path:
     """Detached worktree at ``sha`` so gates run in isolation without disturbing
     the Director's main checkout.
@@ -851,9 +958,7 @@ def _worktree_at_sha(repo: Path, task_id: str, work_root: Path, sha: str) -> Pat
     differs (a fetched remote branch vs. a local ref), never what the gate sees.
     """
     wt = work_root / f"verify-{task_id}"
-    _git(repo, "worktree", "prune")
-    if wt.exists():
-        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+    _clear_worktree_path(repo, wt)
     _git(repo, "worktree", "add", "--detach", str(wt), sha)
     _neutralize_agent_config(wt)
     return wt
@@ -943,9 +1048,7 @@ def _binding_on_merged_tree(
     DockerGate instead of relying on that advisory pre-filter.
     """
     mwt = work_root / f"verify-merge-{task_id}"
-    _git(repo, "worktree", "prune")
-    if mwt.exists():
-        _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
+    _clear_worktree_path(repo, mwt)
     _git(repo, "worktree", "add", "--detach", str(mwt), base_sha)
     try:
         code, _ = _git(
@@ -981,7 +1084,7 @@ def _binding_on_merged_tree(
             frontend_gate=frontend_gate,
         )
     finally:
-        _git(repo, "worktree", "remove", "--force", str(mwt), check=False)
+        _remove_worktree(repo, mwt)
 
 
 def gather_gates(
@@ -1124,7 +1227,7 @@ def gather_gates(
             infra_overridden=restored_infra_paths(changed),
         )
     finally:
-        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+        _remove_worktree(repo, wt)
 
 
 def _role(roles_dir: Path, name: str) -> str:
@@ -1533,6 +1636,15 @@ def main(
         print("gates are WAIVED: their findings are recorded to merge-advisory.md")
         print("(committed into local main) and the branch merges anyway. The")
         print("deterministic gates (attestation/tests/coverage/scan/infra) STILL block.")
+
+    # A prior interrupted run can leave a verify-* scratch worktree on disk that
+    # collides with this run's `git worktree add`. Clear it up-front (with the
+    # operator's consent when interactive) before the batch touches any task;
+    # the per-add self-heal is still the safety net for anything mid-run.
+    if not reconcile_stale_worktrees(
+        repo, work_root, _ask_fn, interactive=not args.no_input
+    ):
+        return 1
 
     engine = LocalMergeEngine(
         # --local processes only the one named task (discovery bypassed): the
