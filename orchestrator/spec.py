@@ -30,6 +30,14 @@ REPORT_ONLY_TYPES = ("audit", "investigate")
 DRAFT_STATUS = "draft-proposal"
 DONE_STATUS = "done"
 
+# The only status strings a spec FILE may carry; omitting the line (None) means
+# runnable. 'ready'/'in-progress' are DERIVED queue states, never written into a
+# spec, so an explicit one here is rejected (fail closed). This set is exactly
+# what the report-only own-spec merge gate accepts, so a spec that parses can be
+# certified - closing the trap where a near-miss like 'draft' passed the kickoff
+# draft gate as runnable and then failed only at merge, after a full run.
+KNOWN_STATUSES = (DRAFT_STATUS, DONE_STATUS)
+
 
 class SpecError(ValueError):
     """Malformed or unrunnable task spec."""
@@ -150,6 +158,12 @@ def parse_spec_text(text: str) -> TaskSpec:
 
     risk = (fields.get("risk") or "").strip().lower() or None
 
-    return TaskSpec(
-        task_type=task_type, roles=roles, status=fields.get("status"), risk=risk
-    )
+    status = fields.get("status") or None
+    if status is not None and status not in KNOWN_STATUSES:
+        raise SpecError(
+            f"unknown status {status!r}; omit the line (runnable), "
+            f"{DRAFT_STATUS!r} (fix proposal), or {DONE_STATUS!r} (completed). "
+            f"note: {DRAFT_STATUS!r} is the draft sentinel, not 'draft'."
+        )
+
+    return TaskSpec(task_type=task_type, roles=roles, status=status, risk=risk)

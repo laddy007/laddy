@@ -158,6 +158,31 @@ def test_no_status_is_not_done(tmp_path: Path) -> None:
     assert parse_spec(p).is_done is False
 
 
+def test_unknown_status_raises(tmp_path: Path) -> None:
+    # 'draft' is a near-miss for the 'draft-proposal' sentinel: it slipped past
+    # the kickoff draft gate (which trips only on the exact sentinel) as
+    # runnable, then detonated at the report-only merge gate after a full run.
+    # Fail closed at parse instead, and name the trap in the message.
+    with pytest.raises(SpecError, match="unknown status"):
+        parse_spec(_spec(tmp_path, "---\ntype: audit\nstatus: draft\n---\n# X\n"))
+
+
+def test_explicit_ready_status_rejected(tmp_path: Path) -> None:
+    # 'ready' is a derived queue state, never written into a spec file by the
+    # engine; an explicit 'status: ready' is exactly the promotion a report-only
+    # investigator could abuse to auto-merge a runnable task. Reject it.
+    with pytest.raises(SpecError, match="unknown status"):
+        parse_spec(_spec(tmp_path, "---\ntype: feature\nstatus: ready\n---\n# X\n"))
+
+
+def test_empty_status_is_runnable(tmp_path: Path) -> None:
+    # An empty 'status:' value normalizes to omitted (runnable), not a draft.
+    spec = parse_spec(_spec(tmp_path, "---\ntype: feature\nstatus:\n---\n# X\n"))
+    assert spec.status is None
+    assert spec.is_draft is False
+    assert spec.is_done is False
+
+
 def test_parse_spec_reads_risk_field(tmp_path: Path) -> None:
     p = tmp_path / "t.md"
     p.write_text("---\ntype: feature\nrisk: high\n---\n# t\n", encoding="utf-8")
