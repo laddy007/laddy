@@ -1,21 +1,17 @@
-# Merge hold: create-spec  (blast L3, risk_decision)
+# Merge hold: create-spec  (broken - engine failure)
 
-## Sensitive surface touched
+## What failed
 
-- `orchestrator/run.py`
-- `scripts/create-spec.sh`
+- RuntimeError("git worktree add --detach /mnt/c/myprogramfiles/laddy-merge-work/verify-create-spec d63c2e63bce52242bc31c3ed1ecb7d0b58730ec6 failed: fatal: '/mnt/c/myprogramfiles/laddy-merge-work/verify-create-spec' already exists\n")
 
-## Waived judgment-gate findings (--advisory)
+The merge ENGINE failed while processing this task - an engine-side
+error (e.g. a malformed committed artifact), NOT a policy stop and
+NOT a gate verdict on the change: no gate result exists for it.
 
-- security panel blocker(s): The launcher can execute branch-controlled Claude startup configuration on the Director's trusted machine.; The untrusted change contains prior-sign-off claims capable of steering the trusted review.
+## What is needed
 
-The deterministic gates passed, but the security panel / rw2
-flagged the above and they are being WAIVED by --advisory: this
-is a risk call on a change that is NOT fully verified. The waived
-findings are recorded durably in merge-advisory.md.
+Inspect the error above and the branch's committed artifacts; push a
+fixed revision of the branch (or fix the engine defect) and re-run.
+The other ready tasks were processed normally.
 
-## Your decision
-
-Merge `create-spec` into main under --advisory? Type the
-exact task id to merge; anything else declines - you decide
-on this summary, not by reading the diff.
+`create-spec` is NOT merged and NOT deleted.
