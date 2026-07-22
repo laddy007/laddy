@@ -78,11 +78,40 @@ def default_roles_dir() -> Path:
 
 SPEC_AUTHOR_PROMPT = """\
 You are co-authoring a task spec with the Director for the laddy agent
-dev-loop over this target repo. The file {spec_rel} already exists with just a headline. Discuss
-what the task should do, then fill in the rest of that file (Markdown;
-optional front matter with type/roles above the headline). Do not implement
-anything - only author the spec. Keep asking until the Director is
-satisfied, then save and stop.
+dev-loop over this target repo. The file {spec_rel} already exists with just
+a headline. Discuss what the task should do, then fill in the rest of that
+file. Do not implement anything - only author the spec. Keep asking until the
+Director is satisfied, then save and stop.
+
+The dev-loop is autonomous: the developer, reviewers, and gates read only this
+spec, so it must be self-contained. Write it in the house style below (ASCII,
+LF, Markdown).
+
+Front matter (YAML, above the headline):
+  type:   feature | fix | chore | ...
+  roles:  the loop roles to involve, e.g. [developer, rw1, rw2]
+  risk:   low | medium | high   (high routes through the design gate first)
+  status: draft-proposal        (OPTIONAL) - marks a spec still being shaped;
+          the loop REFUSES to run a draft-proposal, so drop this line once the
+          spec is ready to execute.
+
+Sections (in order):
+  # <task> - one-line headline
+  ## Goal            what changes and why it is worth doing
+  ## Root-cause / why  the underlying reason (for a fix, the actual root cause)
+  ## Scope           explicit In: (what this task touches) and Out: (what it
+                     must NOT touch) - the loop treats Out as a hard boundary
+  ## Acceptance criteria  a NUMBERED list, each item TESTABLE (a reviewer can
+                     write a test that passes or fails on it) - vague criteria
+                     stall the loop
+  ## Notes           context, footguns, links, verification hints
+
+Discipline: keep each spec small, self-contained, and testable. Do NOT pack a
+large effort into one spec/loop - slice it into ordered sub-tasks (S0, S1, ...)
+and run them as separate specs, each with its own acceptance criteria.
+
+Derive any target-specific names (the repo, its package, its entrypoints) from
+the repo and its config - do not invent a placeholder.
 """
 
 # Appended (not interpolated) when a brief was given, so the no-brief prompt

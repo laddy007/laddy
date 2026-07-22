@@ -1,0 +1,56 @@
+{
+  "verdict": "APPROVED",
+  "risk_level": "low",
+  "files_reviewed": [
+    "scripts/create-spec.sh",
+    "scripts/lib/env_guard.sh",
+    "orchestrator/run.py",
+    "orchestrator/gitops.py",
+    "tests/test_create_spec_launcher.py",
+    "tests/test_spec_author_prompt.py",
+    ".laddy/tasks/create-spec/spec.md"
+  ],
+  "claims_verified": [
+    {
+      "claim": "Launcher runs exactly one `--phase new` invocation, no clarify/design/loop",
+      "evidence": "create-spec.sh:58 single call; test_runs_only_phase_new_exactly_once and static text-guard test both pass",
+      "verified": true
+    },
+    {
+      "claim": "env.local required, env.vps/vps.conf never sourced",
+      "evidence": "create-spec.sh:35-36 hard die; poison env.vps test still exits 0 via env.local",
+      "verified": true
+    },
+    {
+      "claim": "Exit code propagation and hint suppression on refusal",
+      "evidence": "set -euo pipefail + no trailing exit code override at create-spec.sh:58; bash exits on first failing command under errexit, confirmed by test_refusal_propagates_and_suppresses_hint",
+      "verified": true
+    },
+    {
+      "claim": "env_guard tracked-file check behaves correctly even in non-git test fixtures",
+      "evidence": "env_guard.sh treats a non-git dir / untracked file identically (quiet path); real ENGINE_DIR is a git repo with env.local gitignored, so ls-files returns nonzero and proceeds",
+      "verified": true
+    },
+    {
+      "claim": "\"draft-proposal\" and its refusal semantics named in the new prompt match actual code",
+      "evidence": "orchestrator/spec.py:30 DRAFT_STATUS = \"draft-proposal\"; run.py:218 spec.is_draft gate matches prompt's claim",
+      "verified": true
+    },
+    {
+      "claim": "Local-author -> hub -> VPS kickoff handoff is architecturally sound (Notes-level risk, not a defect)",
+      "evidence": "gitops.py:79-127 task_worktree bases a fresh worktree off origin/<branch> when the remote branch already exists (as create-spec's push creates); traced end to end, no code path breaks it",
+      "verified": true
+    },
+    {
+      "claim": "Suite/lint green",
+      "evidence": "ran independently: ruff clean; basedpyright 0 errors (only pre-existing unrelated warnings); tests/test_create_spec_launcher.py + tests/test_spec_author_prompt.py 14 passed; tests/test_run_cli.py 98 passed",
+      "verified": true
+    }
+  ],
+  "findings": [],
+  "test_assessment": "All 8 acceptance criteria have a directly corresponding test, independently re-run and passing. Failure-mode coverage is adequate for a thin, control-flow-free launcher: every validation/missing-env path asserts python is never reached, the single-phase invariant is checked both dynamically (stub recording argv) and statically (source-text scan excluding comments), and exit-code propagation plus hint suppression on a simulated _phase_new refusal is directly tested. No new control flow was introduced in _phase_new itself (diff is prompt text only), so its existing test coverage (test_run_cli.py, 98 passed) still applies unchanged.",
+  "residual_risks": [
+    "The local-author -> hub -> VPS kickoff handoff is architecturally verified by reading gitops.py but not exercised by an automated end-to-end test, per the spec's own Notes section.",
+    "Extra positional args after <task> are silently ignored rather than rejected; harmless but could mask a typo'd invocation."
+  ]
+}
